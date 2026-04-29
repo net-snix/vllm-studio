@@ -1,7 +1,28 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, GitBranch, Loader2, Play, Square, Terminal, Wrench } from "lucide-react";
+import {
+  Archive,
+  Bot,
+  ChevronDown,
+  Diff,
+  FileText,
+  GitBranch,
+  Hammer,
+  Home,
+  Loader2,
+  Lock,
+  MessageSquare,
+  PanelRight,
+  Plus,
+  Search,
+  Send,
+  Settings,
+  Square,
+  Terminal,
+  Wrench,
+} from "lucide-react";
 
 type AgentModel = {
   id: string;
@@ -25,6 +46,7 @@ type ChatMessage = {
   text: string;
   thinking?: string;
   tools?: ToolRecord[];
+  timestamp?: string;
 };
 
 type StreamPayload =
@@ -36,6 +58,18 @@ const SESSION_ID = "vllm-studio-agent";
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function nowLabel() {
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(
+    new Date(),
+  );
+}
+
+function compactNumber(value: number) {
+  if (value >= 1_000_000) return `${Math.round(value / 1_000) / 1_000}M`;
+  if (value >= 1_000) return `${Math.round(value / 100) / 10}k`;
+  return String(value);
 }
 
 function extractToolText(value: unknown): string {
@@ -55,19 +89,30 @@ export function AgentWorkspace() {
     {
       id: "intro",
       role: "system",
-      text: "T3 Code surface mounted inside vLLM Studio. Provider runtime is Pi coding-agent; models come from the configured backend /v1/models.",
+      timestamp: nowLabel(),
+      text: "T3 Code shell mounted inside vLLM Studio. The only provider is Pi coding-agent, configured from the active backend /v1/models.",
     },
   ]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
   const [loadingModels, setLoadingModels] = useState(true);
+  const [modelFilter, setModelFilter] = useState("");
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const activeModel = useMemo(
     () => models.find((model) => model.id === selectedModel),
     [models, selectedModel],
   );
+  const visibleModels = useMemo(() => {
+    const query = modelFilter.trim().toLowerCase();
+    if (!query) return models;
+    return models.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(query));
+  }, [models, modelFilter]);
+  const running = status === "running" || status === "starting";
+  const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  const toolCount = messages.reduce((sum, message) => sum + (message.tools?.length || 0), 0);
 
   useEffect(() => {
     let cancelled = false;
@@ -213,7 +258,7 @@ export function AgentWorkspace() {
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || !selectedModel || status === "running" || status === "starting") return;
+    if (!text || !selectedModel || running) return;
 
     const userId = newId("user");
     const assistantId = newId("assistant");
@@ -222,8 +267,8 @@ export function AgentWorkspace() {
     setStatus("starting");
     setMessages((current) => [
       ...current,
-      { id: userId, role: "user", text },
-      { id: assistantId, role: "assistant", text: "", tools: [] },
+      { id: userId, role: "user", text, timestamp: nowLabel() },
+      { id: assistantId, role: "assistant", text: "", tools: [], timestamp: nowLabel() },
     ]);
 
     try {
@@ -275,167 +320,390 @@ export function AgentWorkspace() {
     setStatus("idle");
   }
 
+  function newThread() {
+    setMessages([
+      {
+        id: newId("system"),
+        role: "system",
+        timestamp: nowLabel(),
+        text: "New Pi agent thread. Models are still sourced from /v1/models.",
+      },
+    ]);
+    setInput("");
+    setError("");
+  }
+
   return (
-    <div className="flex h-[100dvh] min-h-0 bg-(--bg) text-(--fg)">
-      <aside className="hidden w-64 shrink-0 border-r border-(--border) bg-(--surface) md:flex md:flex-col">
-        <div className="border-b border-(--border) p-4">
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <Bot className="h-4 w-4" />
-            T3 Code / Pi
+    <div className="agent-shell flex h-[100dvh] min-h-0 bg-[var(--agent-bg)] text-[var(--agent-fg)]">
+      <aside className="flex w-[288px] shrink-0 flex-col border-r border-[var(--agent-border)] bg-[var(--agent-card)]">
+        <div className="flex h-12 items-center gap-2 border-b border-[var(--agent-border)] px-3">
+          <div className="flex size-7 items-center justify-center rounded-md border border-[var(--agent-border)] bg-[var(--agent-bg)]">
+            <Bot className="size-4" />
           </div>
-          <p className="mt-1 text-xs leading-5 text-(--dim)">
-            Existing vLLM Studio stays intact. This is the plopped-in agent surface.
-          </p>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium">T3 Code</div>
+            <div className="truncate text-[11px] text-[var(--agent-muted)]">
+              Pi provider / vLLM Studio
+            </div>
+          </div>
+          <Link
+            href="/"
+            className="flex size-7 items-center justify-center rounded-md text-[var(--agent-muted)] hover:bg-[var(--agent-muted-bg)] hover:text-[var(--agent-fg)]"
+            title="Back to vLLM Studio"
+          >
+            <Home className="size-4" />
+          </Link>
         </div>
-        <div className="flex-1 overflow-y-auto p-3">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-(--dim)">
-            Threads
-          </div>
-          <button className="w-full border border-(--border) bg-(--bg) px-3 py-2 text-left text-sm">
-            <div className="font-medium">vLLM Studio workspace</div>
-            <div className="mt-1 text-xs text-(--dim)">Pi session: {SESSION_ID}</div>
+
+        <div className="space-y-2 border-b border-[var(--agent-border)] p-3">
+          <button
+            type="button"
+            onClick={newThread}
+            className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-[var(--agent-primary)] px-3 text-sm font-medium text-white hover:opacity-95"
+          >
+            <Plus className="size-4" /> New thread
           </button>
+          <label className="flex h-8 items-center gap-2 rounded-md border border-[var(--agent-border)] bg-[var(--agent-bg)] px-2 text-[var(--agent-muted)]">
+            <Search className="size-3.5" />
+            <input
+              value={modelFilter}
+              onChange={(event) => setModelFilter(event.target.value)}
+              placeholder="Search models"
+              className="min-w-0 flex-1 bg-transparent text-xs text-[var(--agent-fg)] outline-none placeholder:text-[var(--agent-muted)]"
+            />
+          </label>
         </div>
-        <div className="border-t border-(--border) p-3 text-xs text-(--dim)">
-          <div className="flex items-center gap-2">
-            <GitBranch className="h-3.5 w-3.5" /> Repo cwd
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          <SectionLabel>Project</SectionLabel>
+          <ThreadRow
+            active
+            title="vLLM Studio"
+            subtitle="server-configured workspace"
+            icon={GitBranch}
+          />
+          <SectionLabel className="mt-4">Threads</SectionLabel>
+          <ThreadRow
+            active
+            title="Pi agent thread"
+            subtitle={`${messages.length} messages · ${toolCount} tools`}
+            icon={MessageSquare}
+          />
+          <ThreadRow title="Archived plans" subtitle="No synced history yet" icon={Archive} muted />
+        </div>
+
+        <div className="border-t border-[var(--agent-border)] p-3 text-xs text-[var(--agent-muted)]">
+          <div className="mb-2 flex items-center justify-between">
+            <span>Provider</span>
+            <span className="rounded bg-[var(--agent-muted-bg)] px-1.5 py-0.5">Pi</span>
           </div>
-          <code className="mt-1 block truncate">server-configured workspace</code>
+          <div className="flex items-center justify-between">
+            <span>Models</span>
+            <span>{loadingModels ? "loading" : models.length}</span>
+          </div>
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-(--border) bg-(--bg) px-4">
-          <div>
-            <h1 className="text-sm font-semibold">Agent</h1>
-            <p className="text-xs text-(--dim)">
-              Pi coding-agent over OpenAI-compatible /v1/models
-            </p>
+      <main className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--agent-border)] bg-[var(--agent-bg)] px-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="truncate text-sm font-medium">Pi agent thread</h1>
+              <span className="rounded-md border border-[var(--agent-border)] px-1.5 py-0.5 text-[11px] text-[var(--agent-muted)]">
+                vLLM Studio
+              </span>
+              {activeModel?.reasoning ? (
+                <span className="rounded-md border border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-700">
+                  thinking
+                </span>
+              ) : null}
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <select
-              className="h-9 max-w-[360px] border border-(--border) bg-(--surface) px-2 text-sm outline-none"
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
-              disabled={loadingModels || status === "running" || status === "starting"}
-            >
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={() => void abortTurn()}
-              disabled={status !== "running" && status !== "starting"}
-              className="inline-flex h-9 items-center gap-2 border border-(--border) px-3 text-sm disabled:opacity-40"
-            >
-              <Square className="h-3.5 w-3.5" /> Stop
-            </button>
-          </div>
+
+          <button className="agent-toolbar-button" type="button" title="Runtime mode">
+            <Lock className="size-3.5" /> Supervised
+          </button>
+          <button className="agent-toolbar-button" type="button" title="Terminal drawer">
+            <Terminal className="size-3.5" /> Terminal
+          </button>
+          <button
+            className="agent-toolbar-button"
+            type="button"
+            onClick={() => setRightPanelOpen((value) => !value)}
+            title="Diff panel"
+          >
+            <Diff className="size-3.5" /> Diff
+          </button>
+          <button className="agent-toolbar-icon" type="button" title="Settings">
+            <Settings className="size-4" />
+          </button>
         </header>
 
         {error ? (
-          <div className="border-b border-(--err) bg-(--err)/10 px-4 py-2 text-sm text-(--err)">
+          <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-700">
             {error}
           </div>
         ) : null}
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5">
-          <div className="mx-auto max-w-5xl space-y-4">
-            {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
-            {status !== "idle" ? (
-              <div className="flex items-center gap-2 text-xs text-(--dim)">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> {status}
+        <div className="flex min-h-0 flex-1">
+          <section className="flex min-w-0 flex-1 flex-col">
+            <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+              <div className="mx-auto w-full max-w-3xl space-y-5">
+                {messages.map((message) => (
+                  <TimelineMessage key={message.id} message={message} />
+                ))}
+                {running ? <WorkingRow status={status} /> : null}
               </div>
-            ) : null}
-          </div>
-        </div>
+            </div>
 
-        <form
-          onSubmit={sendMessage}
-          className="shrink-0 border-t border-(--border) bg-(--surface) p-4"
-        >
-          <div className="mx-auto flex max-w-5xl gap-3">
-            <textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-              placeholder={
-                activeModel
-                  ? `Ask ${activeModel.name} to edit, inspect, or run commands…`
-                  : "Load a /v1/models entry first…"
-              }
-              className="min-h-20 flex-1 resize-none border border-(--border) bg-(--bg) p-3 text-sm outline-none focus:border-(--fg)"
-            />
-            <button
-              type="submit"
-              disabled={
-                !input.trim() || !selectedModel || status === "running" || status === "starting"
-              }
-              className="inline-flex h-20 w-24 items-center justify-center gap-2 border border-(--border) bg-(--fg) text-sm font-medium text-(--bg) disabled:opacity-40"
+            <form
+              onSubmit={sendMessage}
+              className="shrink-0 border-t border-[var(--agent-border)] bg-[var(--agent-bg)] px-4 py-3"
             >
-              <Play className="h-4 w-4" /> Send
-            </button>
-          </div>
-        </form>
-      </section>
+              <div className="mx-auto max-w-3xl rounded-xl border border-[var(--agent-border)] bg-[var(--agent-card)] shadow-sm">
+                <textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                  placeholder={
+                    activeModel
+                      ? `Ask ${activeModel.name} to edit, inspect, or run commands...`
+                      : "Load a /v1/models entry first..."
+                  }
+                  className="min-h-24 w-full resize-none rounded-t-xl bg-transparent px-3 py-3 text-sm leading-6 outline-none placeholder:text-[var(--agent-muted)]"
+                />
+                <div className="flex items-center gap-2 border-t border-[var(--agent-border)] px-2 py-2">
+                  <select
+                    className="h-8 max-w-[260px] rounded-md border border-[var(--agent-border)] bg-[var(--agent-bg)] px-2 text-xs outline-none"
+                    value={selectedModel}
+                    onChange={(event) => setSelectedModel(event.target.value)}
+                    disabled={loadingModels || running}
+                  >
+                    {visibleModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="hidden items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--agent-muted)] sm:flex">
+                    <Hammer className="size-3.5" /> Build
+                  </span>
+                  <span className="hidden items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--agent-muted)] sm:flex">
+                    <Lock className="size-3.5" /> Supervised
+                  </span>
+                  <div className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={() => void abortTurn()}
+                    disabled={!running}
+                    className="agent-compose-button disabled:opacity-40"
+                  >
+                    <Square className="size-3.5" /> Stop
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!input.trim() || !selectedModel || running}
+                    className="flex h-8 items-center gap-2 rounded-md bg-[var(--agent-primary)] px-3 text-sm font-medium text-white disabled:opacity-40"
+                  >
+                    <Send className="size-3.5" /> Send
+                  </button>
+                </div>
+              </div>
+            </form>
+          </section>
+
+          {rightPanelOpen ? (
+            <aside className="hidden w-[320px] shrink-0 border-l border-[var(--agent-border)] bg-[var(--agent-card)] xl:flex xl:flex-col">
+              <div className="flex h-12 items-center justify-between border-b border-[var(--agent-border)] px-3">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <PanelRight className="size-4" /> Workspace
+                </div>
+                <button
+                  className="agent-toolbar-icon"
+                  type="button"
+                  onClick={() => setRightPanelOpen(false)}
+                >
+                  <ChevronDown className="size-4 rotate-[-90deg]" />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                <PanelCard title="Model" icon={Bot}>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                    <dt className="text-[var(--agent-muted)]">id</dt>
+                    <dd className="truncate font-mono">{activeModel?.id || "none"}</dd>
+                    <dt className="text-[var(--agent-muted)]">context</dt>
+                    <dd>{activeModel ? compactNumber(activeModel.contextWindow) : "—"}</dd>
+                    <dt className="text-[var(--agent-muted)]">max output</dt>
+                    <dd>{activeModel ? compactNumber(activeModel.maxTokens) : "—"}</dd>
+                  </dl>
+                </PanelCard>
+                <PanelCard title="Activity" icon={Wrench}>
+                  <div className="space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span>Messages</span>
+                      <span>{messages.length}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span>Tool calls</span>
+                      <span>{toolCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span>Status</span>
+                      <span>{status}</span>
+                    </div>
+                  </div>
+                </PanelCard>
+                <PanelCard title="Last response" icon={FileText}>
+                  <p className="line-clamp-6 text-xs leading-5 text-[var(--agent-muted)]">
+                    {latestAssistant?.text ||
+                      latestAssistant?.thinking ||
+                      "No assistant output yet."}
+                  </p>
+                </PanelCard>
+              </div>
+            </aside>
+          ) : null}
+        </div>
+      </main>
     </div>
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function SectionLabel({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`mb-1 px-2 text-[11px] font-medium uppercase tracking-wide text-[var(--agent-muted)] ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+function ThreadRow({
+  title,
+  subtitle,
+  icon: Icon,
+  active = false,
+  muted = false,
+}: {
+  title: string;
+  subtitle: string;
+  icon: React.ComponentType<{ className?: string }>;
+  active?: boolean;
+  muted?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={`mb-1 flex w-full items-start gap-2 rounded-md px-2 py-2 text-left ${
+        active ? "bg-[var(--agent-muted-bg)]" : "hover:bg-[var(--agent-muted-bg)]"
+      } ${muted ? "opacity-60" : ""}`}
+    >
+      <Icon className="mt-0.5 size-4 shrink-0 text-[var(--agent-muted)]" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium">{title}</span>
+        <span className="block truncate text-xs text-[var(--agent-muted)]">{subtitle}</span>
+      </span>
+    </button>
+  );
+}
+
+function TimelineMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   return (
-    <article className={`border border-(--border) ${isUser ? "bg-(--surface)" : "bg-(--bg)"}`}>
-      <div className="flex items-center gap-2 border-b border-(--border) px-3 py-2 text-xs font-semibold uppercase tracking-wide text-(--dim)">
-        {isUser ? "You" : isSystem ? "System" : "Pi"}
+    <article className="group grid grid-cols-[32px_1fr] gap-3">
+      <div className="flex size-8 items-center justify-center rounded-full border border-[var(--agent-border)] bg-[var(--agent-card)] text-[var(--agent-muted)]">
+        {isUser ? (
+          <MessageSquare className="size-4" />
+        ) : isSystem ? (
+          <Settings className="size-4" />
+        ) : (
+          <Bot className="size-4" />
+        )}
       </div>
-      <div className="whitespace-pre-wrap px-3 py-3 text-sm leading-6">
-        {message.text || (!isUser && !isSystem ? "…" : "")}
-      </div>
-      {message.thinking ? (
-        <details className="border-t border-(--border) px-3 py-2 text-xs text-(--dim)">
-          <summary>Thinking</summary>
-          <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-5">
-            {message.thinking}
-          </pre>
-        </details>
-      ) : null}
-      {message.tools?.length ? (
-        <div className="border-t border-(--border) p-3">
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-(--dim)">
-            <Wrench className="h-3.5 w-3.5" /> Tools
-          </div>
-          <div className="space-y-2">
+      <div className="min-w-0">
+        <div className="mb-1 flex items-center gap-2 text-xs text-[var(--agent-muted)]">
+          <span className="font-medium text-[var(--agent-fg)]">
+            {isUser ? "You" : isSystem ? "System" : "Pi"}
+          </span>
+          {message.timestamp ? <span>{message.timestamp}</span> : null}
+        </div>
+        <div className="chat-markdown whitespace-pre-wrap text-sm leading-6">
+          {message.text || (!isUser && !isSystem ? "…" : "")}
+        </div>
+        {message.thinking ? (
+          <details className="mt-3 rounded-md border border-[var(--agent-border)] bg-[var(--agent-card)] px-3 py-2 text-xs text-[var(--agent-muted)]">
+            <summary className="cursor-pointer">Thinking</summary>
+            <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-5">
+              {message.thinking}
+            </pre>
+          </details>
+        ) : null}
+        {message.tools?.length ? (
+          <div className="mt-3 space-y-2">
             {message.tools.map((tool) => (
               <details
                 key={tool.id}
-                className="border border-(--border) bg-(--surface)"
+                className="rounded-md border border-[var(--agent-border)] bg-[var(--agent-card)]"
                 open={tool.status === "running"}
               >
                 <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs">
-                  <Terminal className="h-3.5 w-3.5" /> {tool.name}{" "}
-                  <span className="text-(--dim)">{tool.status}</span>
+                  <Terminal className="size-3.5 text-[var(--agent-muted)]" />
+                  <span className="font-medium">{tool.name}</span>
+                  <span className="text-[var(--agent-muted)]">{tool.status}</span>
                 </summary>
                 {tool.text ? (
-                  <pre className="overflow-x-auto whitespace-pre-wrap border-t border-(--border) p-3 font-mono text-[11px] leading-5">
+                  <pre className="overflow-x-auto whitespace-pre-wrap border-t border-[var(--agent-border)] p-3 font-mono text-[11px] leading-5">
                     {tool.text}
                   </pre>
                 ) : null}
               </details>
             ))}
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </article>
+  );
+}
+
+function WorkingRow({ status }: { status: string }) {
+  return (
+    <div className="grid grid-cols-[32px_1fr] gap-3 text-sm text-[var(--agent-muted)]">
+      <div className="flex size-8 items-center justify-center rounded-full border border-[var(--agent-border)] bg-[var(--agent-card)]">
+        <Loader2 className="size-4 animate-spin" />
+      </div>
+      <div className="pt-1.5">Pi agent is {status}…</div>
+    </div>
+  );
+}
+
+function PanelCard({
+  title,
+  icon: Icon,
+  children,
+}: {
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mb-3 rounded-lg border border-[var(--agent-border)] bg-[var(--agent-bg)]">
+      <div className="flex items-center gap-2 border-b border-[var(--agent-border)] px-3 py-2 text-xs font-medium">
+        <Icon className="size-3.5 text-[var(--agent-muted)]" /> {title}
+      </div>
+      <div className="p-3">{children}</div>
+    </section>
   );
 }
