@@ -37,6 +37,7 @@ export class EngineCoordinator implements EngineService {
   private readonly lifecycleMachine: EngineLifecycleMachine;
   private readonly switchLock = new AsyncLock();
   private readonly launchCancelControllers = new Map<string, AbortController>();
+  private readonly setActiveRecipeCancelControllers = new Map<string, AbortController>();
   private currentRecipe: Recipe | null = null;
 
   constructor(private readonly deps: CoordinatorDeps) {
@@ -109,6 +110,10 @@ export class EngineCoordinator implements EngineService {
     options: SetActiveRecipeOptions = {}
   ): Promise<SetActiveRecipeResult> {
     const release = await this.switchLock.acquire();
+    const cancelController = recipe ? new AbortController() : null;
+    if (recipe && cancelController) {
+      this.setActiveRecipeCancelControllers.set(recipe.id, cancelController);
+    }
     let spawnedPid: number | null = null;
     let cancelled = false;
     const publishCancelled = async (targetRecipe: Recipe): Promise<SetActiveRecipeResult> => {
@@ -126,7 +131,7 @@ export class EngineCoordinator implements EngineService {
       return { ok: false, error: "Launch cancelled" };
     };
     const abortIfNeeded = async (targetRecipe: Recipe | null): Promise<SetActiveRecipeResult | null> => {
-      if (!options.signal?.aborted) return null;
+      if (!options.signal?.aborted && !cancelController?.signal.aborted) return null;
       if (!targetRecipe) return { ok: false, error: "Operation cancelled" };
       return publishCancelled(targetRecipe);
     };
@@ -195,10 +200,12 @@ export class EngineCoordinator implements EngineService {
       };
       if (options.signal) {
         waitOptions.cancel = options.signal;
+      } else if (cancelController) {
+        waitOptions.cancel = cancelController.signal;
       }
       const ready = await this.waitForReady(waitOptions);
 
-      if (options.signal?.aborted) {
+      if (options.signal?.aborted || cancelController?.signal.aborted) {
         return publishCancelled(recipe);
       }
 
@@ -219,6 +226,12 @@ export class EngineCoordinator implements EngineService {
       await this.deps.eventManager.publishLaunchProgress(recipe.id, "error", ready.message, 0);
       return { ok: false, error: ready.message };
     } finally {
+      if (recipe && cancelController) {
+        const current = this.setActiveRecipeCancelControllers.get(recipe.id);
+        if (current === cancelController) {
+          this.setActiveRecipeCancelControllers.delete(recipe.id);
+        }
+      }
       release();
     }
   }
@@ -459,6 +472,12 @@ export class EngineCoordinator implements EngineService {
   }
 
   async cancelLaunch(recipeId: string): Promise<CancelResult> {
+    const setActiveRecipeCancel = this.setActiveRecipeCancelControllers.get(recipeId);
+    if (setActiveRecipeCancel) {
+      setActiveRecipeCancel.abort();
+      return { success: true, message: `Launch of ${recipeId} cancelled` };
+    }
+
     const cancel = this.launchCancelControllers.get(recipeId);
     if (!cancel) {
       const currentState = this.lifecycleMachine.state;

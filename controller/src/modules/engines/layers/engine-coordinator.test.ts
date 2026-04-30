@@ -33,7 +33,7 @@ const processFor = (activeRecipe: Recipe, port: number): ProcessInfo => ({
   served_model_name: activeRecipe.served_model_name ?? null,
 });
 
-const createCoordinator = (initialRecipe: Recipe | null = null): {
+const createCoordinator = (initialRecipe: Recipe | null = null, healthStatus: number = 200): {
   coordinator: EngineCoordinator;
   recipes: [Recipe, Recipe];
   launched: Recipe[];
@@ -43,7 +43,7 @@ const createCoordinator = (initialRecipe: Recipe | null = null): {
 } => {
   const server = Bun.serve({
     port: 0,
-    fetch: () => new Response("ok", { status: 200 }),
+    fetch: () => new Response("ok", { status: healthStatus }),
   });
   servers.push(server);
 
@@ -164,5 +164,23 @@ describe("EngineCoordinator.setActiveRecipe", () => {
     expect(launched).toEqual([target]);
     expect(coordinator.getCurrentRecipe()).toBe(target);
     expect(events.map((event) => event.stage)).toEqual(["launching", "waiting", "ready"]);
+  });
+
+  it("cancels an in-flight setActiveRecipe launch", async () => {
+    const { coordinator, recipes, killed, events } = createCoordinator(null, 503);
+
+    const launch = coordinator.setActiveRecipe(recipes[0]);
+    while (!events.some((event) => event.stage === "waiting")) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    await expect(coordinator.cancelLaunch(recipes[0].id)).resolves.toEqual({
+      success: true,
+      message: `Launch of ${recipes[0].id} cancelled`,
+    });
+    await expect(launch).resolves.toEqual({ ok: false, error: "Launch cancelled" });
+
+    expect(killed).toEqual([process.pid]);
+    expect(events.map((event) => event.stage)).toEqual(["launching", "waiting", "cancelled"]);
   });
 });

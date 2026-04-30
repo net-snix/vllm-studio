@@ -1,9 +1,8 @@
 // CRITICAL — Engines module routes
 import type { Hono } from "hono";
 import type { AppContext } from "../../types/context";
-import type { Recipe } from "../models/types";
 import { delay } from "../../core/async";
-import { badRequest, notFound } from "../../core/errors";
+import { badRequest, notFound, serviceUnavailable } from "../../core/errors";
 import { parseRecipe } from "../models/recipes/recipe-serializer";
 import { Event } from "../system/event-manager";
 import { CONTROLLER_EVENTS } from "../../contracts/controller-events";
@@ -20,7 +19,6 @@ import {
   getSglangRuntimeInfo,
   getExllamav3RuntimeInfo,
   getCudaInfo,
-  getSystemRuntimeInfo,
 } from "./layers/runtime-info";
 import { getRocmInfo, resolveRocmSmiTool } from "../system/platform/rocm-info";
 import {
@@ -28,7 +26,6 @@ import {
   upgradeLlamacppRuntime,
   runPlatformUpgrade,
 } from "./layers/runtime-upgrade";
-import { getGpuInfo } from "../system/platform/gpu";
 
 const resolveHfToken = (
   ctx: { req: { header: (name: string) => string | undefined } },
@@ -46,6 +43,8 @@ const resolveHfToken = (
 
 /**
  * Register engines module routes.
+ * @param app - Hono application to register routes on.
+ * @param context - Application dependency container.
  */
 export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
   // ── Recipe CRUD (from lifecycle-routes) ──
@@ -112,8 +111,12 @@ export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
     const recipeId = ctx.req.param("recipeId");
     const recipe = context.stores.recipeStore.get(recipeId);
     if (!recipe) throw notFound("Recipe not found");
-    const launch = await context.engineService.launch(recipe);
-    return ctx.json(launch);
+    const result = await context.engineService.setActiveRecipe(recipe);
+    if (!result.ok) {
+      if (result.error.toLowerCase().includes("cancelled")) throw badRequest(result.error);
+      throw serviceUnavailable(result.error);
+    }
+    return ctx.json({ success: true, message: "Launch started" });
   });
 
   app.post("/launch/:recipeId/cancel", async (ctx) => {
@@ -124,9 +127,9 @@ export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
   });
 
   app.post("/evict", async (ctx) => {
-    const force = Boolean(ctx.req.query("force"));
-    const result = await context.engineService.evict(force);
-    return ctx.json(result);
+    const result = await context.engineService.setActiveRecipe(null);
+    if (!result.ok) throw serviceUnavailable(result.error);
+    return ctx.json({ success: true, evicted_pid: null });
   });
 
   app.get("/wait-ready", async (ctx) => {
