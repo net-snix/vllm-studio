@@ -35,7 +35,8 @@ export function inferReasoningSupport(modelId: string): boolean {
     normalized.includes("r1") ||
     normalized.includes("deepseek") ||
     normalized.includes("qwen3") ||
-    normalized.includes("glm-5")
+    normalized.includes("glm-5") ||
+    normalized.includes("mimo")
   );
 }
 
@@ -60,12 +61,13 @@ export function normalizeOpenAIModel(model: OpenAIModelListItem): AgentModel {
     numberFromUnknown(metadata.context_window) ??
     numberFromUnknown(metadata.max_model_len) ??
     128_000;
+  const fallbackMaxTokens = Math.min(contextWindow, 65_536);
   const maxTokens =
     numberFromUnknown(model.maxTokens) ??
     numberFromUnknown(model.max_tokens) ??
     numberFromUnknown(metadata.maxTokens) ??
     numberFromUnknown(metadata.max_tokens) ??
-    16_384;
+    fallbackMaxTokens;
   const explicitReasoning = metadata.reasoning ?? model.reasoning;
   const reasoning =
     typeof explicitReasoning === "boolean" ? explicitReasoning : inferReasoningSupport(id);

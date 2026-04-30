@@ -26,4 +26,16 @@ describe("agent model normalization", () => {
       maxTokensField: "max_tokens",
     });
   });
+
+  it("does not clamp local reasoning models to a small default output limit", () => {
+    const [model] = normalizeOpenAIModels({
+      data: [{ id: "MiMo-V2.5", max_model_len: 262_144 }],
+    });
+
+    expect(model).toMatchObject({
+      reasoning: true,
+      contextWindow: 262_144,
+      maxTokens: 65_536,
+    });
+  });
 });
