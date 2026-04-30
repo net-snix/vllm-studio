@@ -28,6 +28,12 @@ class BrowserBridge extends EventEmitter {
   private seq = 0;
 
   enqueue(verb: string, payload: Record<string, unknown>): Promise<BrowserResult> {
+    if (this.listenerCount("command") === 0) {
+      return Promise.reject(
+        new Error(`Browser command '${verb}' could not run because no browser panel is connected.`),
+      );
+    }
+
     const id = `browser-${Date.now().toString(36)}-${(++this.seq).toString(36)}`;
     const command: BrowserCommand = { id, verb, payload };
     return new Promise<BrowserResult>((resolve, reject) => {

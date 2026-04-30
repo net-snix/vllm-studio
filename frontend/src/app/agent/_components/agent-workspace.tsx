@@ -7,6 +7,7 @@ import {
   PROJECTS_CHANGED_EVENT,
   triggerAddProjectFlow,
 } from "@/components/projects-nav-section";
+import { sanitizeEmbeddedBrowserUrl } from "@/lib/sanitize-embedded-browser-url";
 import {
   ArrowLeft,
   ArrowRight,
@@ -68,6 +69,32 @@ const BROWSER_TOOL_KEY = "vllm-studio.agent.browserToolEnabled";
 const BROWSER_TOOL_DEFAULT_OFF_MIGRATION_KEY =
   "***************************************************";
 const COMPUTER_BROWSER_OPEN_KEY = "vllm-studio.agent.computer.browserOpen";
+const BROWSER_COMMAND_TIMEOUT_MS = 12_000;
+
+function withBrowserTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${BROWSER_COMMAND_TIMEOUT_MS / 1000}s`));
+    }, BROWSER_COMMAND_TIMEOUT_MS);
+  });
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function detectBotProtection(text: string): string | null {
+  const normalized = text.toLowerCase();
+  if (
+    normalized.includes("our systems have detected unusual traffic") ||
+    normalized.includes("/sorry/") ||
+    normalized.includes("captcha") ||
+    normalized.includes("not a robot")
+  ) {
+    return "Bot-protection page detected. Stop automated browser use for this page and ask the user to intervene or use a non-browser search source.";
+  }
+  return null;
+}
 const COMPUTER_FILES_OPEN_KEY = "vllm-studio.agent.computer.filesOpen";
 const COMPUTER_DEFAULT_CLOSED_MIGRATION_KEY = "vllm-studio.agent.computer.defaultClosedMigrated";
 const PANE_LAYOUT_KEY = "vllm-studio.agent.paneLayout";
@@ -185,9 +212,9 @@ export function AgentWorkspace() {
         try {
           switch (verb) {
             case "navigate": {
-              const url = String(payload.url || "");
-              if (!url) return { ok: false, error: "url required" };
-              await webview.loadURL(url);
+              const url = sanitizeEmbeddedBrowserUrl(String(payload.url || ""));
+              if (!url) return { ok: false, error: "valid http(s) url required" };
+              await withBrowserTimeout(webview.loadURL(url), "Browser navigation");
               setBrowserUrl(url);
               setBrowserInput(url);
               return { ok: true, data: { url } };
@@ -196,26 +223,37 @@ export function AgentWorkspace() {
               return { ok: true, data: { url: webview.getURL(), title: webview.getTitle() } };
             }
             case "get-text": {
-              const text = (await webview.executeJavaScript(
-                "document.body && document.body.innerText",
+              const text = (await withBrowserTimeout(
+                webview.executeJavaScript("document.body && document.body.innerText"),
+                "Browser text read",
               )) as string | null;
+              const protectionError = detectBotProtection(text ?? "");
+              if (protectionError) return { ok: false, error: protectionError };
               return { ok: true, data: { text: text ?? "" } };
             }
             case "get-html": {
-              const html = (await webview.executeJavaScript(
-                "document.documentElement && document.documentElement.outerHTML",
+              const html = (await withBrowserTimeout(
+                webview.executeJavaScript(
+                  "document.documentElement && document.documentElement.outerHTML",
+                ),
+                "Browser HTML read",
               )) as string | null;
+              const protectionError = detectBotProtection(html ?? "");
+              if (protectionError) return { ok: false, error: protectionError };
               return { ok: true, data: { html: html ?? "" } };
             }
             case "screenshot": {
-              const image = await webview.capturePage();
+              const image = await withBrowserTimeout(webview.capturePage(), "Browser screenshot");
               return { ok: true, data: { dataUri: image.toDataURL() } };
             }
             case "click": {
               const selector = String(payload.selector || "");
               if (!selector) return { ok: false, error: "selector required" };
               const script = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { found: false }; (el).click(); return { found: true }; })()`;
-              const result = (await webview.executeJavaScript(script, true)) as { found: boolean };
+              const result = (await withBrowserTimeout(
+                webview.executeJavaScript(script, true),
+                "Browser click",
+              )) as { found: boolean };
               return {
                 ok: result.found,
                 data: result,
@@ -224,17 +262,29 @@ export function AgentWorkspace() {
             }
             case "scroll": {
               const deltaY = Number(payload.deltaY ?? 0);
-              await webview.executeJavaScript(`window.scrollBy(0, ${deltaY})`);
+              await withBrowserTimeout(
+                webview.executeJavaScript(`window.scrollBy(0, ${deltaY})`),
+                "Browser scroll",
+              );
               return {
                 ok: true,
-                data: { deltaY, scrollY: await webview.executeJavaScript("window.scrollY") },
+                data: {
+                  deltaY,
+                  scrollY: await withBrowserTimeout(
+                    webview.executeJavaScript("window.scrollY"),
+                    "Browser scroll position read",
+                  ),
+                },
               };
             }
             case "fill": {
               const selector = String(payload.selector || "");
               const value = String(payload.value ?? "");
               const script = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { found: false }; el.focus(); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return { found: true }; })()`;
-              const result = (await webview.executeJavaScript(script, true)) as { found: boolean };
+              const result = (await withBrowserTimeout(
+                webview.executeJavaScript(script, true),
+                "Browser fill",
+              )) as { found: boolean };
               return {
                 ok: result.found,
                 data: result,
@@ -255,8 +305,8 @@ export function AgentWorkspace() {
       if (!iframe) return { ok: false, error: "Browser panel not mounted" };
       switch (verb) {
         case "navigate": {
-          const url = String(payload.url || "");
-          if (!url) return { ok: false, error: "url required" };
+          const url = sanitizeEmbeddedBrowserUrl(String(payload.url || ""));
+          if (!url) return { ok: false, error: "valid http(s) url required" };
           iframe.src = url;
           setBrowserUrl(url);
           setBrowserInput(url);
@@ -507,7 +557,8 @@ export function AgentWorkspace() {
 
   function submitBrowserUrl(event: FormEvent) {
     event.preventDefault();
-    const next = normalizeBrowserInput(browserInput);
+    const next = sanitizeEmbeddedBrowserUrl(normalizeBrowserInput(browserInput));
+    if (!next) return;
     setBrowserInput(next);
     setBrowserUrl(next);
   }
