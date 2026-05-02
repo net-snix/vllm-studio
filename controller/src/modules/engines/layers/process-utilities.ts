@@ -184,6 +184,10 @@ export const buildEnvironment = (recipe: Recipe): Record<string, string> => {
     env[key] = value;
   }
 
+  if (!env["CUDA_DEVICE_ORDER"]) {
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID";
+  }
+
   const readExtraArgument = (key: string): unknown => {
     if (Object.prototype.hasOwnProperty.call(recipe.extra_args, key)) {
       return recipe.extra_args[key];
