@@ -14,6 +14,7 @@ import { fetchLocal } from "../../http/local-fetch";
 import { registerMonitoringRoutes } from "./metrics-routes";
 import { registerLogsRoutes } from "./logs-routes";
 import { registerUsageRoutes } from "./usage-routes";
+import { registerLinuxDashboardRoutes } from "./linux-dashboard-routes";
 
 export const registerSystemRoutes = (app: Hono, context: AppContext): void => {
   const checkService = (host: string, port: number, timeoutMs = 1000): Promise<boolean> => {
@@ -289,4 +290,5 @@ export const registerSystemRoutes = (app: Hono, context: AppContext): void => {
   registerMonitoringRoutes(app, context);
   registerLogsRoutes(app, context);
   registerUsageRoutes(app, context);
+  registerLinuxDashboardRoutes(app, context);
 };

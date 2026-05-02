@@ -54,6 +54,8 @@ export const createApp = (context: AppContext): Hono => {
   app.use("*", createMutatingRateLimitMiddleware(context));
   app.use("*", createMutatingAuthMiddleware(context));
 
+  app.get("/health", (ctx) => ctx.json({ ok: true }));
+
   // Register all routes
   registerSystemRoutes(app, context);
   registerEngineRoutes(app, context);

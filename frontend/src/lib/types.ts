@@ -11,6 +11,7 @@ export type * from "./types/recipes/recipes";
 export type * from "./types/recipes/runtime";
 
 export type * from "./types/system/config";
+export type * from "./types/system/linux-dashboard";
 export type * from "./types/system/logs";
 export type * from "./types/system/metrics";
 export type * from "./types/system/process";

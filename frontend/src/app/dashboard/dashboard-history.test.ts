@@ -1,0 +1,162 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LinuxDashboardSnapshot } from "@/lib/types";
+import {
+  appendDashboardHistory,
+  getCpuUsageSamples,
+  getGpuUsageSeries,
+  loadStoredDashboardHistory,
+  storeDashboardHistory,
+} from "./dashboard-history";
+
+const makeSnapshot = (
+  collectedAt: string,
+  cpuUsage: number,
+  gpuUsage: number[],
+): LinuxDashboardSnapshot => ({
+  collected_at: collectedAt,
+  host: {
+    hostname: "test-host",
+    platform: "linux",
+    kernel: "test",
+    arch: "x64",
+    uptime_seconds: 100,
+    load_average: [0.1, 0.2, 0.3],
+    cpu_cores: 8,
+    cpu_model: "Test CPU",
+    cpu_physical_cores: 4,
+    cpu_threads: 8,
+    target: "controller-host",
+  },
+  cpu: {
+    usage_percent: cpuUsage,
+    cores: 8,
+    load_percent_1m: cpuUsage,
+    power_draw_watts: 42,
+  },
+  memory: {
+    total_bytes: 100,
+    available_bytes: 50,
+    used_bytes: 50,
+    used_percent: 50,
+    swap_total_bytes: 0,
+    swap_used_bytes: 0,
+  },
+  gpus: gpuUsage.map((usage, index) => ({
+    index,
+    name: `GPU ${index}`,
+    uuid: `GPU-${index}`,
+    pci_bus_id: null,
+    utilization_percent: usage,
+    memory_total_bytes: 100,
+    memory_used_bytes: 10,
+    memory_used_percent: 10,
+    temperature_c: 40,
+    fan_percent: 20,
+    power_draw_watts: 100,
+    power_limit_watts: 300,
+    status: "ok",
+  })),
+  disks: [],
+  fans: [],
+  thermals: [],
+  services: [],
+  containers: [],
+  docker_error: null,
+  alerts: [],
+});
+
+const stubStorage = (): Map<string, string> => {
+  const values = new Map<string, string>();
+  vi.stubGlobal("window", {
+    localStorage: {
+      getItem: (key: string): string | null => values.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        values.set(key, value);
+      },
+    },
+  });
+  return values;
+};
+
+describe("dashboard history", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("deduplicates snapshots and keeps the newest samples inside the limit", () => {
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+      makeSnapshot("2026-04-29T10:00:10.000Z", 20, [30]),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot, 2),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    expect(history.map((point) => point.collected_at)).toEqual([
+      "2026-04-29T10:00:05.000Z",
+      "2026-04-29T10:00:10.000Z",
+    ]);
+
+    const deduped = appendDashboardHistory(
+      history,
+      makeSnapshot("2026-04-29T10:00:10.000Z", 99, [99]),
+      2,
+    );
+    expect(deduped).toBe(history);
+  });
+
+  it("returns a separate utilization series for each GPU", () => {
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
+      makeSnapshot("2026-04-29T10:00:05.000Z", 10, [25, 70]),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    expect(getGpuUsageSeries(history, { index: 0, name: "GPU 0", uuid: "GPU-0" })).toEqual([
+      20, 25,
+    ]);
+    expect(getGpuUsageSeries(history, { index: 1, name: "GPU 1", uuid: "GPU-1" })).toEqual([
+      80, 70,
+    ]);
+  });
+
+  it("returns timestamped CPU samples for time-window charts", () => {
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    expect(getCpuUsageSamples(history)).toEqual([
+      { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 10 },
+      { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 15 },
+    ]);
+  });
+
+  it("persists and restores valid browser history", () => {
+    stubStorage();
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    storeDashboardHistory(history);
+
+    expect(loadStoredDashboardHistory()).toEqual(history);
+  });
+
+  it("ignores invalid stored history", () => {
+    const storage = stubStorage();
+    storage.set("vllm-studio-dashboard-history", JSON.stringify([{ time: "bad" }]));
+
+    expect(loadStoredDashboardHistory()).toEqual([]);
+  });
+});

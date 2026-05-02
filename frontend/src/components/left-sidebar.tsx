@@ -6,6 +6,7 @@ import {
   BarChart3,
   Database,
   HardDrive,
+  LayoutDashboard,
   Server,
   Settings,
   Sun,
@@ -22,6 +23,7 @@ import { ProjectsNavSection } from "@/components/projects-nav-section";
 import { ModelStopConfirm } from "@/components/model-stop-confirm";
 
 const tabs = [
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/", label: "Status", icon: BarChart3 },
   { href: "/usage", label: "Usage", icon: Database },
   { href: "/recipes", label: "Models", icon: HardDrive },
