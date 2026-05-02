@@ -10,11 +10,14 @@ vi.mock("@/lib/api-settings", () => ({
 
 const getApiSettingsMock = vi.mocked(getApiSettings);
 const ALLOWLIST_ENV_KEY = "VLLM_STUDIO_PROXY_OVERRIDE_ALLOWLIST";
+const TRUST_PRIVATE_OVERRIDES_ENV_KEY = "VLLM_STUDIO_TRUST_PRIVATE_BACKEND_OVERRIDES";
 
 describe("GET /api/proxy/[...path]", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     delete process.env[ALLOWLIST_ENV_KEY];
+    delete process.env[TRUST_PRIVATE_OVERRIDES_ENV_KEY];
+    delete process.env.VLLM_STUDIO_DATA_DIR;
     getApiSettingsMock.mockResolvedValue({
       backendUrl: "https://api.example.test",
       apiKey: "test-key",
@@ -25,6 +28,8 @@ describe("GET /api/proxy/[...path]", () => {
 
   afterEach(() => {
     delete process.env[ALLOWLIST_ENV_KEY];
+    delete process.env[TRUST_PRIVATE_OVERRIDES_ENV_KEY];
+    delete process.env.VLLM_STUDIO_DATA_DIR;
   });
 
   it("falls back to configured backend when cookie override returns plain-text 404", async () => {
@@ -142,6 +147,51 @@ describe("GET /api/proxy/[...path]", () => {
 
   it("allows private network override URLs when allowlisted", async () => {
     process.env[ALLOWLIST_ENV_KEY] = "http://10.0.0.10:8080";
+
+    const upstreamFetch = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ running: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", upstreamFetch);
+
+    const request = new NextRequest("http://localhost/api/proxy/status", {
+      method: "GET",
+      headers: {
+        "X-Backend-Url": "http://10.0.0.10:8080",
+      },
+    });
+
+    const response = await GET(request, { params: Promise.resolve({ path: ["status"] }) });
+
+    expect(response.status).toBe(200);
+    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+    expect(upstreamFetch.mock.calls[0]?.[0]).toBe("http://10.0.0.10:8080/status");
+  });
+
+  it("does not trust private overrides just because a data directory is configured", async () => {
+    process.env.VLLM_STUDIO_DATA_DIR = "/tmp/vllm-studio-data";
+
+    const upstreamFetch = vi.fn();
+    vi.stubGlobal("fetch", upstreamFetch);
+
+    const request = new NextRequest("http://localhost/api/proxy/status", {
+      method: "GET",
+      headers: {
+        "X-Backend-Url": "http://10.0.0.10:8080",
+      },
+    });
+
+    const response = await GET(request, { params: Promise.resolve({ path: ["status"] }) });
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("x-backend-override-invalid")).toBe("1");
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it("allows private network override URLs when explicitly trusted", async () => {
+    process.env[TRUST_PRIVATE_OVERRIDES_ENV_KEY] = "true";
 
     const upstreamFetch = vi.fn().mockResolvedValueOnce(
       new Response(JSON.stringify({ running: true }), {

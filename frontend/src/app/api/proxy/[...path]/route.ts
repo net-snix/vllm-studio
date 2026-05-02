@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getApiSettings } from "@/lib/api-settings";
 
 const OVERRIDE_ALLOWLIST_ENV_KEY = "VLLM_STUDIO_PROXY_OVERRIDE_ALLOWLIST";
+const TRUST_PRIVATE_OVERRIDES_ENV_KEY = "VLLM_STUDIO_TRUST_PRIVATE_BACKEND_OVERRIDES";
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 5_000;
 const DOWNLOAD_UPSTREAM_TIMEOUT_MS = 120_000;
 const SYSTEM_UPSTREAM_TIMEOUT_MS = 20_000;
@@ -122,8 +123,7 @@ function isPrivateUrl(urlString: string): boolean {
 }
 
 function isTrustedPrivateOverride(urlString: string, defaultBackendUrl: string): boolean {
-  // Desktop app (Electron) runs entirely locally — all private IPs are trusted.
-  if (process.env.VLLM_STUDIO_DATA_DIR) return true;
+  if (process.env[TRUST_PRIVATE_OVERRIDES_ENV_KEY] === "true") return true;
 
   const targetOrigin = normalizeOrigin(urlString);
   if (!targetOrigin) return false;
