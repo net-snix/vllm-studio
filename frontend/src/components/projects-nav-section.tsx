@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
 import {
   ChatIcon,
   ChevronDownIcon,
@@ -40,7 +39,6 @@ type SessionSummary = {
   turnCount: number;
 };
 
-const DIRECTORY_PICKER_PROPS = { webkitdirectory: "" } as Record<string, string>;
 const ADD_PROJECT_EVENT = "vllm-studio.agent.addProject";
 export const SESSIONS_CHANGED_EVENT = "vllm-studio.agent.sessionsChanged";
 export const PROJECTS_CHANGED_EVENT = "vllm-studio.agent.projectsChanged";
@@ -154,7 +152,6 @@ function notifyProjectsChanged() {
 
 type DesktopBridge = {
   openDirectory?: () => Promise<ProjectEntry | null>;
-  getPathForFile?: (file: File) => string;
   listProjects?: () => Promise<ProjectEntry[]>;
   removeProject?: (id: string) => Promise<{ ok: true }>;
 };
@@ -166,7 +163,6 @@ function getDesktopBridge(): DesktopBridge | null {
   if (!candidate) return null;
   const hasBridgeMethod =
     typeof candidate.openDirectory === "function" ||
-    typeof candidate.getPathForFile === "function" ||
     typeof candidate.listProjects === "function" ||
     typeof candidate.removeProject === "function";
   if (!hasBridgeMethod) return null;
@@ -215,7 +211,9 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
     loadActiveAgentSessions(),
   );
   const [addError, setAddError] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pathFormOpen, setPathFormOpen] = useState(false);
+  const [pathInput, setPathInput] = useState("");
+  const [addingProject, setAddingProject] = useState(false);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -294,32 +292,27 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
       }
       return;
     }
-    fileInputRef.current?.click();
+    setPathFormOpen(true);
   };
 
-  const handleFolderSelection = async (event: ChangeEvent<HTMLInputElement>) => {
+  const submitPathProject = async () => {
     setAddError("");
-    const firstFile = event.target.files?.[0];
-    event.target.value = "";
-    if (!firstFile) return;
-    const desktopBridge = getDesktopBridge();
-    const selectedPath =
-      desktopBridge?.getPathForFile?.(firstFile) || (firstFile as File & { path?: string }).path;
-    const relativeRoot = firstFile.webkitRelativePath.split("/")[0] ?? "";
-    const directoryPath =
-      selectedPath && relativeRoot
-        ? selectedPath.slice(0, selectedPath.lastIndexOf(relativeRoot) + relativeRoot.length)
-        : selectedPath;
+    const directoryPath = pathInput.trim();
     if (!directoryPath) {
-      setAddError("This browser does not expose a selectable folder path.");
+      setAddError("Enter a path on the Linux host.");
       return;
     }
+    setAddingProject(true);
     try {
       const project = await addProjectFromPath(directoryPath);
       upsertProject(project);
+      setPathInput("");
+      setPathFormOpen(false);
       void loadProjects();
     } catch (error) {
       setAddError(error instanceof Error ? error.message : "Failed to add project");
+    } finally {
+      setAddingProject(false);
     }
   };
 
@@ -353,15 +346,7 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
   }, []);
 
   if (!expanded) {
-    return (
-      <input
-        {...DIRECTORY_PICKER_PROPS}
-        ref={fileInputRef}
-        type="file"
-        className="hidden"
-        onChange={handleFolderSelection}
-      />
-    );
+    return null;
   }
 
   return (
@@ -369,13 +354,6 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
       <div className="mt-2 flex h-7 items-center px-3 text-[10px] font-medium uppercase tracking-wide text-(--dim)">
         Projects
       </div>
-      <input
-        {...DIRECTORY_PICKER_PROPS}
-        ref={fileInputRef}
-        type="file"
-        className="hidden"
-        onChange={handleFolderSelection}
-      />
       <button
         type="button"
         onClick={handleAddProject}
@@ -384,13 +362,50 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
         <PlusIcon className="w-3 h-3 shrink-0" />
         <span className="truncate text-sm font-medium text-(--fg)">Add project</span>
       </button>
+      {pathFormOpen ? (
+        <form
+          className="flex flex-col gap-1 px-3 pb-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitPathProject();
+          }}
+        >
+          <input
+            value={pathInput}
+            onChange={(event) => setPathInput(event.target.value)}
+            placeholder="/path/on/linux/host/project"
+            className="h-8 min-w-0 border border-(--line) bg-(--bg) px-2 text-[11px] text-(--fg) outline-none placeholder:text-(--dim) focus:border-(--fg)"
+            autoFocus
+          />
+          <div className="flex items-center gap-1">
+            <button
+              type="submit"
+              disabled={addingProject}
+              className="h-7 border border-(--line) px-2 text-[10px] font-medium uppercase tracking-wide text-(--fg) hover:bg-(--surface) disabled:opacity-50"
+            >
+              {addingProject ? "Adding" : "Add"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setPathFormOpen(false);
+                setPathInput("");
+                setAddError("");
+              }}
+              className="h-7 border border-transparent px-2 text-[10px] font-medium uppercase tracking-wide text-(--dim) hover:text-(--fg)"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
       {projects.length === 0 ? (
         <button
           type="button"
           onClick={handleAddProject}
           className="px-3 py-1.5 text-left text-[11px] text-(--dim) hover:text-(--fg)"
         >
-          No projects yet — pick a folder to get started.
+          No projects yet — add a Linux host path to get started.
         </button>
       ) : (
         projects.map((project) => (
