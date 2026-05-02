@@ -1,6 +1,17 @@
 # vLLM Studio
 
-Unified local AI workstation for model lifecycle, chat/agent workflows, orchestration, observability, and remote deployment.
+Unified local AI workstation for model lifecycle, chat/agent workflows, orchestration, observability, and Linux GPU-host deployment.
+
+## Linux-hosted deployment
+
+The recommended operational shape is to run both the controller and frontend on
+the GPU machine. The browser can live anywhere, but model paths, recipes, GPU
+telemetry, and vLLM/SGLang launches stay local to the hardware.
+
+- Controller: native Bun service on the GPU host
+- Frontend: native Next.js service on the GPU host
+- Model servers: launched by the controller on the same host
+- Remote access: expose the frontend through your private network or an SSH tunnel
 
 ## Release: v1.13.0
 
@@ -17,6 +28,7 @@ This release consolidates major repo changes currently in the tree, including:
 
 - Overview: docs/README.md
 - Setup and deployment: docs/operations.md
+- Linux dashboard: docs/linux-dashboard.md
 - Environment variables: docs/environment.md
 
 ## Repository layout

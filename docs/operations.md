@@ -1,98 +1,120 @@
+---
+summary: Runtime, access, service, and verification notes for Linux-hosted vLLM Studio installs.
+read_when:
+  - Deploying or restarting vLLM Studio on a Linux GPU host.
+  - Debugging browser access to a remote-hosted web UI.
+  - Changing model launch, recipe, GPU, or service behavior.
+---
+
 # Operations
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Remote host: 10.0.0.10  (AMD EPYC 7443P, 504 GB, 8× 3090) │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  Native on host                                             │ │
-│  │                                                             │ │
-│  │  controller (bun)    :8080  lifecycle, GPU, chat, recipes   │ │
-│  │  frontend   (next)   :3000  web UI                          │ │
-│  │  vLLM / SGLang       :8000  inference (managed separately)  │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │  Docker (infra only)                                        │ │
-│  │                                                             │ │
-│  │  postgres:16         :5432  LiteLLM database                │ │
-│  │  litellm             :4100  API gateway / cost tracking     │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
+Run vLLM Studio directly on the Linux GPU host:
+
+```text
+Browser
+  |
+  | private network URL or SSH tunnel
+  v
+Linux GPU host
+  <repo-path>
+    controller  127.0.0.1:8080  recipes, launches, GPU telemetry, API
+    frontend    127.0.0.1:3000  Next.js web UI
+    vLLM/SGLang 0.0.0.0:8000   managed inference backend when a recipe runs
 ```
 
-Controller and frontend run **natively** (not in Docker) because the controller
-needs `nvidia-smi` for GPU monitoring and `/proc` visibility to detect running
-inference processes.
+The controller should run where the models, GPUs, `/proc`, `nvidia-smi`, and
+launch processes are. Client machines should only need browser access.
 
-## Deployment
+## Paths
 
-### Prerequisites
+Keep machine-specific paths out of the repository. Configure them in private
+operator notes or environment files.
 
-- **Remote**: Bun 1.3+, Node.js 20+, Docker, nvidia driver
-- **Local**: SSH key at `~/.ssh/linux-ai`, rsync
+Common local values:
 
-### Deploy
+- Repo path: `<repo-path>`
+- Data path: `<repo-path>/data`
+- SQLite DB: `<repo-path>/data/controller.db`
+- Model logs: `<repo-path>/data/logs`
+- Model root: `<model-root>`
+
+## Services
+
+Production-style installs should run the controller and frontend under the host
+service manager, for example systemd.
+
+Example service names:
+
+- `vllm-studio-controller.service`
+- `vllm-studio-frontend.service`
+
+Useful checks:
 
 ```bash
-./scripts/deploy-remote.sh            # full deploy
-./scripts/deploy-remote.sh controller # controller only
-./scripts/deploy-remote.sh frontend   # frontend only
-./scripts/deploy-remote.sh status     # check what's running
+systemctl status vllm-studio-controller --no-pager
+systemctl status vllm-studio-frontend --no-pager
+journalctl -u vllm-studio-controller -n 100 --no-pager
+journalctl -u vllm-studio-frontend -n 100 --no-pager
 ```
 
-The script does four things in order:
+## Access
 
-1. **rsync** — pushes `controller/src/`, `frontend/src/`, `shared/`, `config/` to the remote
-2. **install** — runs `bun install` and `npm install` on the remote
-3. **restart** — kills old processes, starts new ones via `nohup`, waits for the port
-4. **verify** — hits every health endpoint and prints GPU / model status
-
-### SSH access
+Preferred access is a private-network URL that proxies or routes to the
+frontend. If that is unavailable, use an SSH tunnel:
 
 ```bash
-ssh -i ~/.ssh/linux-ai <remote-user>@<remote-host>
+ssh -N -L 3300:127.0.0.1:3000 <linux-host>
 ```
 
-Key file: `~/.ssh/linux-ai` (RSA key, no passphrase).
-Remote project path: `<remote-project-path>`.
+Then open:
 
-### Logs
+```text
+http://127.0.0.1:3300
+```
+
+Binding the app to `127.0.0.1` on the Linux host and exposing it through a
+private network proxy keeps the service off public interfaces.
+
+## Health Checks
+
+From the Linux host:
 
 ```bash
-ssh -i ~/.ssh/linux-ai <remote-user>@<remote-host> tail -f /tmp/controller-stdout.log
-ssh -i ~/.ssh/linux-ai <remote-user>@<remote-host> tail -f /tmp/frontend-stdout.log
-ssh -i ~/.ssh/linux-ai <remote-user>@<remote-host> docker logs -f vllm-studio-litellm
+curl -sS http://127.0.0.1:8080/health
+curl -sS http://127.0.0.1:8080/status
+curl -sS http://127.0.0.1:8080/gpus
+curl -I http://127.0.0.1:3000
 ```
 
-## Health endpoints
-
-| Endpoint          | URL                                          |
-| ----------------- | -------------------------------------------- |
-| Controller health | `GET :8080/health`                           |
-| Controller status | `GET :8080/status`                           |
-| GPU list          | `GET :8080/gpus`                             |
-| OpenAPI spec      | `GET :8080/api/spec`                         |
-| Swagger UI        | `GET :8080/api/docs`                         |
-| Frontend          | `GET :3000`                                  |
-| Frontend proxy    | `GET :3000/api/proxy/health`                 |
-| LiteLLM           | `GET :4100/health` (requires API key header) |
-| vLLM              | `GET :8000/v1/models`                        |
-
-## Local development
+When a model is running:
 
 ```bash
-cd controller && bun install && bun --watch src/main.ts
-cd frontend && npm install && npm run dev
+curl -sS http://127.0.0.1:8000/v1/models
 ```
 
-Set `VLLM_STUDIO_MOCK_INFERENCE=true` in `.env` to run without a real inference backend.
+## Model Launch Notes
 
-## Data and persistence
+Recipe GPU selection uses `CUDA_VISIBLE_DEVICES`. The controller sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` so device numbers match `nvidia-smi` ordering on
+mixed-GPU hosts.
 
-- Controller SQLite DB: `data/controller.db`
-- Chat history: `data/chats/`
-- Model logs: `data/logs/`
-- Postgres data: `data/postgres/` (Docker volume mount)
+If a large recipe unexpectedly OOMs, check:
+
+```bash
+nvidia-smi
+tail -n 120 <repo-path>/data/logs/<recipe-log>.log
+```
+
+## Dashboard Disk Config
+
+The Linux Dashboard collects root disk telemetry by default. Add local mount
+points with:
+
+```bash
+VLLM_STUDIO_DASHBOARD_DISKS="root:/,models:/models,training:/training"
+```
+
+Use labels such as `models` and `training` to enable the dashboard's higher
+capacity thresholds without committing local paths to Git.
