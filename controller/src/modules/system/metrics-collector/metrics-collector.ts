@@ -142,6 +142,45 @@ const firstMetric = (metrics: Record<string, number>, names: string[]): number =
   return 0;
 };
 
+export const counterDelta = (previous: number, current: number): number => {
+  if (!Number.isFinite(previous) || !Number.isFinite(current)) return 0;
+  if (current < previous) return 0;
+  return current - previous;
+};
+
+const recordUsageRows = (
+  context: AppContext,
+  modelId: string,
+  backend: string,
+  promptTokens: number,
+  completionTokens: number,
+  requestCount: number
+): void => {
+  const rows = Math.max(1, Math.round(requestCount));
+  const promptPerRow = Math.floor(promptTokens / rows);
+  const completionPerRow = Math.floor(completionTokens / rows);
+  let remainingPrompt = promptTokens;
+  let remainingCompletion = completionTokens;
+
+  for (let index = 0; index < rows; index += 1) {
+    const prompt =
+      index === rows - 1 ? remainingPrompt : Math.min(remainingPrompt, promptPerRow);
+    const completion =
+      index === rows - 1 ? remainingCompletion : Math.min(remainingCompletion, completionPerRow);
+    remainingPrompt -= prompt;
+    remainingCompletion -= completion;
+    context.stores.inferenceRequestStore.record({
+      model: modelId,
+      source: "backend-metrics",
+      provider: backend,
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      status: 200,
+      streamed: false,
+    });
+  }
+};
+
 export const startMetricsCollector = (context: AppContext): (() => void) => {
   let running = true;
   let lastVllmMetrics: Record<string, number> = {};
@@ -152,6 +191,10 @@ export const startMetricsCollector = (context: AppContext): (() => void) => {
   let lastLlamacppPromptThroughput = 0;
   let lastLlamacppGenerationThroughput = 0;
   let sessionModelId: string | null = null;
+  let backendUsageModelId: string | null = null;
+  let backendUsagePromptTokens = 0;
+  let backendUsageCompletionTokens = 0;
+  let backendUsageRequests = 0;
   let sessionPeaks: SessionPeaks = emptyPeaks();
   let metricsUnavailableUntil = 0;
 
@@ -302,6 +345,7 @@ export const startMetricsCollector = (context: AppContext): (() => void) => {
         let kvCacheUsage = 0;
         let promptTokensTotal = 0;
         let generationTokensTotal = 0;
+        let requestsTotal = 0;
         let avgTtftMs = 0;
 
         if (current.backend === "vllm" || current.backend === "sglang") {
@@ -376,6 +420,18 @@ export const startMetricsCollector = (context: AppContext): (() => void) => {
           );
           promptTokensTotal = Number(firstMetric(vllmMetrics, promptTokenNames));
           generationTokensTotal = Number(firstMetric(vllmMetrics, generationTokenNames));
+          requestsTotal = Number(
+            firstMetric(
+              vllmMetrics,
+              isSglang
+                ? ["sglang:e2e_request_latency_seconds_count", "sglang:num_requests_total"]
+                : [
+                    "vllm:e2e_request_latency_seconds_count",
+                    "vllm:request_success_total",
+                    "vllm:num_requests_total",
+                  ]
+            )
+          );
 
           const ttftSumName = isSglang
             ? "sglang:time_to_first_token_seconds_sum"
@@ -390,6 +446,44 @@ export const startMetricsCollector = (context: AppContext): (() => void) => {
           const dTtftCount = currentTtftCount - previousTtftCount;
           if (dTtftCount > 0) {
             avgTtftMs = ((currentTtftSum - previousTtftSum) / dTtftCount) * 1000;
+          }
+
+          if (backendUsageModelId !== modelId) {
+            backendUsageModelId = modelId;
+            backendUsagePromptTokens = promptTokensTotal;
+            backendUsageCompletionTokens = generationTokensTotal;
+            backendUsageRequests = requestsTotal;
+          } else {
+            const promptDelta = counterDelta(backendUsagePromptTokens, promptTokensTotal);
+            const completionDelta = counterDelta(
+              backendUsageCompletionTokens,
+              generationTokensTotal
+            );
+            const requestDelta = counterDelta(backendUsageRequests, requestsTotal);
+            if (promptDelta > 0 || completionDelta > 0) {
+              context.stores.lifetimeMetricsStore.addPromptTokens(promptDelta);
+              context.stores.lifetimeMetricsStore.addTokens(promptDelta);
+              context.stores.lifetimeMetricsStore.addCompletionTokens(completionDelta);
+              context.stores.lifetimeMetricsStore.addTokens(completionDelta);
+              context.stores.lifetimeMetricsStore.addRequests(Math.max(1, Math.round(requestDelta)));
+              try {
+                recordUsageRows(
+                  context,
+                  modelId,
+                  current.backend,
+                  Math.round(promptDelta),
+                  Math.round(completionDelta),
+                  requestDelta
+                );
+              } catch (recordError) {
+                context.logger.warn(
+                  `Failed to record backend metrics usage: ${(recordError as Error).message}`
+                );
+              }
+            }
+            backendUsagePromptTokens = promptTokensTotal;
+            backendUsageCompletionTokens = generationTokensTotal;
+            backendUsageRequests = requestsTotal;
           }
 
           lastVllmMetrics = vllmMetrics;
@@ -436,6 +530,10 @@ export const startMetricsCollector = (context: AppContext): (() => void) => {
           // Unknown/non-vLLM backend: keep lifetime/power metrics and avoid stale backend-specific values.
           lastVllmMetrics = {};
           lastMetricsTime = 0;
+          backendUsageModelId = null;
+          backendUsagePromptTokens = 0;
+          backendUsageCompletionTokens = 0;
+          backendUsageRequests = 0;
           lastLlamacppSampleAt = 0;
           lastLlamacppSampleKey = "";
           lastLlamacppPromptThroughput = 0;
@@ -481,6 +579,10 @@ export const startMetricsCollector = (context: AppContext): (() => void) => {
         });
       } else {
         sessionModelId = null;
+        backendUsageModelId = null;
+        backendUsagePromptTokens = 0;
+        backendUsageCompletionTokens = 0;
+        backendUsageRequests = 0;
         sessionPeaks = emptyPeaks();
         bumpPeak(sessionPeaks, "power_watts", totalPowerWatts);
         bumpPeak(sessionPeaks, "vram_used_gb", totalVramUsedGb);

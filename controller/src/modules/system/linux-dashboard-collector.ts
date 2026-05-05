@@ -45,6 +45,7 @@ const roundOne = (value: number): number => Math.round(value * 10) / 10;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const SLOW_SNAPSHOT_TTL_MS = 30_000;
+const CPU_POWER_SAMPLE_TTL_MS = 5_000;
 
 type CpuSample = {
   idle: number;
@@ -138,14 +139,6 @@ const readCpuSample = (): CpuSample | null => {
   return { idle, total };
 };
 
-const readPrivilegedText = (pathValue: string): string | null => {
-  const value = readText(pathValue);
-  if (value !== null) return value;
-
-  const result = runCommand("sudo", ["-n", "cat", pathValue], 1_000);
-  return result.status === 0 && result.stdout ? result.stdout.trim() : null;
-};
-
 const readCpuEnergySample = (): CpuEnergySample | null => {
   const root = "/sys/class/powercap";
   if (!existsSync(root)) return null;
@@ -159,11 +152,9 @@ const readCpuEnergySample = (): CpuEnergySample | null => {
     const name = readText(join(directory, "name"));
     if (!name?.startsWith("package-")) continue;
 
-    const energy = toNumber(readPrivilegedText(join(directory, "energy_uj")) ?? undefined);
+    const energy = toNumber(readText(join(directory, "energy_uj")) ?? undefined);
     if (energy === null) continue;
-    const maxEnergyRange = toNumber(
-      readPrivilegedText(join(directory, "max_energy_range_uj")) ?? undefined
-    );
+    const maxEnergyRange = toNumber(readText(join(directory, "max_energy_range_uj")) ?? undefined);
     totalEnergyMicrojoules += energy;
     packageCount += 1;
     if (maxEnergyRange !== null) {
@@ -195,18 +186,38 @@ const calculateCpuPowerWatts = (
   return roundOne(delta / elapsedMs / 1000);
 };
 
+let cpuEnergyCache: {
+  sample: CpuEnergySample;
+  collectedAt: number;
+  powerDrawWatts: number | null;
+} | null = null;
+
+const collectCpuPowerWatts = (): number | null => {
+  const now = Date.now();
+  if (cpuEnergyCache && now - cpuEnergyCache.collectedAt < CPU_POWER_SAMPLE_TTL_MS) {
+    return cpuEnergyCache.powerDrawWatts;
+  }
+
+  const sample = readCpuEnergySample();
+  if (!sample) {
+    cpuEnergyCache = null;
+    return null;
+  }
+
+  const powerDrawWatts = cpuEnergyCache
+    ? calculateCpuPowerWatts(cpuEnergyCache.sample, sample, now - cpuEnergyCache.collectedAt)
+    : null;
+  cpuEnergyCache = { sample, collectedAt: now, powerDrawWatts };
+  return powerDrawWatts;
+};
+
 const collectCpu = async (): Promise<LinuxDashboardSnapshot["cpu"]> => {
   const cores = cpus().length || 1;
   const first = readCpuSample();
-  const firstEnergy = readCpuEnergySample();
-  const firstTime = Date.now();
   let usage: number | null = null;
-  let powerDrawWatts: number | null = null;
   if (first) {
     await sleep(250);
     const second = readCpuSample();
-    const secondEnergy = readCpuEnergySample();
-    const elapsedMs = Date.now() - firstTime;
     if (second) {
       const idleDelta = second.idle - first.idle;
       const totalDelta = second.total - first.total;
@@ -214,7 +225,6 @@ const collectCpu = async (): Promise<LinuxDashboardSnapshot["cpu"]> => {
         usage = roundOne(clampPercent(((totalDelta - idleDelta) / totalDelta) * 100));
       }
     }
-    powerDrawWatts = calculateCpuPowerWatts(firstEnergy, secondEnergy, elapsedMs);
   }
 
   const load1 = loadavg()[0] ?? 0;
@@ -222,7 +232,7 @@ const collectCpu = async (): Promise<LinuxDashboardSnapshot["cpu"]> => {
     usage_percent: usage,
     cores,
     load_percent_1m: cores > 0 ? roundOne((load1 / cores) * 100) : null,
-    power_draw_watts: powerDrawWatts,
+    power_draw_watts: collectCpuPowerWatts(),
   };
 };
 
