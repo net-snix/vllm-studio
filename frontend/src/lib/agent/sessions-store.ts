@@ -1,8 +1,8 @@
 import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
 import { unlink } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import { getPiSessionsRoot } from "./pi-paths";
 
 export type SessionSummary = {
   id: string;
@@ -32,9 +32,7 @@ function encodeCwdForPi(cwd: string): string {
 }
 
 function piSessionsRoot(): string {
-  return process.env.PI_CODING_AGENT_DIR
-    ? path.join(process.env.PI_CODING_AGENT_DIR, "sessions")
-    : path.join(homedir(), ".pi", "agent", "sessions");
+  return getPiSessionsRoot();
 }
 
 export function sessionsDirForCwd(cwd: string): string {

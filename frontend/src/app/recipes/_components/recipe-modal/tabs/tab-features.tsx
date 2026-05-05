@@ -63,6 +63,8 @@ export function RecipeModalTabFeatures({
               <option value="deepseek_v32">DeepSeek V3.2</option>
             </optgroup>
             <optgroup label="Qwen">
+              <option value="qwen">Qwen</option>
+              <option value="qwen25">Qwen2.5</option>
               <option value="qwen3_xml">Qwen3 XML</option>
               <option value="qwen3_coder">Qwen3 Coder</option>
             </optgroup>

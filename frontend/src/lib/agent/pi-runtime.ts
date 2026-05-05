@@ -1,15 +1,23 @@
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, realpath, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { getApiSettings, type ApiSettings } from "@/lib/api-settings";
-import { normalizeOpenAIModels, modelsToPiModels, type AgentModel } from "./models";
+import { getPiAgentDir } from "./pi-paths";
+import {
+  modelsWithRecipeToolCapabilities,
+  normalizeOpenAIModels,
+  modelsToPiModels,
+  type AgentModel,
+  type BackendRecipeListItem,
+} from "./models";
 import { listProjectsFromStore } from "./projects-store";
 
 const PROVIDER_ID = "vllm-studio";
 const DEFAULT_SESSION_ID = "default";
+const PI_RUNTIME_MANAGER_VERSION = "agent-session-id-v2";
 
 type PiResponse = {
   id?: string;
@@ -29,22 +37,6 @@ type PendingCommand = {
 
 function normalizeBackendUrl(value: string): string {
   return value.trim().replace(/\/+$/, "");
-}
-
-function getWritableDataDir(): string {
-  const candidates = [
-    process.env.VLLM_STUDIO_DATA_DIR,
-    path.join(process.cwd(), "data"),
-    path.join(process.cwd(), "..", "data"),
-    path.join(process.cwd(), "frontend", "data"),
-    path.join(homedir(), ".vllm-studio"),
-    path.join(tmpdir(), "vllm-studio"),
-  ].filter((dir): dir is string => Boolean(dir));
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return candidates[0] ?? path.join(tmpdir(), "vllm-studio");
 }
 
 function resolveDefaultAgentCwd(): string {
@@ -150,9 +142,23 @@ async function fetchModelsFromBackend(settings: ApiSettings): Promise<AgentModel
   return normalizeOpenAIModels(payload && typeof payload === "object" ? payload : {});
 }
 
+async function fetchRecipesFromBackend(settings: ApiSettings): Promise<BackendRecipeListItem[]> {
+  const backendUrl = normalizeBackendUrl(settings.backendUrl);
+  const headers: HeadersInit = { Accept: "application/json" };
+  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+  const response = await fetch(`${backendUrl}/recipes`, { headers, cache: "no-store" });
+  if (!response.ok) return [];
+  const payload = (await response.json()) as unknown;
+  return Array.isArray(payload)
+    ? payload.filter(
+        (item): item is BackendRecipeListItem =>
+          Boolean(item) && typeof item === "object" && !Array.isArray(item),
+      )
+    : [];
+}
+
 async function writePiModelsConfig(settings: ApiSettings, models: AgentModel[]): Promise<string> {
-  const dataDir = getWritableDataDir();
-  const agentDir = path.join(dataDir, "pi-agent");
+  const agentDir = getPiAgentDir();
   await mkdir(agentDir, { recursive: true });
   await chmod(agentDir, 0o700).catch(() => undefined);
 
@@ -181,9 +187,13 @@ async function writePiModelsConfig(settings: ApiSettings, models: AgentModel[]):
 
 export async function refreshPiModels(): Promise<{ models: AgentModel[]; agentDir: string }> {
   const settings = await getApiSettings();
-  const models = await fetchModelsFromBackend(settings);
-  const agentDir = await writePiModelsConfig(settings, models);
-  return { models, agentDir };
+  const [models, recipes] = await Promise.all([
+    fetchModelsFromBackend(settings),
+    fetchRecipesFromBackend(settings).catch(() => []),
+  ]);
+  const modelsWithTools = modelsWithRecipeToolCapabilities(models, recipes);
+  const agentDir = await writePiModelsConfig(settings, modelsWithTools);
+  return { models: modelsWithTools, agentDir };
 }
 
 class PiRpcSession extends EventEmitter {
@@ -263,12 +273,15 @@ class PiRpcSession extends EventEmitter {
     if (selectedModel.reasoning) {
       args.push("--thinking", "high");
     }
+    if (!selectedModel.tools) {
+      args.push("--no-tools");
+    }
     if (piSessionId) {
       // Resume a specific pi session by UUID. Pi accepts a partial UUID and
       // resolves it within the current cwd's session directory.
       args.push("--session", piSessionId);
     }
-    if (browserToolEnabled) {
+    if (browserToolEnabled && selectedModel.tools) {
       const extensionPath = resolveBrowserExtensionPath();
       if (extensionPath) args.push("--extension", extensionPath);
     }
@@ -434,6 +447,12 @@ class PiRpcSession extends EventEmitter {
     await this.sendCommand({ type: "abort" }).catch(() => undefined);
   }
 
+  adoptPiSessionId(piSessionId: string): void {
+    if (!this.currentPiSessionId) {
+      this.currentPiSessionId = piSessionId;
+    }
+  }
+
   async stop(): Promise<void> {
     if (!this.process) return;
     const child = this.process;
@@ -470,9 +489,29 @@ class PiRuntimeManager {
     this.sessions.set(sessionId, created);
     return created;
   }
+
+  async stopAll(): Promise<void> {
+    await Promise.all(Array.from(this.sessions.values(), (session) => session.stop()));
+    this.sessions.clear();
+  }
 }
 
-const globalForPi = globalThis as typeof globalThis & { __vllmStudioPiRuntime?: PiRuntimeManager };
+const globalForPi = globalThis as typeof globalThis & {
+  __vllmStudioPiRuntime?: PiRuntimeManager;
+  __vllmStudioPiRuntimeVersion?: string;
+};
+
+if (
+  globalForPi.__vllmStudioPiRuntime &&
+  globalForPi.__vllmStudioPiRuntimeVersion !== PI_RUNTIME_MANAGER_VERSION
+) {
+  const existingRuntime = globalForPi.__vllmStudioPiRuntime as Partial<PiRuntimeManager>;
+  if (typeof existingRuntime.stopAll === "function") {
+    void existingRuntime.stopAll().catch(() => undefined);
+  }
+  globalForPi.__vllmStudioPiRuntime = undefined;
+}
 
 export const piRuntimeManager = globalForPi.__vllmStudioPiRuntime ?? new PiRuntimeManager();
 globalForPi.__vllmStudioPiRuntime = piRuntimeManager;
+globalForPi.__vllmStudioPiRuntimeVersion = PI_RUNTIME_MANAGER_VERSION;

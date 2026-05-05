@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { piRuntimeManager } from "@/lib/agent/pi-runtime";
+import { listSessions } from "@/lib/agent/sessions-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +27,13 @@ type TurnRequest = {
 function sse(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
   const encoder = new TextEncoder();
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+}
+
+async function latestSessionIdForCwd(cwd: string, startedAt: Date): Promise<string | null> {
+  const sessions = await listSessions(cwd, {
+    since: new Date(startedAt.getTime() - 5_000),
+  });
+  return sessions[0]?.id ?? null;
 }
 
 export async function POST(request: NextRequest) {
@@ -72,6 +80,7 @@ export async function POST(request: NextRequest) {
           await session.followUp(message);
           sse(controller, { type: "status", phase: "queued", queue: "follow_up" });
         } else {
+          const promptStartedAt = new Date();
           await session.prompt(
             message,
             (event) => {
@@ -79,6 +88,12 @@ export async function POST(request: NextRequest) {
             },
             { streamingBehavior },
           );
+          const currentPiSessionId =
+            piSessionId || (await latestSessionIdForCwd(session.status.cwd, promptStartedAt));
+          if (currentPiSessionId) {
+            session.adoptPiSessionId(currentPiSessionId);
+            sse(controller, { type: "pi", event: { type: "session", id: currentPiSessionId } });
+          }
         }
         sse(controller, { type: "status", phase: "done" });
       } catch (error) {

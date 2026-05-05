@@ -575,12 +575,24 @@ export function AgentWorkspace() {
     handledNavRef.current = key;
 
     if (newParam === "1" && !sessionParam) {
-      const tab = makeFreshTab();
       setPanesById((current) => {
         const cur = current.get(focusedPaneId);
         if (!cur) return current;
+        const reusableBlank = cur.tabs.find(
+          (tab) =>
+            !tab.piSessionId &&
+            tab.messages.length === 0 &&
+            tab.status !== "running" &&
+            tab.status !== "starting",
+        );
+        const tab = reusableBlank ?? makeFreshTab();
         const next = new Map(current);
-        next.set(focusedPaneId, { ...cur, tabs: [tab], activeTabId: tab.id });
+        next.set(focusedPaneId, {
+          ...cur,
+          tabs: reusableBlank ? cur.tabs : [...cur.tabs, tab],
+          activeTabId: tab.id,
+          initialSessionId: null,
+        });
         return next;
       });
       return;

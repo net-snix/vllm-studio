@@ -583,6 +583,17 @@ function ProjectSessions({
     if (!session.piSessionId) return true;
     return showHidden || !prefs[session.piSessionId]?.hidden;
   });
+  const fallbackSessionIdForActive = (session: ActiveAgentSession) => {
+    if (session.piSessionId) return session.piSessionId;
+    const label = session.title.trim();
+    if (!label) return null;
+    return (
+      (sessions ?? []).find((summary) => {
+        const prefTitle = prefs[summary.id]?.title?.trim();
+        return prefTitle === label || summary.firstUserMessage?.trim() === label;
+      })?.id ?? null
+    );
+  };
 
   const allRecent = (sessions ?? []).filter((session) => !activePiSessionIds.has(session.id));
   const pinned: SessionSummary[] = [];
@@ -611,6 +622,7 @@ function ProjectSessions({
           key={`${session.paneId}:${session.tabId}`}
           project={project}
           session={session}
+          resolvedSessionId={fallbackSessionIdForActive(session)}
           pref={session.piSessionId ? (prefs[session.piSessionId] ?? {}) : {}}
           onDelete={deleteSessionById}
         />
@@ -681,11 +693,13 @@ function ProjectSessions({
 function ActiveSessionRow({
   project,
   session,
+  resolvedSessionId,
   pref,
   onDelete,
 }: {
   project: ProjectEntry;
   session: ActiveAgentSession;
+  resolvedSessionId: string | null;
   pref: SessionPref;
   onDelete: (sessionId: string) => Promise<void>;
 }) {
@@ -743,7 +757,7 @@ function ActiveSessionRow({
     </>
   );
 
-  if (!session.piSessionId) {
+  if (!resolvedSessionId) {
     return (
       <div
         title={label}
@@ -754,7 +768,7 @@ function ActiveSessionRow({
     );
   }
 
-  const activeSessionId = session.piSessionId;
+  const activeSessionId = resolvedSessionId;
 
   return (
     <div className="group h-8 flex items-center gap-2 pl-9 pr-2 text-(--fg) bg-(--surface)/60 hover:bg-(--surface) transition-colors">

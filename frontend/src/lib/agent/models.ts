@@ -26,7 +26,18 @@ export interface AgentModel {
   contextWindow: number;
   maxTokens: number;
   reasoning: boolean;
+  tools: boolean;
   active: boolean;
+}
+
+export interface BackendRecipeListItem {
+  served_model_name?: unknown;
+  model_id?: unknown;
+  status?: unknown;
+  enable_auto_tool_choice?: unknown;
+  tool_call_parser?: unknown;
+  extra_args?: unknown;
+  [key: string]: unknown;
 }
 
 export function inferReasoningSupport(modelId: string): boolean {
@@ -47,6 +58,32 @@ function numberFromUnknown(value: unknown): number | undefined {
   if (typeof value === "string") {
     const parsed = Number(value);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+function textFromUnknown(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function booleanFromUnknown(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "yes";
+  }
+  return false;
+}
+
+function extraArg(recipe: BackendRecipeListItem, ...keys: string[]): unknown {
+  const extraArgs =
+    recipe.extra_args && typeof recipe.extra_args === "object" && !Array.isArray(recipe.extra_args)
+      ? (recipe.extra_args as Record<string, unknown>)
+      : {};
+  for (const key of keys) {
+    if (recipe[key] !== undefined) return recipe[key];
+    if (extraArgs[key] !== undefined) return extraArgs[key];
   }
   return undefined;
 }
@@ -82,6 +119,7 @@ export function normalizeOpenAIModel(model: OpenAIModelListItem): AgentModel {
     contextWindow,
     maxTokens,
     reasoning,
+    tools: false,
     active: explicitActive === true,
   };
 }
@@ -98,6 +136,38 @@ export function normalizeOpenAIModels(payload: OpenAIModelsResponse): AgentModel
     models.push(model);
   }
   return models.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function recipeSupportsPiTools(recipe: BackendRecipeListItem): boolean {
+  const autoToolChoice = booleanFromUnknown(
+    extraArg(recipe, "enable_auto_tool_choice", "enable-auto-tool-choice"),
+  );
+  const parser = textFromUnknown(extraArg(recipe, "tool_call_parser", "tool-call-parser"));
+  return autoToolChoice && Boolean(parser);
+}
+
+export function modelsWithRecipeToolCapabilities(
+  models: AgentModel[],
+  recipes: BackendRecipeListItem[],
+): AgentModel[] {
+  if (recipes.length === 0) return models;
+  const toolSupportByModel = new Map<string, { running: boolean; tools: boolean }>();
+  for (const recipe of recipes) {
+    const modelId =
+      textFromUnknown(recipe.served_model_name) ||
+      textFromUnknown(recipe.model_id) ||
+      textFromUnknown(recipe.id);
+    if (!modelId) continue;
+    const running = textFromUnknown(recipe.status) === "running";
+    const existing = toolSupportByModel.get(modelId);
+    if (!existing || running || !existing.running) {
+      toolSupportByModel.set(modelId, { running, tools: recipeSupportsPiTools(recipe) });
+    }
+  }
+  return models.map((model) => {
+    const support = toolSupportByModel.get(model.id);
+    return support === undefined ? model : { ...model, tools: support.tools };
+  });
 }
 
 export function modelsToPiModels(models: AgentModel[]) {
