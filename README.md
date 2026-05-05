@@ -1,107 +1,137 @@
-# vLLM Studio
+<p align="center">
+  <img src="frontend/public/icons/icon-512.png" alt="vLLM Studio icon" width="96" height="96">
+</p>
 
-Unified local AI workstation for model lifecycle, chat/agent workflows, orchestration, observability, and Linux GPU-host deployment.
+<h1 align="center">vLLM Studio</h1>
 
-## Linux-hosted deployment
+<p align="center">
+  A local-first control room for serving, testing, and operating open models on your own GPU workstation.
+</p>
 
-The recommended operational shape is to run both the controller and frontend on
-the GPU machine. The browser can live anywhere, but model paths, recipes, GPU
-telemetry, and vLLM/SGLang launches stay local to the hardware.
+<p align="center">
+  <a href="https://github.com/net-snix/vllm-studio/releases"><img alt="Release" src="https://img.shields.io/github/v/release/net-snix/vllm-studio?style=for-the-badge&color=3b82f6"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/net-snix/vllm-studio?style=for-the-badge&color=22c55e"></a>
+  <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-111111?style=for-the-badge&logo=nextdotjs">
+  <img alt="Bun" src="https://img.shields.io/badge/Bun-controller-f9f1e1?style=for-the-badge&logo=bun&logoColor=111111">
+  <img alt="GPU first" src="https://img.shields.io/badge/GPU-first-76b900?style=for-the-badge&logo=nvidia&logoColor=white">
+</p>
 
-- Controller: native Bun service on the GPU host
-- Frontend: native Next.js service on the GPU host
-- Model servers: launched by the controller on the same host
-- Remote access: expose the frontend through your private network or an SSH tunnel
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="vLLM Studio dashboard" width="100%">
+</p>
 
-## Release: v1.13.0
+## What it does
 
-This release consolidates major repo changes currently in the tree, including:
+vLLM Studio brings model recipes, runtime launches, agent sessions, usage stats,
+and Linux host telemetry into one browser UI. It is designed for setups where
+the controller and frontend run on the same GPU machine, while the browser can
+connect from anywhere on a trusted private network.
 
-- OpenAI proxy activation policy controls for `load_if_idle` and `switch_on_request`
-- lifecycle-aware run aborts when model eviction happens
-- SSE run stream termination fixes across backend and frontend
-- local-only chat/runtime cleanup and controller simplification
-- dashboard launch-state cleanup improvements
-- reduced chat/controller indirection and removed dead remote-runtime branches
+- Launch and stop recipes for vLLM, SGLang, llama.cpp, and other local backends.
+- Track GPU, CPU, memory, disk, service, container, fan, and thermal telemetry.
+- Run browser-based agent sessions with project-scoped history and Pi session replay.
+- Inspect usage by provider traffic or coding-agent JSONL sessions.
+- Keep the model server private while exposing only the frontend you choose.
 
-## Docs
+## Screenshots
 
-- Overview: docs/README.md
-- Setup and deployment: docs/operations.md
-- Linux dashboard: docs/linux-dashboard.md
-- Environment variables: docs/environment.md
+### Model Recipes
 
-## Repository layout
+<img src="docs/images/models.png" alt="vLLM Studio model recipes" width="100%">
 
-- `controller/`: Bun/Hono backend, orchestration, chat runtime, lifecycle, metrics
-- `frontend/`: Next.js app, chat UI, proxy endpoints, client state
-- `cli/`: Bun CLI for controller access
-- `shared/`: shared types/contracts
-- `config/`: runtime and integration configs
-- `docs/`: documentation index and environment notes
-- `scripts/`: operational scripts (deployment + controller daemon helpers)
-- `docker-compose.yml`: full stack service definitions
-- `scripts/daemon-*.sh`: start/status/stop helpers for background controller runs
+### Usage Analytics
 
-## Quick start
+<img src="docs/images/usage.png" alt="vLLM Studio usage analytics" width="100%">
 
-1. Controller (local):
+## Architecture
+
+```text
+Browser / desktop app
+        |
+        v
+Next.js frontend  ->  Bun controller  ->  model backends
+        |                    |              vLLM / SGLang / llama.cpp
+        |                    |
+        +--------------------+-> Linux host telemetry
+```
+
+The recommended deployment is intentionally simple:
+
+- `controller/`: Bun backend for recipes, launches, proxying, metrics, usage, and telemetry.
+- `frontend/`: Next.js UI for dashboard, models, agent sessions, settings, and usage.
+- `cli/`: command-line access to controller workflows.
+- `docs/`: operator notes for Linux dashboard and runtime behavior.
+- `scripts/`: release, deployment, and validation helpers.
+
+## Quick Start
+
+Install dependencies and run the two services:
 
 ```bash
 cd controller
-npx tsc --noEmit
-bun test
+bun install
 bun src/main.ts
 ```
 
-2. Frontend:
-
 ```bash
 cd frontend
-npm run test
-npm run lint
-npm run build
+npm install
 npm run dev
 ```
 
-3. Full stack with Docker (controller + frontend + infra):
+Then open:
 
-```bash
-docker compose up -d --build controller frontend
+```text
+http://localhost:3000
 ```
 
-4. Run controller as a background daemon:
+For production-style local serving, build the frontend and run the standalone
+server:
 
 ```bash
-./scripts/daemon-start.sh
-./scripts/daemon-status.sh
-./scripts/daemon-stop.sh
+cd frontend
+npm run build
+npm run start
 ```
 
-## Health checks
+## Health Checks
 
 ```bash
 curl -sS http://localhost:8080/health
 curl -I http://localhost:3000
 ```
 
-## API docs
+## Useful Commands
 
-- http://localhost:8080/api/docs
-- http://localhost:8080/api/spec
+```bash
+# frontend
+cd frontend
+npm run lint
+npm test
+npm run build
 
-## Setup guide
+# controller
+cd controller
+bun run typecheck
+bun test
+```
 
-See `docs/operations.md` for setup, deployment, and verification instructions.
+## Configuration
 
-## Branching and release workflow
+Core runtime configuration is environment-driven. Common values:
 
-- Development branch: `dev`
-- Production integration branch: `main`
-- Release tags: `vX.Y.Z`
+- `VLLM_STUDIO_HOST`: controller bind host.
+- `VLLM_STUDIO_PORT`: controller port.
+- `VLLM_STUDIO_API_KEY`: optional API key for private deployments.
+- `VLLM_STUDIO_MODELS_DIR`: model storage root.
+- `VLLM_STUDIO_DASHBOARD_DISKS`: comma-separated disk labels for dashboard cards.
 
-For this release:
+See [Linux Dashboard](docs/linux-dashboard.md) for the telemetry endpoint and
+operator view.
 
-- merge release work into `main` and `dev`
-- tag `v1.13.0`
-- create a new post-release working branch
+## Release Flow
+
+Releases are tag and GitHub-release based. The semantic-release config creates
+GitHub releases from conventional commits on `main`; manual releases should
+target the exact commit being shipped and keep public notes free of local host
+names, private paths, and private network details.
