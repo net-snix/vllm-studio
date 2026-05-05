@@ -106,7 +106,7 @@ const collectDisk = (pathValue: string, label: string): DashboardDisk => {
 };
 
 export const collectDisks = (): DashboardDisk[] =>
-  parseDiskTargets(process.env.VLLM_STUDIO_DASHBOARD_DISKS).map(({ path, label }) =>
+  parseDiskTargets(process.env["VLLM_STUDIO_DASHBOARD_DISKS"]).map(({ path, label }) =>
     collectDisk(path, label)
   );
 

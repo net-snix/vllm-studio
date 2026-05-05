@@ -3,8 +3,8 @@ import type {
   CompatibilityReport,
   ConfigData,
   GPU,
-  LinuxDashboardSnapshot,
   Metrics,
+  LinuxDashboardSnapshot,
   ProcessInfo,
   UsageStats,
   VRAMCalculation,
@@ -103,6 +103,8 @@ export function createSystemApi(core: ApiCore) {
     },
 
     getUsageStats: (): Promise<UsageStats> => core.request("/usage"),
+
+    getPiSessionsUsageStats: (): Promise<UsageStats> => core.request("/usage/pi-sessions"),
 
     getLinuxDashboard: (options?: RequestOptions): Promise<LinuxDashboardSnapshot> =>
       core.request("/linux-dashboard", options),

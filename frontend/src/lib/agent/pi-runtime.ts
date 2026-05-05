@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { getApiSettings, type ApiSettings } from "@/lib/api-settings";
-import { getPiAgentDir } from "./pi-paths";
+import { resolveDataDir } from "@/lib/data-dir";
 import {
   modelsWithRecipeToolCapabilities,
   normalizeOpenAIModels,
@@ -158,7 +158,8 @@ async function fetchRecipesFromBackend(settings: ApiSettings): Promise<BackendRe
 }
 
 async function writePiModelsConfig(settings: ApiSettings, models: AgentModel[]): Promise<string> {
-  const agentDir = getPiAgentDir();
+  const dataDir = resolveDataDir();
+  const agentDir = path.join(dataDir, "pi-agent");
   await mkdir(agentDir, { recursive: true });
   await chmod(agentDir, 0o700).catch(() => undefined);
 
@@ -362,6 +363,16 @@ class PiRpcSession extends EventEmitter {
           pending?.resolve(response);
         }
         return;
+      }
+    }
+
+    if (parsed.type === "session") {
+      for (const key of ["id", "sessionId", "session_id"]) {
+        const value = parsed[key];
+        if (typeof value === "string" && value.trim()) {
+          this.currentPiSessionId = value.trim();
+          break;
+        }
       }
     }
 

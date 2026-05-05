@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
-import { piRuntimeManager } from "@/lib/agent/pi-runtime";
 import { listSessions } from "@/lib/agent/sessions-store";
+import { piRuntimeManager } from "@/lib/agent/pi-runtime";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,6 +67,7 @@ export async function POST(request: NextRequest) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
+        const turnStartedAt = new Date(Date.now() - 2_000);
         const session = piRuntimeManager.getSession(sessionId);
         sse(controller, { type: "status", phase: "starting", sessionId, modelId, cwd });
         await session.ensureStarted(modelId, cwd, piSessionId, browserToolEnabled);
@@ -95,7 +96,13 @@ export async function POST(request: NextRequest) {
             sse(controller, { type: "pi", event: { type: "session", id: currentPiSessionId } });
           }
         }
-        sse(controller, { type: "status", phase: "done" });
+        const status = session.status;
+        let resolvedPiSessionId = status.piSessionId;
+        if (!resolvedPiSessionId && status.cwd) {
+          const recent = await listSessions(status.cwd, { since: turnStartedAt });
+          resolvedPiSessionId = recent[0]?.id ?? null;
+        }
+        sse(controller, { type: "status", phase: "done", piSessionId: resolvedPiSessionId });
       } catch (error) {
         sse(controller, {
           type: "error",
