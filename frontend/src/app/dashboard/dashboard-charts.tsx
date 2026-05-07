@@ -245,7 +245,7 @@ export function GpuTelemetry({
             <Aggregate label="pwr" value={formatGpuPower(totalPower, totalPowerLimit)} />
           </div>
 
-          <div className="space-y-7">
+          <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             {sortedGpus.map((gpu) => (
               <GpuGraph key={`${gpu.index}-${gpu.uuid ?? gpu.name}`} gpu={gpu} history={history} />
             ))}
