@@ -177,7 +177,7 @@ export function SystemOverview({
 
   return (
     <Section title="Host telemetry" meta="active window">
-      <div className="space-y-7">
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <TrendPanel
           title="CPU usage"
           value={formatPercent(cpuCurrent)}
@@ -186,20 +186,19 @@ export function SystemOverview({
         >
           <UsageLineChart samples={cpuSamples} scale="active" windowMs={COMPACT_CHART_WINDOW_MS} />
         </TrendPanel>
-        <div className="max-w-none lg:max-w-[38rem]">
-          <TrendPanel
-            title="Memory"
-            value={formatPercent(data.memory.used_percent)}
-            detail={`${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`}
-          >
-            <UsageLineChart
-              samples={memorySamples}
-              stroke="var(--dim)"
-              muted
-              windowMs={COMPACT_CHART_WINDOW_MS}
-            />
-          </TrendPanel>
-        </div>
+        <TrendPanel
+          title="Memory"
+          value={formatPercent(data.memory.used_percent)}
+          detail={`${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`}
+          size="large"
+        >
+          <UsageLineChart
+            samples={memorySamples}
+            stroke="var(--dim)"
+            muted
+            windowMs={COMPACT_CHART_WINDOW_MS}
+          />
+        </TrendPanel>
       </div>
     </Section>
   );
