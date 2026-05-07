@@ -8,13 +8,14 @@ const CHART_WIDTH = 360;
 const CHART_HEIGHT = 96;
 const CHART_PAD = 6;
 const CHART_WINDOW_MS = 30 * 60 * 1000;
+const COMPACT_CHART_WINDOW_MS = 10 * 60 * 1000;
 
 type ChartPoint = {
   x: number;
   y: number;
 };
 
-const clampPercent = (value: number): number => Math.max(0, Math.min(100, value));
+type ChartScale = "percent" | "active";
 
 const latestNumber = (values: Array<number | null | undefined>): number | null => {
   for (let index = values.length - 1; index >= 0; index -= 1) {
@@ -39,24 +40,51 @@ const latestSampleTime = (samples: DashboardUsageSample[]): number | null => {
   return null;
 };
 
-const samplesInWindow = (samples: DashboardUsageSample[]): DashboardUsageSample[] => {
+const samplesInWindow = (
+  samples: DashboardUsageSample[],
+  windowMs: number,
+): DashboardUsageSample[] => {
   const end = latestSampleTime(samples);
   if (end == null) return [];
-  const start = end - CHART_WINDOW_MS;
+  const start = end - windowMs;
   return samples.filter((sample) => sample.time >= start && sample.time <= end);
 };
 
-const toChartPoints = (samples: DashboardUsageSample[]): ChartPoint[] => {
-  const end = latestSampleTime(samples);
-  if (end == null) return [];
-  const start = end - CHART_WINDOW_MS;
+const chartScaleMax = (samples: DashboardUsageSample[], scale: ChartScale): number => {
+  if (scale === "percent") return 100;
+  const values = samples
+    .map((sample) => sample.value)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const peak = values.length > 0 ? Math.max(...values) : 0;
+  if (peak <= 10) return 10;
+  if (peak <= 25) return 25;
+  if (peak <= 50) return 50;
+  return 100;
+};
 
-  return samples.flatMap((sample): ChartPoint[] => {
+const toChartPoints = (samples: DashboardUsageSample[], scaleMax: number): ChartPoint[] => {
+  const visibleSamples = samples.flatMap((sample): Array<{ time: number; value: number }> => {
+    if (
+      typeof sample.value !== "number" ||
+      !Number.isFinite(sample.value) ||
+      !Number.isFinite(sample.time)
+    ) {
+      return [];
+    }
+    return [{ time: sample.time, value: sample.value }];
+  });
+  const first = visibleSamples[0];
+  const last = visibleSamples.at(-1);
+  if (!first || !last) return [];
+  const timeSpan = Math.max(last.time - first.time, 1);
+
+  return visibleSamples.flatMap((sample): ChartPoint[] => {
     const value = sample.value;
-    if (typeof value !== "number" || !Number.isFinite(value)) return [];
-    if (!Number.isFinite(sample.time) || sample.time < start || sample.time > end) return [];
-    const x = CHART_PAD + ((sample.time - start) / CHART_WINDOW_MS) * (CHART_WIDTH - CHART_PAD * 2);
-    const y = CHART_PAD + ((100 - clampPercent(value)) / 100) * (CHART_HEIGHT - CHART_PAD * 2);
+    const x = CHART_PAD + ((sample.time - first.time) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
+    const y =
+      CHART_PAD +
+      ((scaleMax - Math.min(scaleMax, Math.max(0, value))) / scaleMax) *
+        (CHART_HEIGHT - CHART_PAD * 2);
     return [{ x, y }];
   });
 };
@@ -71,12 +99,18 @@ function UsageLineChart({
   samples,
   stroke = "var(--fg)",
   muted = false,
+  scale = "percent",
+  windowMs = CHART_WINDOW_MS,
 }: {
   samples: DashboardUsageSample[];
   stroke?: string;
   muted?: boolean;
+  scale?: ChartScale;
+  windowMs?: number;
 }) {
-  const points = toChartPoints(samplesInWindow(samples));
+  const visibleSamples = samplesInWindow(samples, windowMs);
+  const scaleMax = chartScaleMax(visibleSamples, scale);
+  const points = toChartPoints(visibleSamples, scaleMax);
   const linePath = buildLinePath(points);
 
   return (
@@ -88,7 +122,8 @@ function UsageLineChart({
       preserveAspectRatio="none"
     >
       {[25, 50, 75].map((mark) => {
-        const y = CHART_PAD + ((100 - mark) / 100) * (CHART_HEIGHT - CHART_PAD * 2);
+        const value = (mark / 100) * scaleMax;
+        const y = CHART_PAD + ((scaleMax - value) / scaleMax) * (CHART_HEIGHT - CHART_PAD * 2);
         return (
           <line
             key={mark}
@@ -141,22 +176,30 @@ export function SystemOverview({
   }));
 
   return (
-    <Section title="Host telemetry" meta="last 30 minutes">
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1.35fr)_minmax(21rem,0.65fr)]">
+    <Section title="Host telemetry" meta="active window">
+      <div className="space-y-7">
         <TrendPanel
           title="CPU usage"
           value={formatPercent(cpuCurrent)}
           detail={`${formatCpuTopology(data)}  load ${data.host.load_average.join(" / ")}`}
+          size="large"
         >
-          <UsageLineChart samples={cpuSamples} />
+          <UsageLineChart samples={cpuSamples} scale="active" windowMs={COMPACT_CHART_WINDOW_MS} />
         </TrendPanel>
-        <TrendPanel
-          title="Memory"
-          value={formatPercent(data.memory.used_percent)}
-          detail={`${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`}
-        >
-          <UsageLineChart samples={memorySamples} stroke="var(--dim)" muted />
-        </TrendPanel>
+        <div className="max-w-none lg:max-w-[38rem]">
+          <TrendPanel
+            title="Memory"
+            value={formatPercent(data.memory.used_percent)}
+            detail={`${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`}
+          >
+            <UsageLineChart
+              samples={memorySamples}
+              stroke="var(--dim)"
+              muted
+              windowMs={COMPACT_CHART_WINDOW_MS}
+            />
+          </TrendPanel>
+        </div>
       </div>
     </Section>
   );
@@ -223,11 +266,13 @@ function TrendPanel({
   value,
   detail,
   children,
+  size = "normal",
 }: {
   title: string;
   value: string;
   detail: string;
   children: React.ReactNode;
+  size?: "normal" | "large";
 }) {
   return (
     <div className="min-w-0">
@@ -240,7 +285,7 @@ function TrendPanel({
         </div>
         <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">{value}</div>
       </div>
-      <div className="h-32">{children}</div>
+      <div className={size === "large" ? "h-44 sm:h-48" : "h-28 sm:h-32"}>{children}</div>
     </div>
   );
 }
