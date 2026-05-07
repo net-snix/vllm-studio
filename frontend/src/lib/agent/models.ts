@@ -27,6 +27,7 @@ export interface AgentModel {
   maxTokens: number;
   reasoning: boolean;
   tools: boolean;
+  vision: boolean;
   active: boolean;
 }
 
@@ -53,6 +54,11 @@ export function inferReasoningSupport(modelId: string): boolean {
   );
 }
 
+export function inferVisionSupport(modelId: string): boolean {
+  const normalized = modelId.toLowerCase();
+  return normalized.includes("mimo-v2.5") || normalized.includes("mimo-v2-5");
+}
+
 function numberFromUnknown(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
   if (typeof value === "string") {
@@ -66,21 +72,34 @@ function textFromUnknown(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function booleanFromUnknown(value: unknown): boolean {
+function booleanFromUnknown(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value === 1;
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
-    return normalized === "1" || normalized === "true" || normalized === "yes";
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
   }
-  return false;
+  return undefined;
+}
+
+function hasImageInput(value: unknown): boolean | undefined {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  const normalized = values
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  if (normalized.length === 0) return undefined;
+  return normalized.some((entry) => entry === "image" || entry === "vision");
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function extraArg(recipe: BackendRecipeListItem, ...keys: string[]): unknown {
-  const extraArgs =
-    recipe.extra_args && typeof recipe.extra_args === "object" && !Array.isArray(recipe.extra_args)
-      ? (recipe.extra_args as Record<string, unknown>)
-      : {};
+  const extraArgs = recordFromUnknown(recipe.extra_args);
   for (const key of keys) {
     if (recipe[key] !== undefined) return recipe[key];
     if (extraArgs[key] !== undefined) return extraArgs[key];
@@ -89,7 +108,8 @@ function extraArg(recipe: BackendRecipeListItem, ...keys: string[]): unknown {
 }
 
 export function normalizeOpenAIModel(model: OpenAIModelListItem): AgentModel {
-  const metadata = model.metadata && typeof model.metadata === "object" ? model.metadata : {};
+  const metadata = recordFromUnknown(model.metadata);
+  const capabilities = recordFromUnknown(metadata.capabilities);
   const id = String(model.id || "").trim();
   const name = String(model.name || metadata.name || id).trim() || id;
   const contextWindow =
@@ -110,6 +130,21 @@ export function normalizeOpenAIModel(model: OpenAIModelListItem): AgentModel {
   const explicitReasoning = metadata.reasoning ?? model.reasoning;
   const reasoning =
     typeof explicitReasoning === "boolean" ? explicitReasoning : inferReasoningSupport(id);
+  const explicitVision =
+    booleanFromUnknown(metadata.vision) ??
+    booleanFromUnknown(metadata.supportsVision) ??
+    booleanFromUnknown(metadata.supports_vision) ??
+    booleanFromUnknown(metadata.multimodal) ??
+    booleanFromUnknown(capabilities.vision) ??
+    booleanFromUnknown(capabilities.image) ??
+    hasImageInput(metadata.input) ??
+    hasImageInput(metadata.inputs) ??
+    hasImageInput(metadata.modalities) ??
+    hasImageInput(metadata.input_modalities) ??
+    hasImageInput(model.input) ??
+    hasImageInput(model.inputs) ??
+    hasImageInput(model.modalities);
+  const vision = explicitVision ?? inferVisionSupport(id);
   const explicitActive = metadata.active ?? model.active;
 
   return {
@@ -120,6 +155,7 @@ export function normalizeOpenAIModel(model: OpenAIModelListItem): AgentModel {
     maxTokens,
     reasoning,
     tools: false,
+    vision,
     active: explicitActive === true,
   };
 }
@@ -143,7 +179,7 @@ export function recipeSupportsPiTools(recipe: BackendRecipeListItem): boolean {
     extraArg(recipe, "enable_auto_tool_choice", "enable-auto-tool-choice"),
   );
   const parser = textFromUnknown(extraArg(recipe, "tool_call_parser", "tool-call-parser"));
-  return autoToolChoice && Boolean(parser);
+  return autoToolChoice === true && Boolean(parser);
 }
 
 export function modelsWithRecipeToolCapabilities(
@@ -175,7 +211,7 @@ export function modelsToPiModels(models: AgentModel[]) {
     id: model.id,
     name: model.name,
     reasoning: model.reasoning,
-    input: ["text"],
+    input: model.vision ? ["text", "image"] : ["text"],
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeOpenAIModels, modelsToPiModels } from "./models";
+import {
+  modelsToPiModels,
+  modelsWithRecipeToolCapabilities,
+  normalizeOpenAIModels,
+} from "./models";
 
 describe("agent model normalization", () => {
   it("maps OpenAI /v1/models rows into Pi-ready models", () => {
@@ -17,9 +21,11 @@ describe("agent model normalization", () => {
       contextWindow: 1_000_000,
       maxTokens: 262_144,
       reasoning: true,
+      vision: false,
     });
 
     const piModels = modelsToPiModels(models);
+    expect(piModels.find((m) => m.id === "tiny")?.input).toEqual(["text"]);
     expect(piModels.find((m) => m.id === "tiny")?.compat).toMatchObject({
       supportsDeveloperRole: false,
       supportsReasoningEffort: false,
@@ -34,8 +40,47 @@ describe("agent model normalization", () => {
 
     expect(model).toMatchObject({
       reasoning: true,
+      vision: true,
       contextWindow: 262_144,
       maxTokens: 65_536,
+    });
+
+    expect(modelsToPiModels([model])[0]?.input).toEqual(["text", "image"]);
+  });
+
+  it("honors explicit vision metadata from model recipes", () => {
+    const models = normalizeOpenAIModels({
+      data: [
+        { id: "local-vlm", metadata: { modalities: ["text", "image"] } },
+        { id: "MiMo-V2.5", metadata: { vision: false } },
+      ],
+    });
+
+    const visionModel = models.find((model) => model.id === "local-vlm");
+    const textModel = models.find((model) => model.id === "MiMo-V2.5");
+
+    expect(visionModel?.vision).toBe(true);
+    expect(textModel?.vision).toBe(false);
+  });
+
+  it("adds tool support from running recipes without dropping vision metadata", () => {
+    const models = normalizeOpenAIModels({
+      data: [{ id: "local-vlm", metadata: { modalities: ["text", "image"] } }],
+    });
+
+    const [model] = modelsWithRecipeToolCapabilities(models, [
+      {
+        served_model_name: "local-vlm",
+        status: "running",
+        enable_auto_tool_choice: true,
+        tool_call_parser: "hermes",
+      },
+    ]);
+
+    expect(model).toMatchObject({
+      id: "local-vlm",
+      tools: true,
+      vision: true,
     });
   });
 });
