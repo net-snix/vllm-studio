@@ -1,4 +1,6 @@
-export const normalizeToolRequest = (payload: Record<string, unknown>): Record<string, unknown> => {
+export const normalizeToolRequest = (payload: Record<string, unknown>): boolean => {
+  let changed = false;
+
   if (payload["functions"] && !payload["tools"] && Array.isArray(payload["functions"])) {
     payload["tools"] = (payload["functions"] as Array<Record<string, unknown>>).map(
       (functionDefinition) => ({
@@ -7,11 +9,17 @@ export const normalizeToolRequest = (payload: Record<string, unknown>): Record<s
       })
     );
     delete payload["functions"];
+    changed = true;
+  }
+  if (Array.isArray(payload["tools"]) && payload["tools"].length === 0) {
+    delete payload["tools"];
+    changed = true;
   }
   if (payload["tool_choice"] === "auto") {
     delete payload["tool_choice"];
+    changed = true;
   }
-  return payload;
+  return changed;
 };
 
 const collapseTextContentParts = (content: unknown): string | null => {

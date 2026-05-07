@@ -1,8 +1,39 @@
 // CRITICAL
 import { describe, expect, it } from "bun:test";
 import { ensureStreamingUsageIncluded } from "./openai-routes";
+import { normalizeToolRequest } from "./content-normalizer";
 
 describe("openai route request normalization", () => {
+  it("omits empty tools arrays for vLLM-compatible requests", () => {
+    const payload: Record<string, unknown> = {
+      model: "gemma-4-31b-it-mtp8",
+      tools: [],
+    };
+
+    expect(normalizeToolRequest(payload)).toBe(true);
+    expect(payload["tools"]).toBeUndefined();
+  });
+
+  it("preserves non-empty tools arrays", () => {
+    const tools = [
+      {
+        type: "function",
+        function: {
+          name: "noop",
+          description: "Do nothing",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ];
+    const payload: Record<string, unknown> = {
+      model: "gemma-4-31b-it-mtp8",
+      tools,
+    };
+
+    expect(normalizeToolRequest(payload)).toBe(false);
+    expect(payload["tools"]).toBe(tools);
+  });
+
   it("injects stream_options.include_usage for streaming requests", () => {
     const payload: Record<string, unknown> = {
       model: "deepseek-v4-flash",

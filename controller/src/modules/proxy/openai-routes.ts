@@ -184,7 +184,9 @@ export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
       const bodyText = new TextDecoder().decode(bodyBuffer);
       parsed = JSON.parse(bodyText) as Record<string, unknown>;
       sessionId = extractSessionId(parsed, (name) => ctx.req.header(name));
-      normalizeToolRequest(parsed);
+      if (normalizeToolRequest(parsed)) {
+        bodyChanged = true;
+      }
       if (normalizeChatMessageContentParts(parsed)) {
         bodyChanged = true;
       }
