@@ -246,7 +246,7 @@ export function GpuTelemetry({
             <Aggregate label="pwr" value={formatGpuPower(totalPower, totalPowerLimit)} />
           </div>
 
-          <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="space-y-7">
             {sortedGpus.map((gpu) => (
               <GpuGraph key={`${gpu.index}-${gpu.uuid ?? gpu.name}`} gpu={gpu} history={history} />
             ))}
@@ -307,8 +307,8 @@ function GpuGraph({ gpu, history }: { gpu: LinuxDashboardGpu; history: Dashboard
           {formatPercent(gpu.utilization_percent)}
         </div>
       </div>
-      <div className="h-28">
-        <UsageLineChart samples={samples} />
+      <div className="h-36 sm:h-40">
+        <UsageLineChart samples={samples} scale="active" windowMs={COMPACT_CHART_WINDOW_MS} />
       </div>
     </div>
   );
