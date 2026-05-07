@@ -116,19 +116,14 @@ export function LinuxDashboardView({
 
           {summary ? (
             <dl className="mt-6 grid w-full grid-cols-2 border-b border-(--border)/45 pb-6 sm:grid-cols-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,0.85fr)_minmax(0,0.9fr)_minmax(0,0.9fr)]">
-              <MetricColumn
-                label="CPU"
-                value={summary.cpu}
-                unit="%"
-                detail={`load ${data?.host.load_average.join(" / ")}`}
-              />
+              <MetricColumn label="CPU" value={summary.cpu} unit="%" detail={summary.cpuDetail} />
               <MetricColumn
                 label="Memory"
                 value={summary.memory}
                 unit="%"
                 detail={summary.memoryDetail}
               />
-              <MetricColumn label="VRAM" value={summary.vram} detail={summary.gpuDetail} />
+              <MetricColumn label="VRAM" value={summary.vram} detail={summary.vramDetail} />
               <CompactMetric label="GPUs" value={summary.gpus} detail={summary.gpuUtil} />
               <CompactMetric label="Power" value={summary.power} detail={summary.powerDetail} />
               <CompactMetric label="Uptime" value={summary.uptime} detail={summary.collectedAt} />
@@ -258,17 +253,26 @@ function buildSummary(data: LinuxDashboardSnapshot, history: DashboardHistoryPoi
     ...data.gpus.map((gpu) => gpu.power_draw_watts),
   ]);
   const totalPowerLimit = sumFinite(data.gpus.map((gpu) => gpu.power_limit_watts));
+  const gpuPower = sumFinite(data.gpus.map((gpu) => gpu.power_draw_watts));
+  const gpuCountLabel = `${data.gpus.length} GPU${data.gpus.length === 1 ? "" : "s"}`;
+  const cpuPowerLabel =
+    data.cpu.power_draw_watts == null
+      ? "CPU n/a"
+      : `CPU ${formatGpuPower(data.cpu.power_draw_watts, undefined)}`;
+  const gpuPowerLabel =
+    gpuPower == null ? "GPU n/a" : `GPU ${formatGpuPower(gpuPower, totalPowerLimit)}`;
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
+    cpuDetail: `${formatCpuTopology(data)} load ${data.host.load_average.join(" / ")}`,
     memory: String(Math.round(data.memory.used_percent)),
     memoryDetail: `${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`,
     vram: `${formatGpuGb(totalVramUsed)}/${formatGpuGb(totalVram)}`,
-    gpuDetail: formatCpuTopology(data),
+    vramDetail: `${gpuCountLabel} util ${formatPercent(avgGpuUtil)}`,
     gpus: String(data.gpus.length),
     gpuUtil: `util ${formatPercent(avgGpuUtil)}`,
-    power: formatGpuPower(totalPower, totalPowerLimit),
-    powerDetail: data.cpu.power_draw_watts == null ? "GPU only" : "CPU + GPU",
+    power: formatGpuPower(totalPower, undefined),
+    powerDetail: `PC total ${cpuPowerLabel} + ${gpuPowerLabel}`,
     uptime: formatUptime(data.host.uptime_seconds),
     collectedAt: new Date(data.collected_at).toLocaleTimeString([], {
       hour: "2-digit",
