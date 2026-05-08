@@ -125,7 +125,11 @@ export function LinuxDashboardView({
               />
               <MetricColumn label="VRAM" value={summary.vram} detail={summary.vramDetail} />
               <CompactMetric label="GPUs" value={summary.gpus} detail={summary.gpuUtil} />
-              <CompactMetric label="Power" value={summary.power} detail={summary.powerDetail} />
+              <CompactMetric
+                label="System Power"
+                value={summary.power}
+                detail={summary.powerDetail}
+              />
               <CompactMetric label="Uptime" value={summary.uptime} detail={summary.collectedAt} />
             </dl>
           ) : null}
@@ -275,7 +279,7 @@ function buildSummary(
     gpus: String(data.gpus.length),
     gpuUtil: `util ${formatPercent(avgGpuUtil)}`,
     power: formatGpuPower(totalPower, undefined),
-    powerDetail: `PC total ${cpuPowerLabel} + ${gpuPowerLabel}`,
+    powerDetail: `${cpuPowerLabel} + ${gpuPowerLabel}`,
     uptime: formatUptime(data.host.uptime_seconds),
     collectedAt: new Date(data.collected_at).toLocaleTimeString([], {
       hour: "2-digit",
