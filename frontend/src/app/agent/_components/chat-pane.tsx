@@ -3,7 +3,17 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, ReactNode } from "react";
 import {
+  AlertTriangle,
+  FileText,
+  Loader2,
+  PencilLine,
+  Search,
+  TerminalSquare,
+  Wrench,
+} from "lucide-react";
+import {
   AttachIcon,
+  ChevronDownIcon,
   CloseIcon,
   FileIcon,
   GitBranchIcon,
@@ -14,11 +24,13 @@ import {
 import { safeJson } from "@/lib/agent/safe-json";
 import { AssistantMarkdown } from "./assistant-markdown";
 import {
+  attachmentDedupKey,
   attachmentPrompt,
   createAttachment,
   dataTransferHasFiles,
   filesFromDataTransfer,
   formatFileSize,
+  isImageAttachment,
   type ChatAttachment,
 } from "./chat-attachments";
 
@@ -71,6 +83,15 @@ export type QueuedMessage = {
   mode: "steer" | "follow_up";
   text: string;
 };
+
+export function drainQueueAfterAgentEnd(queue: QueuedMessage[]): {
+  next: QueuedMessage | null;
+  remaining: QueuedMessage[];
+} {
+  const followUps = queue.filter((item) => item.mode === "follow_up");
+  const [next, ...remaining] = followUps;
+  return { next: next ?? null, remaining };
+}
 
 export type SessionTab = {
   // Stable id local to this pane, used as a React key for tabs.
@@ -639,6 +660,7 @@ export function ChatPane({
   tabs,
   activeTabId,
   onTabsChange,
+  onClose,
   onRegisterHandle,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -649,6 +671,11 @@ export function ChatPane({
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [readingAttachments, setReadingAttachments] = useState(false);
   const [composerDragActive, setComposerDragActive] = useState(false);
+  const tabsRef = useRef(tabs);
+
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
@@ -859,17 +886,16 @@ export function ChatPane({
     [patchAssistant],
   );
 
-  // Send a control-mode message (steer / follow_up) without reading the SSE
-  // stream — pi delivers the queued message and continues emitting events on
-  // the original prompt's stream. Returns true on success.
+  // Send a control-mode message (steer / follow_up) without taking ownership of
+  // the long-running prompt stream.
   const sendControlMessage = useCallback(
     async (
       mode: "steer" | "follow_up",
       text: string,
       runtime: string,
       piSessionId?: string | null,
-    ): Promise<boolean> => {
-      if (!text.trim() || !modelId) return false;
+    ): Promise<{ ok: boolean; error?: string }> => {
+      if (!text.trim() || !modelId) return { ok: false };
       try {
         const response = await fetch("/api/agent/turn", {
           method: "POST",
@@ -890,28 +916,45 @@ export function ChatPane({
         }
         // Drain the short SSE stream so the connection closes cleanly.
         const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let controlError = "";
         while (true) {
-          const { done } = await reader.read();
+          const { done, value } = await reader.read();
           if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+          for (const chunk of chunks) {
+            const line = chunk.split("\n").find((entry) => entry.startsWith("data: "));
+            if (!line) continue;
+            const payload = JSON.parse(line.slice(6)) as
+              | { type: "status"; phase: string }
+              | { type: "error"; error: string };
+            if (payload.type === "error") controlError = payload.error;
+          }
         }
-        return true;
-      } catch {
-        return false;
+        if (controlError) throw new Error(controlError);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : "Message failed" };
       }
     },
     [modelId, cwd, browserToolEnabled],
   );
 
   const submitPrompt = useCallback(
-    async (rawText: string) => {
-      if (!activeTab) return;
+    async (rawText: string, targetTabId?: string) => {
+      const selectedTab =
+        (targetTabId ? tabsRef.current.find((tab) => tab.id === targetTabId) : null) ?? activeTab;
+      if (!selectedTab) return;
       const text = rawText.trim();
       if ((!text && attachments.length === 0) || !modelId || readingAttachments) return;
 
-      const tabId = activeTab.id;
+      const tabId = selectedTab.id;
       const userId = newId("user");
       const assistantId = newId("assistant");
-      const runtime = activeTab.runtimeSessionId || runtimeSessionId;
+      const runtime = selectedTab.runtimeSessionId || runtimeSessionId;
       const attachedText = attachmentPrompt(attachments);
       const attachmentSummary =
         attachments.length > 0
@@ -924,6 +967,7 @@ export function ChatPane({
       // Optimistic update: show the user's turn + a blank assistant message.
       updateTab(tabId, (tab) => ({
         ...tab,
+        cwd: tab.cwd || cwd,
         modelId: tab.modelId || modelId,
         input: "",
         error: "",
@@ -960,7 +1004,9 @@ export function ChatPane({
             modelId,
             message: promptText,
             cwd: cwd.trim() || undefined,
-            piSessionId: activeTab.piSessionId,
+            piSessionId:
+              tabsRef.current.find((tab) => tab.id === tabId)?.piSessionId ??
+              selectedTab.piSessionId,
             browserToolEnabled,
           }),
         });
@@ -1004,7 +1050,12 @@ export function ChatPane({
               }
               if (piEvent.type === "agent_end") {
                 agentEnded = true;
-                onPiSessionIdChange?.(eventId ?? activeTab.piSessionId ?? "");
+                const latestPiSessionId =
+                  eventId ??
+                  tabsRef.current.find((tab) => tab.id === tabId)?.piSessionId ??
+                  selectedTab.piSessionId ??
+                  "";
+                onPiSessionIdChange?.(latestPiSessionId);
               }
               applyPiEvent(tabId, assistantId, piEvent);
             }
@@ -1022,16 +1073,15 @@ export function ChatPane({
 
       // Drain queued messages once the agent finished its run.
       if (agentEnded) {
-        const queued = (activeTab.queue ?? []).slice();
-        if (queued.length > 0) {
-          // Pop the first queued message and replay it as a fresh prompt. Any
-          // remaining items stay in the queue and chain through subsequent
-          // submitPrompt calls.
-          const [next, ...rest] = queued;
-          updateTab(tabId, (tab) => ({ ...tab, queue: rest }));
+        const queued = (tabsRef.current.find((tab) => tab.id === tabId)?.queue ?? []).slice();
+        const { next, remaining } = drainQueueAfterAgentEnd(queued);
+        if (next) {
+          updateTab(tabId, (tab) => ({ ...tab, queue: remaining }));
           // Schedule on the next tick so React commits the optimistic
           // update before we kick off the next prompt.
-          setTimeout(() => void submitPromptRef.current?.(next.text), 0);
+          setTimeout(() => void submitPromptRef.current?.(next.text, tabId), 0);
+        } else if (queued.length > 0) {
+          updateTab(tabId, (tab) => ({ ...tab, queue: remaining }));
         }
       }
     },
@@ -1051,7 +1101,9 @@ export function ChatPane({
 
   // Stable ref so the queue-drain inside submitPrompt can re-enter without
   // forming a useCallback cycle.
-  const submitPromptRef = useRef<(text: string) => Promise<void>>(() => Promise.resolve());
+  const submitPromptRef = useRef<(text: string, targetTabId?: string) => Promise<void>>(() =>
+    Promise.resolve(),
+  );
   useEffect(() => {
     submitPromptRef.current = submitPrompt;
   }, [submitPrompt]);
@@ -1066,18 +1118,30 @@ export function ChatPane({
       // While running, Enter sends a steering message instead of a fresh prompt.
       if (running) {
         if (!text) return;
-        const ok = await sendControlMessage(
+        const queuedId = newId("queue");
+        updateTab(activeTab.id, (tab) => ({
+          ...tab,
+          input: "",
+          error: "",
+          queue: [...(tab.queue ?? []), { id: queuedId, mode: "steer", text }],
+        }));
+        const result = await sendControlMessage(
           "steer",
           text,
           activeTab.runtimeSessionId || runtimeSessionId,
           activeTab.piSessionId,
         );
-        if (ok) {
-          updateTab(activeTab.id, (tab) => ({ ...tab, input: "" }));
+        if (!result.ok) {
+          updateTab(activeTab.id, (tab) => ({
+            ...tab,
+            input: text,
+            error: result.error || "Message failed",
+            queue: (tab.queue ?? []).filter((item) => item.id !== queuedId),
+          }));
         }
         return;
       }
-      await submitPrompt(text);
+      await submitPrompt(text, activeTab.id);
     },
     [
       activeTab,
@@ -1092,28 +1156,28 @@ export function ChatPane({
     ],
   );
 
-  // Tab-key behavior: queue the current input as a follow-up. If the agent is
-  // running, also fire a steer() so pi has the message in its own queue
-  // (one-at-a-time). Local queue state mirrors what's pending so we can show
-  // chips and drain on agent_end.
+  // Tab-key behavior: when idle, submit immediately; while a turn is running,
+  // keep the follow-up visibly queued and replay it as a normal prompt after
+  // agent_end. This avoids the "message vanished" state where a chip was added
+  // but no prompt was ever sent.
   const queueMessage = useCallback(async () => {
     if (!activeTab) return;
     const text = activeTab.input.trim();
     if (!text || !modelId) return;
     const tabId = activeTab.id;
-    const runtime = activeTab.runtimeSessionId || runtimeSessionId;
-    const mode: "steer" | "follow_up" = running ? "follow_up" : "follow_up";
+    if (!running) {
+      await submitPromptRef.current(text, tabId);
+      return;
+    }
     const queuedId = newId("queue");
     updateTab(tabId, (tab) => ({
       ...tab,
+      cwd: tab.cwd || cwd,
       input: "",
-      queue: [...(tab.queue ?? []), { id: queuedId, mode, text }],
+      error: "",
+      queue: [...(tab.queue ?? []), { id: queuedId, mode: "follow_up", text }],
     }));
-    if (running) {
-      // Hand it to pi as a follow_up so the agent sees it after it finishes.
-      void sendControlMessage(mode, text, runtime, activeTab.piSessionId);
-    }
-  }, [activeTab, modelId, running, runtimeSessionId, sendControlMessage, updateTab]);
+  }, [activeTab, modelId, running, cwd, updateTab]);
 
   const removeQueued = useCallback(
     (queueId: string) => {
@@ -1140,7 +1204,17 @@ export function ChatPane({
       setReadingAttachments(true);
       try {
         const next = await Promise.all(fileArray.map((file) => createAttachment(file)));
-        setAttachments((current) => [...current, ...next]);
+        setAttachments((current) => {
+          const seen = new Set(current.map(attachmentDedupKey));
+          const uniqueNext: ChatAttachment[] = [];
+          next.forEach((file) => {
+            const key = attachmentDedupKey(file);
+            if (seen.has(key)) return;
+            seen.add(key);
+            uniqueNext.push(file);
+          });
+          return [...current, ...uniqueNext];
+        });
         updateTab(activeTab.id, (tab) => ({ ...tab, error: "" }));
       } catch (err) {
         updateTab(activeTab.id, (tab) => ({
@@ -1231,6 +1305,8 @@ export function ChatPane({
           ...tab,
           messages,
           piSessionId,
+          cwd: tab.cwd || cwd,
+          modelId: tab.modelId || modelId,
           title: title ?? tab.title,
           tokenStats: tokenStats ?? tab.tokenStats,
           status: "idle",
@@ -1244,7 +1320,7 @@ export function ChatPane({
         }));
       }
     },
-    [cwd, activeTabId, updateTab],
+    [cwd, modelId, activeTabId, updateTab],
   );
 
   // Register a stable imperative handle so the workspace can call
@@ -1266,8 +1342,24 @@ export function ChatPane({
     <section
       onMouseDownCapture={onFocus}
       data-pane-id={paneId}
-      className="flex min-h-0 min-w-0 flex-1 flex-col bg-(--bg)"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--bg)"
     >
+      {onClose ? (
+        <button
+          type="button"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onClose();
+          }}
+          className="absolute right-12 top-2 z-30 inline-flex h-7 w-7 items-center justify-center rounded-md text-(--dim) hover:bg-(--surface) hover:text-(--fg)"
+          aria-label="Close pane"
+          title="Close pane"
+        >
+          <CloseIcon className="h-3.5 w-3.5 pointer-events-none" />
+        </button>
+      ) : null}
       {activeTab?.error ? (
         <div className="border-b border-(--border) bg-(--err)/10 px-4 py-2 text-xs text-(--err)">
           {activeTab.error}
@@ -1284,11 +1376,13 @@ export function ChatPane({
         }}
         className={`min-h-0 flex-1 overflow-y-auto px-6 py-10 ${showEmptyPrompt ? "flex" : ""}`}
       >
-        <div className={`mx-auto w-full max-w-[720px] ${showEmptyPrompt ? "flex flex-1" : ""}`}>
+        <div
+          className={`mx-auto w-full max-w-[var(--thread-w)] ${showEmptyPrompt ? "flex flex-1" : ""}`}
+        >
           {showEmptyPrompt ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 -translate-y-12 text-center">
               <h1 className="text-[26px] font-semibold tracking-[-0.04em] text-(--fg)">
-                What should we work on{projectName ? ` in ${projectName}` : ""}?
+                A dream is something you do for yourself
               </h1>
               <p className="text-[12.5px] text-(--dim)">
                 Ask the agent to edit, inspect, or run something. Tab to queue · paste/drop files.
@@ -1359,7 +1453,17 @@ export function ChatPane({
                   className="inline-flex max-w-[220px] items-center gap-1 rounded border border-(--border)/70 bg-(--bg) px-1.5 py-0.5 text-[11px] text-(--dim)"
                   title={`${file.name} · ${file.type} · ${formatFileSize(file.size)}${file.path ? ` · ${file.path}` : ""}`}
                 >
-                  <FileIcon className="h-3 w-3 shrink-0" />
+                  {isImageAttachment(file) ? (
+                    // Keep composer image previews intentionally small; the
+                    // attachment is still sent at full inline/file fidelity.
+                    <img
+                      src={file.content}
+                      alt=""
+                      className="h-7 w-7 shrink-0 rounded border border-(--border)/70 object-cover"
+                    />
+                  ) : (
+                    <FileIcon className="h-3 w-3 shrink-0" />
+                  )}
                   <span className="truncate">{file.name}</span>
                   <span className="shrink-0 opacity-70">{formatFileSize(file.size)}</span>
                   <button
@@ -1710,10 +1814,7 @@ function TimelineMessage({ message }: { message: ChatMessage }) {
   if (isUser) {
     return (
       <article className="flex justify-end">
-        <div className="max-w-[78%] rounded-2xl bg-(--surface) px-3.5 py-2 text-sm leading-6 text-(--fg)">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-(--dim)">
-            You
-          </div>
+        <div className="max-w-[72%] rounded-xl bg-(--surface) px-3.5 py-2 text-sm leading-6 text-(--fg)">
           <div className="whitespace-pre-wrap break-words">{message.text}</div>
         </div>
       </article>
@@ -1721,12 +1822,11 @@ function TimelineMessage({ message }: { message: ChatMessage }) {
   }
   const blocks = message.blocks ?? [];
   return (
-    <article className="flex flex-col gap-1">
-      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-(--dim)">Pi</div>
+    <article className="min-w-0">
       {blocks.length === 0 ? (
         <div className="text-sm leading-6 text-(--dim)">…</div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3">
           {blocks.map((block) => {
             if (block.kind === "thinking") {
               return (
@@ -1850,6 +1950,167 @@ function extractFromArgs(
   return null;
 }
 
+function compactToolText(value: string | null | undefined, limit = 88): string | null {
+  if (!value) return null;
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (!oneLine) return null;
+  if (oneLine.length <= limit) return oneLine;
+  return `${oneLine.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function fileBasename(path: string | null | undefined): string | null {
+  if (!path) return null;
+  const clean = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const slash = clean.lastIndexOf("/");
+  return clean.slice(slash + 1) || clean;
+}
+
+function humanizeToolName(name: string): string {
+  return name
+    .replace(/^functions[._-]/, "")
+    .replace(/^mcp__[a-z0-9_-]+__/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function hasAnyNeedle(value: string, needles: string[]): boolean {
+  return needles.some((needle) => value.includes(needle));
+}
+
+function toolArg(
+  block: ToolBlock,
+  keys: string[],
+  fallback?: string | null | undefined,
+): string | null {
+  return extractFromArgs(block.args, block.argsText, keys) ?? fallback ?? null;
+}
+
+function toolMeta(block: ToolBlock, filePath?: string | null) {
+  const name = block.name.toLowerCase();
+  const path = toolArg(block, [
+    "path",
+    "file_path",
+    "filePath",
+    "file",
+    "filename",
+    "target_file",
+    "uri",
+    "ref_id",
+  ]);
+  const query = toolArg(block, ["query", "q", "pattern", "search", "search_query", "needle"]);
+  const command = toolArg(block, ["cmd", "command", "script", "shell", "input"]);
+  const url = toolArg(block, ["url", "href"]);
+  const resolvedPath = filePath ?? path;
+  const basename = fileBasename(resolvedPath);
+
+  if (FILE_WRITE_TOOL_NAMES.has(name) || hasAnyNeedle(name, ["edit", "write", "patch"])) {
+    return {
+      icon: <PencilLine className="h-4 w-4" />,
+      label: basename ? `Edited ${basename}` : humanizeToolName(block.name),
+      detail: resolvedPath && basename !== resolvedPath ? resolvedPath : null,
+    };
+  }
+  if (hasAnyNeedle(name, ["search", "grep", "find", "ripgrep", "rg"])) {
+    return {
+      icon: <Search className="h-4 w-4" />,
+      label: compactToolText(query, 80)
+        ? `Searched for ${compactToolText(query, 80)}`
+        : "Searched files",
+      detail: path && !query ? path : null,
+    };
+  }
+  if (hasAnyNeedle(name, ["read", "open", "cat", "view", "list"])) {
+    return {
+      icon: <FileText className="h-4 w-4" />,
+      label: basename ? `Read ${basename}` : humanizeToolName(block.name),
+      detail: resolvedPath && basename !== resolvedPath ? resolvedPath : null,
+    };
+  }
+  if (hasAnyNeedle(name, ["exec", "command", "shell", "bash", "run", "terminal"])) {
+    return {
+      icon: <TerminalSquare className="h-4 w-4" />,
+      label: "Ran command",
+      detail: compactToolText(command, 110),
+    };
+  }
+  if (hasAnyNeedle(name, ["browser", "web", "open_url", "navigate"])) {
+    return {
+      icon: <GlobeIcon className="h-4 w-4" />,
+      label: "Used browser",
+      detail: compactToolText(url, 110),
+    };
+  }
+  return {
+    icon: <Wrench className="h-4 w-4" />,
+    label: humanizeToolName(block.name),
+    detail: compactToolText(command ?? query ?? path ?? url, 110),
+  };
+}
+
+function ToolStatus({ status }: { status: ToolBlock["status"] }) {
+  if (status === "running") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] text-(--dim)">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        running
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] text-(--err)">
+        <AlertTriangle className="h-3 w-3" />
+        error
+      </span>
+    );
+  }
+  return null;
+}
+
+function ToolSummary({
+  block,
+  filePath,
+  children,
+  open = false,
+}: {
+  block: ToolBlock;
+  filePath?: string | null;
+  children?: ReactNode;
+  open?: boolean;
+}) {
+  const meta = toolMeta(block, filePath);
+  return (
+    <details className="group py-0.5" open={open}>
+      <summary className="flex cursor-pointer list-none items-start gap-2 rounded-md py-1 text-(--dim) hover:text-(--fg) [&::-webkit-details-marker]:hidden">
+        <span className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center opacity-80">
+          {meta.icon}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] leading-6">{meta.label}</span>
+          {meta.detail ? (
+            <span className="block truncate font-mono text-[11px] leading-4 opacity-70">
+              {meta.detail}
+            </span>
+          ) : null}
+        </span>
+        <ToolStatus status={block.status} />
+        {children ? (
+          <ChevronDownIcon className="mt-1 h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+        ) : null}
+      </summary>
+      {children ? <div className="ml-6 mt-1">{children}</div> : null}
+    </details>
+  );
+}
+
+function ToolOutput({ children }: { children: ReactNode }) {
+  return (
+    <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-(--dim) [overflow-wrap:anywhere]">
+      {children}
+    </pre>
+  );
+}
+
 function ToolBlockView({ block }: { block: ToolBlock }) {
   const isFileWrite = FILE_WRITE_TOOL_NAMES.has(block.name.toLowerCase());
   const filePath = isFileWrite
@@ -1868,66 +2129,49 @@ function ToolBlockView({ block }: { block: ToolBlock }) {
   if (isFileWrite && (fileContent !== null || patchContent !== null)) {
     const body = fileContent ?? patchContent ?? "";
     return (
-      <details className="rounded border border-(--border)" open>
-        <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1 text-[11px] text-(--dim) hover:text-(--fg)">
-          <span className="font-mono font-medium text-(--fg)">{block.name}</span>
-          {filePath ? (
-            <span className="truncate font-mono text-[11px] text-(--accent)">{filePath}</span>
-          ) : null}
-          {lang ? (
-            <span className="rounded border border-(--border) px-1 py-0.5 text-[9px] uppercase text-(--dim)">
-              {lang}
-            </span>
-          ) : null}
-          <span className="ml-auto opacity-70">{block.status}</span>
+      <ToolSummary block={block} filePath={filePath} open>
+        <div className="mb-1 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.08em] text-(--dim)">
+          <span>{lang || "source"}</span>
           {isHtml ? (
             <button
               type="button"
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                setShowPreview((value) => !value);
-              }}
-              className="rounded border border-(--border) px-1.5 py-0.5 text-[10px] text-(--fg) hover:bg-(--surface)"
+              onClick={() => setShowPreview((value) => !value)}
+              className="rounded-md px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
             >
               {showPreview ? "Source" : "Preview"}
             </button>
           ) : null}
-        </summary>
+        </div>
         {isHtml && showPreview ? (
           <iframe
             sandbox=""
             srcDoc={body}
-            className="h-72 w-full border-t border-(--border) bg-white"
+            className="h-72 w-full rounded-md border border-(--border) bg-white"
             title={filePath ?? "preview"}
           />
         ) : (
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap border-t border-(--border) p-2 font-mono text-[11px] leading-5 text-(--fg)">
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-(--border)/70 bg-(--surface)/35 p-2 font-mono text-[11px] leading-5 text-(--fg)">
             {body}
           </pre>
         )}
         {block.resultText ? (
-          <div className="border-t border-(--border) bg-(--bg)/40 px-2 py-1 font-mono text-[10px] text-(--dim)">
-            {block.resultText}
+          <div className="mt-1 font-mono text-[10px] text-(--dim)">
+            <ToolOutput>{block.resultText}</ToolOutput>
           </div>
         ) : null}
-      </details>
+      </ToolSummary>
     );
   }
 
   // Generic fallback (shells, reads, searches, browser tools, etc.).
-  const display = block.resultText || block.argsText || block.text;
+  const display =
+    block.resultText || (block.text && block.text !== block.argsText ? block.text : "");
   return (
-    <details className="rounded border border-(--border)" open={block.status === "running"}>
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1 text-[11px] text-(--dim) hover:text-(--fg)">
-        <span className="font-mono font-medium">{block.name}</span>
-        <span className="opacity-70">· {block.status}</span>
-      </summary>
-      {display ? (
-        <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap border-t border-(--border) p-2 font-mono text-[11px] leading-5 text-(--fg)">
-          {display}
-        </pre>
-      ) : null}
-    </details>
+    <ToolSummary
+      block={block}
+      open={block.status === "running" || (Boolean(display) && display.length < 2400)}
+    >
+      {display ? <ToolOutput>{display}</ToolOutput> : null}
+    </ToolSummary>
   );
 }

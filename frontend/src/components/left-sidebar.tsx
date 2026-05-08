@@ -52,7 +52,7 @@ const tabs = [
   { href: "/agent", label: "Agent", icon: Bot },
   { href: "/recipes", label: "Models", icon: HardDrive },
   { href: "/logs", label: "Server", icon: Server },
-  { href: "/configs", label: "Settings", icon: Settings },
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 function LogoMark() {
@@ -85,6 +85,9 @@ function LogoMark() {
 function isRouteActive(pathname: string, href: string): boolean {
   if (href === "/") {
     return pathname === "/" || pathname === "/discover";
+  }
+  if (href === "/settings") {
+    return pathname.startsWith("/settings") || pathname.startsWith("/configs");
   }
   return pathname.startsWith(href);
 }
