@@ -46,6 +46,8 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 const SLOW_SNAPSHOT_TTL_MS = 30_000;
 const CPU_POWER_SAMPLE_TTL_MS = 5_000;
+const CPU_ENERGY_HELPER =
+  process.env["VLLM_STUDIO_CPU_ENERGY_HELPER"] ?? "/usr/local/libexec/vllm-studio/read-cpu-energy";
 
 type CpuSample = {
   idle: number;
@@ -165,10 +167,28 @@ const readCpuEnergySample = (): CpuEnergySample | null => {
     }
   }
 
-  if (packageCount === 0) return null;
+  if (packageCount === 0) return readCpuEnergyHelperSample();
   return {
     energyMicrojoules: totalEnergyMicrojoules,
     maxEnergyRangeMicrojoules: minMaxEnergyRangeMicrojoules,
+  };
+};
+
+const readCpuEnergyHelperSample = (): CpuEnergySample | null => {
+  if (!existsSync(CPU_ENERGY_HELPER)) return null;
+  const result = runCommand("sudo", ["-n", CPU_ENERGY_HELPER], 1_000);
+  if (result.status !== 0) return null;
+  return parseCpuEnergyHelperOutput(result.stdout);
+};
+
+export const parseCpuEnergyHelperOutput = (output: string): CpuEnergySample | null => {
+  const [energyRaw, maxRaw] = output.trim().split(/\s+/);
+  const energy = toNumber(energyRaw);
+  if (energy === null) return null;
+  const maxEnergyRange = toNumber(maxRaw);
+  return {
+    energyMicrojoules: energy,
+    maxEnergyRangeMicrojoules: maxEnergyRange,
   };
 };
 

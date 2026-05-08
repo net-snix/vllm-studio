@@ -59,7 +59,7 @@ export function LinuxDashboardView({
     if (visibleAlerts.some((alert) => alert.severity === "warning")) return "warning";
     return "ok";
   }, [data, visibleAlerts]);
-  const summary = data ? buildSummary(data, history) : null;
+  const summary = data ? buildSummary(data, history, statusData) : null;
 
   if (loading && !data) {
     return (
@@ -238,7 +238,11 @@ function Tag({ children }: { children: React.ReactNode }) {
   );
 }
 
-function buildSummary(data: LinuxDashboardSnapshot, history: DashboardHistoryPoint[]) {
+function buildSummary(
+  data: LinuxDashboardSnapshot,
+  history: DashboardHistoryPoint[],
+  statusData: DashboardLayoutProps,
+) {
   const latestHistory = history.at(-1);
   const cpuValue =
     latestHistory?.cpu_usage_percent ?? data.cpu.usage_percent ?? data.cpu.load_percent_1m ?? null;
@@ -254,7 +258,6 @@ function buildSummary(data: LinuxDashboardSnapshot, history: DashboardHistoryPoi
   ]);
   const totalPowerLimit = sumFinite(data.gpus.map((gpu) => gpu.power_limit_watts));
   const gpuPower = sumFinite(data.gpus.map((gpu) => gpu.power_draw_watts));
-  const gpuCountLabel = `${data.gpus.length} GPU${data.gpus.length === 1 ? "" : "s"}`;
   const cpuPowerLabel =
     data.cpu.power_draw_watts == null
       ? "CPU n/a"
@@ -264,11 +267,11 @@ function buildSummary(data: LinuxDashboardSnapshot, history: DashboardHistoryPoi
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
-    cpuDetail: `${formatCpuTopology(data)} load ${data.host.load_average.join(" / ")}`,
+    cpuDetail: data.host.cpu_model ?? "Unknown CPU",
     memory: String(Math.round(data.memory.used_percent)),
     memoryDetail: `${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`,
     vram: `${formatGpuGb(totalVramUsed)}/${formatGpuGb(totalVram)}`,
-    vramDetail: `${gpuCountLabel} util ${formatPercent(avgGpuUtil)}`,
+    vramDetail: currentModelLabel(statusData),
     gpus: String(data.gpus.length),
     gpuUtil: `util ${formatPercent(avgGpuUtil)}`,
     power: formatGpuPower(totalPower, undefined),
@@ -280,6 +283,22 @@ function buildSummary(data: LinuxDashboardSnapshot, history: DashboardHistoryPoi
       second: "2-digit",
     }),
   };
+}
+
+function currentModelLabel(statusData: DashboardLayoutProps): string {
+  const process = statusData.currentProcess;
+  if (!process) return "No model loaded";
+  return (
+    process.served_model_name ||
+    shortModelPath(process.model_path) ||
+    `${process.backend}:${process.port}`
+  );
+}
+
+function shortModelPath(pathValue: string | null): string | null {
+  if (!pathValue) return null;
+  const parts = pathValue.split("/").filter(Boolean);
+  return parts.at(-1) ?? pathValue;
 }
 
 function isFanHwmonAlert(alert: LinuxDashboardAlert): boolean {

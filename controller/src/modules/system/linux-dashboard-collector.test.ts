@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseCpuInfoIdentity } from "./linux-dashboard-collector";
+import { parseCpuEnergyHelperOutput, parseCpuInfoIdentity } from "./linux-dashboard-collector";
 import { parseDiskTargets } from "./linux-dashboard-disks";
 
 const cpuEntry = (processor: number, physicalId: number, coreId: number): string => `
@@ -49,6 +49,19 @@ describe("linux dashboard CPU identity", () => {
       physicalCores: 4,
       threads: 4,
     });
+  });
+});
+
+describe("linux dashboard CPU power helper", () => {
+  it("parses privileged powercap energy samples", () => {
+    expect(parseCpuEnergyHelperOutput("123456 999999")).toEqual({
+      energyMicrojoules: 123456,
+      maxEnergyRangeMicrojoules: 999999,
+    });
+  });
+
+  it("rejects invalid helper output", () => {
+    expect(parseCpuEnergyHelperOutput("not-energy")).toBeNull();
   });
 });
 
