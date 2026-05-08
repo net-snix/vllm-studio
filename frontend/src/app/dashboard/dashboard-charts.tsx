@@ -62,7 +62,11 @@ const chartScaleMax = (samples: DashboardUsageSample[], scale: ChartScale): numb
   return 100;
 };
 
-const toChartPoints = (samples: DashboardUsageSample[], scaleMax: number): ChartPoint[] => {
+const toChartPoints = (
+  samples: DashboardUsageSample[],
+  scaleMax: number,
+  windowMs: number,
+): ChartPoint[] => {
   const visibleSamples = samples.flatMap((sample): Array<{ time: number; value: number }> => {
     if (
       typeof sample.value !== "number" ||
@@ -76,11 +80,14 @@ const toChartPoints = (samples: DashboardUsageSample[], scaleMax: number): Chart
   const first = visibleSamples[0];
   const last = visibleSamples.at(-1);
   if (!first || !last) return [];
-  const timeSpan = Math.max(last.time - first.time, 1);
+  const elapsed = last.time - first.time;
+  const start = elapsed >= windowMs ? last.time - windowMs : first.time;
+  const end = start + windowMs;
+  const timeSpan = Math.max(end - start, 1);
 
   return visibleSamples.flatMap((sample): ChartPoint[] => {
     const value = sample.value;
-    const x = CHART_PAD + ((sample.time - first.time) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
+    const x = CHART_PAD + ((sample.time - start) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
     const y =
       CHART_PAD +
       ((scaleMax - Math.min(scaleMax, Math.max(0, value))) / scaleMax) *
@@ -110,7 +117,7 @@ function UsageLineChart({
 }) {
   const visibleSamples = samplesInWindow(samples, windowMs);
   const scaleMax = chartScaleMax(visibleSamples, scale);
-  const points = toChartPoints(visibleSamples, scaleMax);
+  const points = toChartPoints(visibleSamples, scaleMax, windowMs);
   const linePath = buildLinePath(points);
 
   return (
@@ -176,7 +183,7 @@ export function SystemOverview({
   }));
 
   return (
-    <Section title="Host telemetry" meta="active window">
+    <Section title="Host telemetry" meta="last 10 minutes">
       <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <TrendPanel
           title="CPU usage"
