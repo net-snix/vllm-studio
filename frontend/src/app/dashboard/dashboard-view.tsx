@@ -266,8 +266,7 @@ function buildSummary(
     data.cpu.power_draw_watts == null
       ? "CPU n/a"
       : `CPU ${formatGpuPower(data.cpu.power_draw_watts, undefined)}`;
-  const gpuPowerLabel =
-    gpuPower == null ? "GPU n/a" : `GPU ${formatGpuPower(gpuPower, totalPowerLimit)}`;
+  const gpuPowerLabel = gpuPower == null ? "GPU n/a" : `GPU ${formatGpuPower(gpuPower, undefined)}`;
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
