@@ -72,11 +72,11 @@ export function LinuxDashboardView({
 
   return (
     <div className="min-h-full bg-(--bg) text-(--fg)">
-      <div className="mx-auto max-w-[118rem] px-5 py-5 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:px-7 2xl:px-10">
-        <header className="px-1 pt-1">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="mx-auto max-w-6xl px-4 py-4 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:px-6 lg:py-6">
+        <header>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] tracking-[0.04em]">
+              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] tracking-[0.04em]">
                 <span className={`h-1.5 w-1.5 ${statusDotClass(topStatus)}`} />
                 <span className="font-medium uppercase tracking-[0.16em] text-(--dim)">
                   {topStatus === "ok" ? "Active" : topStatus}
@@ -89,13 +89,13 @@ export function LinuxDashboardView({
                   </span>
                 ) : null}
               </div>
-              <h1 className="mt-1.5 truncate text-[24px] font-semibold leading-tight tracking-[-0.01em] text-(--fg)">
+              <h1 className="mt-1 truncate text-[18px] font-semibold leading-tight tracking-[-0.01em] text-(--fg)">
                 {data?.host.hostname ?? "Linux host"}
               </h1>
             </div>
 
             <div className="flex shrink-0 items-center gap-1.5">
-              <label className="inline-flex h-9 items-center gap-2 border border-(--border) px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-(--dim) hover:bg-(--fg)/5">
+              <label className="inline-flex h-8 items-center gap-2 border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--dim) hover:bg-(--fg)/5">
                 <input
                   type="checkbox"
                   checked={autoRefresh}
@@ -106,7 +106,7 @@ export function LinuxDashboardView({
               </label>
               <button
                 onClick={onRefresh}
-                className="inline-flex h-9 items-center gap-2 border border-(--border) px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-(--fg) hover:bg-(--fg)/5"
+                className="inline-flex h-8 items-center gap-2 border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--fg) hover:bg-(--fg)/5"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
                 Refresh
@@ -115,7 +115,7 @@ export function LinuxDashboardView({
           </div>
 
           {summary ? (
-            <dl className="mt-6 grid w-full grid-cols-2 border-b border-(--border)/45 pb-6 sm:grid-cols-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,0.85fr)_minmax(0,0.9fr)_minmax(0,0.9fr)]">
+            <dl className="mt-5 grid w-full grid-cols-2 border-b border-(--border)/45 pb-5 sm:grid-cols-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,0.85fr)_minmax(0,0.9fr)_minmax(0,0.9fr)]">
               <MetricColumn label="CPU" value={summary.cpu} unit="%" detail={summary.cpuDetail} />
               <MetricColumn
                 label="Memory"
@@ -142,7 +142,7 @@ export function LinuxDashboardView({
         ) : null}
 
         {data ? (
-          <main className="mt-7 space-y-7">
+          <main className="mt-5 space-y-5">
             {visibleAlerts.length > 0 ? <AlertStrip alerts={visibleAlerts} /> : null}
 
             <SystemOverview data={data} history={history} status={topStatus} />
@@ -156,7 +156,7 @@ export function LinuxDashboardView({
               </div>
             </Section>
 
-            <div className="grid gap-7 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
               <Section title="Services" meta="local ports">
                 <ServiceGrid
                   services={data.services}
@@ -193,16 +193,16 @@ function MetricColumn({
   detail?: string;
 }) {
   return (
-    <div className="min-w-0 border-r border-(--border)/35 px-4 py-2 first:pl-0 last:border-r-0">
+    <div className="min-w-0 border-r border-(--border)/35 px-3 py-1.5 first:pl-0 last:border-r-0">
       <dt className="font-mono text-[10px] uppercase tracking-[0.22em] text-(--dim)/75">{label}</dt>
-      <dd className="mt-3 flex min-w-0 items-baseline gap-2 font-mono tabular-nums">
-        <span className="truncate text-[24px] font-light leading-none text-(--fg)/92 sm:text-[34px]">
+      <dd className="mt-2.5 flex min-w-0 items-baseline gap-1.5 font-mono tabular-nums">
+        <span className="truncate text-[22px] font-light leading-none text-(--fg)/92 sm:text-[28px]">
           {value ?? "n/a"}
         </span>
-        {unit ? <span className="text-[12px] text-(--dim)/70">{unit}</span> : null}
+        {unit ? <span className="text-[11px] text-(--dim)/70">{unit}</span> : null}
       </dd>
       {detail ? (
-        <div className="mt-2 truncate font-mono text-[11px] text-(--dim)/65" title={detail}>
+        <div className="mt-1.5 truncate font-mono text-[10.5px] text-(--dim)/65" title={detail}>
           {detail}
         </div>
       ) : null}
@@ -220,13 +220,13 @@ function CompactMetric({
   detail?: string;
 }) {
   return (
-    <div className="min-w-0 border-r border-(--border)/35 px-4 py-2 last:border-r-0">
+    <div className="min-w-0 border-r border-(--border)/35 px-3 py-1.5 last:border-r-0">
       <dt className="font-mono text-[10px] uppercase tracking-[0.22em] text-(--dim)/75">{label}</dt>
-      <dd className="mt-3 truncate font-mono text-[19px] tabular-nums text-(--fg)/88">
+      <dd className="mt-2.5 truncate font-mono text-[17px] tabular-nums text-(--fg)/88">
         {value ?? "n/a"}
       </dd>
       {detail ? (
-        <div className="mt-2 truncate font-mono text-[11px] text-(--dim)/65" title={detail}>
+        <div className="mt-1.5 truncate font-mono text-[10.5px] text-(--dim)/65" title={detail}>
           {detail}
         </div>
       ) : null}

@@ -184,7 +184,7 @@ export function SystemOverview({
 
   return (
     <Section title="Host telemetry" meta="last 10 minutes">
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <TrendPanel
           title="CPU usage"
           value={formatPercent(cpuCurrent)}
@@ -236,8 +236,8 @@ export function GpuTelemetry({
       meta={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
     >
       {sortedGpus.length > 0 ? (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-x-7 gap-y-2 font-mono text-[11px] tabular-nums">
+        <div className="space-y-3.5">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[10.5px] tabular-nums">
             <div className="flex min-w-[16rem] flex-1 items-center gap-3">
               <div className="h-[3px] min-w-24 flex-1 overflow-hidden bg-(--dim)/15">
                 <div className="h-full bg-(--fg)/55" style={{ width: `${memPct ?? 0}%` }} />
@@ -252,7 +252,7 @@ export function GpuTelemetry({
             <Aggregate label="pwr" value={formatGpuPower(totalPower, totalPowerLimit)} />
           </div>
 
-          <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             {sortedGpus.map((gpu) => (
               <GpuGraph key={`${gpu.index}-${gpu.uuid ?? gpu.name}`} gpu={gpu} history={history} />
             ))}
@@ -291,7 +291,7 @@ function TrendPanel({
         </div>
         <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">{value}</div>
       </div>
-      <div className={size === "large" ? "h-44 sm:h-48" : "h-28 sm:h-32"}>{children}</div>
+      <div className={size === "large" ? "h-36 sm:h-40" : "h-24 sm:h-28"}>{children}</div>
     </div>
   );
 }
@@ -313,7 +313,7 @@ function GpuGraph({ gpu, history }: { gpu: LinuxDashboardGpu; history: Dashboard
           {formatPercent(gpu.utilization_percent)}
         </div>
       </div>
-      <div className="h-36 sm:h-40">
+      <div className="h-28 sm:h-32">
         <UsageLineChart samples={samples} scale="active" windowMs={COMPACT_CHART_WINDOW_MS} />
       </div>
     </div>
