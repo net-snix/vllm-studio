@@ -323,13 +323,28 @@ function GpuGraph({ gpu, history }: { gpu: LinuxDashboardGpu; history: Dashboard
 function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[720px] font-mono text-[11px]">
+      <table className="w-full min-w-[860px] table-fixed font-mono text-[11px]">
+        <colgroup>
+          <col className="w-[46%]" />
+          <col className="w-[24%]" />
+          <col className="w-[8%]" />
+          <col className="w-[7%]" />
+          <col className="w-[6%]" />
+          <col className="w-[9%]" />
+        </colgroup>
         <thead>
           <tr className="border-b border-(--border)/35 uppercase tracking-[0.16em] text-(--dim)/55">
-            {["GPU", "VRAM", "Util", "Temp", "Fan", "Power"].map((heading, index) => (
+            {([
+              ["GPU", "text-left"],
+              ["VRAM", "text-left pr-8"],
+              ["Util", "text-left pl-8"],
+              ["Temp", "text-left"],
+              ["Fan", "text-left"],
+              ["Power", "text-right"],
+            ] as const).map(([heading, alignClass]) => (
               <th
                 key={heading}
-                className={`py-2 font-medium ${index === 5 ? "text-right" : "text-left"}`}
+                className={`py-2 font-medium ${alignClass}`}
               >
                 {heading}
               </th>
@@ -354,7 +369,7 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
           G{gpu.index} <span className="text-(--dim)/55">{gpu.name}</span>
         </span>
       </td>
-      <td className="w-[14rem] py-1.5">
+      <td className="py-1.5 pr-8">
         <div className="flex items-center gap-3">
           <div className="h-[2px] min-w-20 flex-1 bg-(--dim)/15">
             <div
@@ -368,7 +383,7 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
           </span>
         </div>
       </td>
-      <td className="whitespace-nowrap py-1.5 tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap py-1.5 pl-8 tabular-nums text-(--dim)/70">
         {formatPercent(gpu.utilization_percent)}
       </td>
       <td className="whitespace-nowrap py-1.5 tabular-nums text-(--dim)/70">
