@@ -323,29 +323,26 @@ function GpuGraph({ gpu, history }: { gpu: LinuxDashboardGpu; history: Dashboard
 function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[860px] table-fixed font-mono text-[11px]">
+      <table className="w-full min-w-[760px] table-fixed font-mono text-[11px]">
         <colgroup>
-          <col className="w-[46%]" />
-          <col className="w-[24%]" />
+          <col className="w-[38%]" />
+          <col className="w-[30%]" />
+          <col className="w-[8%]" />
           <col className="w-[8%]" />
           <col className="w-[7%]" />
-          <col className="w-[6%]" />
           <col className="w-[9%]" />
         </colgroup>
         <thead>
           <tr className="border-b border-(--border)/35 uppercase tracking-[0.16em] text-(--dim)/55">
             {([
-              ["GPU", "text-left"],
-              ["VRAM", "text-left pr-8"],
-              ["Util", "text-left pl-8"],
-              ["Temp", "text-left"],
-              ["Fan", "text-left"],
-              ["Power", "text-right"],
+              ["GPU", "pr-6 text-left"],
+              ["VRAM", "px-6 text-left"],
+              ["Util", "px-4 text-right"],
+              ["Temp", "px-4 text-right"],
+              ["Fan", "px-4 text-right"],
+              ["Power", "pl-4 text-right"],
             ] as const).map(([heading, alignClass]) => (
-              <th
-                key={heading}
-                className={`py-2 font-medium ${alignClass}`}
-              >
+              <th key={heading} className={`py-2 font-medium ${alignClass}`}>
                 {heading}
               </th>
             ))}
@@ -364,35 +361,35 @@ function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
 function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
   return (
     <tr className="border-b border-(--border)/25 last:border-b-0">
-      <td className="max-w-[18rem] py-1.5 text-(--fg)/82" title={gpu.name}>
+      <td className="py-1.5 pr-6 text-(--fg)/82" title={gpu.name}>
         <span className="block truncate">
           G{gpu.index} <span className="text-(--dim)/55">{gpu.name}</span>
         </span>
       </td>
-      <td className="py-1.5 pr-8">
-        <div className="flex items-center gap-3">
-          <div className="h-[2px] min-w-20 flex-1 bg-(--dim)/15">
+      <td className="py-1.5 px-6">
+        <div className="grid grid-cols-[minmax(6rem,1fr)_4.75rem] items-center gap-4">
+          <div className="h-[2px] bg-(--dim)/15">
             <div
               className="h-full bg-(--fg)/45"
               style={{ width: `${gpu.memory_used_percent ?? 0}%` }}
             />
           </div>
-          <span className="whitespace-nowrap tabular-nums text-(--fg)/78">
+          <span className="whitespace-nowrap text-right tabular-nums text-(--fg)/78">
             {formatGpuGb(gpu.memory_used_bytes)}
             <span className="text-(--dim)/55">/{formatGpuGb(gpu.memory_total_bytes)}</span>
           </span>
         </div>
       </td>
-      <td className="whitespace-nowrap py-1.5 pl-8 tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-1.5 text-right tabular-nums text-(--dim)/70">
         {formatPercent(gpu.utilization_percent)}
       </td>
-      <td className="whitespace-nowrap py-1.5 tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-1.5 text-right tabular-nums text-(--dim)/70">
         {formatTemp(gpu.temperature_c)}
       </td>
-      <td className="whitespace-nowrap py-1.5 tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-1.5 text-right tabular-nums text-(--dim)/70">
         {formatPercent(gpu.fan_percent)}
       </td>
-      <td className="whitespace-nowrap py-1.5 text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap py-1.5 pl-4 text-right tabular-nums text-(--dim)/70">
         {formatGpuPower(gpu.power_draw_watts, gpu.power_limit_watts)}
       </td>
     </tr>
