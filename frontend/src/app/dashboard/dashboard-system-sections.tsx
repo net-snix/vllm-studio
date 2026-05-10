@@ -206,7 +206,7 @@ export function BackendsTable({
 export function ContainersTable({ data }: { data: LinuxDashboardSnapshot }) {
   if (data.docker_error) {
     return (
-      <div className="border border-(--err)/35 px-3 py-2 font-mono text-[11px] leading-relaxed text-(--err)">
+      <div className="border border-(--hl3)/35 bg-(--hl3)/5 px-3 py-2 font-mono text-[11px] leading-relaxed text-(--hl3)">
         Docker unavailable: {data.docker_error}
       </div>
     );
