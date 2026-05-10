@@ -19,7 +19,7 @@ export const formatWatts = (value: number | null | undefined): string =>
   typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} W` : "n/a";
 
 export const formatTemp = (value: number | null | undefined): string =>
-  typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} C` : "n/a";
+  typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)}°` : "n/a";
 
 export const formatUptime = (seconds: number): string => {
   const days = Math.floor(seconds / 86400);
