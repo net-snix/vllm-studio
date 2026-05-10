@@ -63,8 +63,10 @@ export function LinuxDashboardView({
   );
   const topStatus = useMemo<LinuxDashboardHealth>(() => {
     if (!data) return "unknown";
-    if (visibleAlerts.some((alert) => alert.severity === "critical")) return "critical";
-    if (visibleAlerts.some((alert) => alert.severity === "warning")) return "warning";
+    if (visibleAlerts.some((alert) => alert.severity === "critical"))
+      return "critical";
+    if (visibleAlerts.some((alert) => alert.severity === "warning"))
+      return "warning";
     return "ok";
   }, [data, visibleAlerts]);
   const summary = data ? buildSummary(data, history, statusData) : null;
@@ -108,7 +110,9 @@ export function LinuxDashboardView({
                 <input
                   type="checkbox"
                   checked={autoRefresh}
-                  onChange={(event) => onAutoRefreshChange(event.target.checked)}
+                  onChange={(event) =>
+                    onAutoRefreshChange(event.target.checked)
+                  }
                   className="h-3 w-3 border-(--border) bg-transparent"
                 />
                 Auto
@@ -117,47 +121,66 @@ export function LinuxDashboardView({
                 onClick={onRefresh}
                 className="inline-flex h-8 items-center gap-2 border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--fg) hover:bg-(--fg)/5"
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
+                />
                 Refresh
               </button>
             </div>
           </div>
 
           {summary && metricSparklines ? (
-            <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,0.95fr)_minmax(0,0.75fr)_minmax(0,0.95fr)_minmax(0,0.8fr)]">
+            <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1.1fr)_minmax(0,0.74fr)_minmax(0,1fr)_minmax(0,0.82fr)]">
               <MetricCard
                 label="CPU"
                 value={summary.cpu}
                 unit="%"
                 detail={summary.cpuDetail}
-                sparkline={<DashboardSparkline samples={metricSparklines.cpu} />}
+                sparkline={
+                  <DashboardSparkline samples={metricSparklines.cpu} />
+                }
               />
               <MetricCard
                 label="Memory"
                 value={summary.memory}
                 unit="%"
                 detail={summary.memoryDetail}
-                sparkline={<DashboardSparkline samples={metricSparklines.memory} />}
+                sparkline={
+                  <DashboardSparkline samples={metricSparklines.memory} />
+                }
               />
               <MetricCard
                 label="VRAM"
                 value={summary.vram}
                 detail={summary.vramDetail}
-                sparkline={<DashboardSparkline samples={metricSparklines.vram} />}
+                sparkline={
+                  <DashboardSparkline samples={metricSparklines.vram} />
+                }
               />
               <MetricCard
                 label="GPUs"
                 value={summary.gpus}
                 detail={summary.gpuUtil}
-                sparkline={<DashboardSparkline samples={metricSparklines.gpuUtil} dotted />}
+                sparkline={
+                  <DashboardSparkline
+                    samples={metricSparklines.gpuUtil}
+                    dotted
+                  />
+                }
               />
               <MetricCard
                 label="System Power"
                 value={summary.power}
                 detail={summary.powerDetail}
-                sparkline={<DashboardSparkline samples={metricSparklines.power} />}
+                sparkline={
+                  <DashboardSparkline samples={metricSparklines.power} />
+                }
               />
-              <MetricCard label="Uptime" value={summary.uptime} detail={summary.collectedAt} />
+              <MetricCard
+                label="Uptime"
+                value={summary.uptime}
+                detail={summary.collectedAt}
+              />
             </dl>
           ) : null}
         </header>
@@ -170,12 +193,14 @@ export function LinuxDashboardView({
 
         {data ? (
           <main className="mt-3 space-y-2.5">
-            {visibleAlerts.length > 0 ? <AlertStrip alerts={visibleAlerts} /> : null}
+            {visibleAlerts.length > 0 ? (
+              <AlertStrip alerts={visibleAlerts} />
+            ) : null}
 
             <SystemOverview data={data} history={history} status={topStatus} />
             <GpuTelemetry data={data} />
 
-            <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,0.78fr)_minmax(0,0.86fr)_minmax(0,1.15fr)]">
+            <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.84fr)_minmax(0,0.98fr)_minmax(0,1.18fr)]">
               <Section title="Disks" meta={`${data.disks.length} mounts`}>
                 <DisksTable disks={data.disks} />
               </Section>
@@ -199,7 +224,10 @@ export function LinuxDashboardView({
               </Section>
             </div>
 
-            <Section title="Containers" meta={data.docker_error ? "docker unavailable" : "docker"}>
+            <Section
+              title="Containers"
+              meta={data.docker_error ? "docker unavailable" : "docker"}
+            >
               <ContainersTable data={data} />
             </Section>
           </main>
@@ -223,22 +251,28 @@ function MetricCard({
   sparkline?: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0 rounded-[4px] border border-(--border)/70 bg-(--surface)/35 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-      <dt className="font-mono text-[10px] uppercase tracking-[0.2em] text-(--dim)/80">{label}</dt>
+    <div className="min-w-0 rounded-[4px] border border-(--border)/70 bg-(--surface)/35 px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+      <dt className="font-mono text-[10px] uppercase tracking-[0.2em] text-(--dim)/80">
+        {label}
+      </dt>
       <dd className="mt-2 flex min-w-0 items-baseline gap-1.5 font-mono tabular-nums">
-        <span className="min-w-0 truncate text-[24px] font-light leading-none text-(--fg)/95">
+        <span className="min-w-0 truncate text-[22px] font-light leading-none text-(--fg)/95">
           {value ?? "n/a"}
         </span>
-        {unit ? <span className="shrink-0 text-[11px] text-(--dim)/70">{unit}</span> : null}
+        {unit ? (
+          <span className="shrink-0 text-[11px] text-(--dim)/70">{unit}</span>
+        ) : null}
       </dd>
-      <div className="mt-2 flex min-w-0 items-center gap-3">
+      <div className="mt-2 flex min-w-0 items-center gap-2.5">
         <span
           className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-(--dim)/70"
           title={detail}
         >
           {detail ?? "\u00a0"}
         </span>
-        {sparkline ? <div className="w-14 min-w-0 shrink-0">{sparkline}</div> : null}
+        {sparkline ? (
+          <div className="w-12 min-w-0 shrink-0">{sparkline}</div>
+        ) : null}
       </div>
     </div>
   );
@@ -259,24 +293,39 @@ function buildSummary(
 ) {
   const latestHistory = history.at(-1);
   const cpuValue =
-    latestHistory?.cpu_usage_percent ?? data.cpu.usage_percent ?? data.cpu.load_percent_1m ?? null;
-  const totalVramUsed = data.gpus.reduce((sum, gpu) => sum + gpu.memory_used_bytes, 0);
-  const totalVram = data.gpus.reduce((sum, gpu) => sum + gpu.memory_total_bytes, 0);
+    latestHistory?.cpu_usage_percent ??
+    data.cpu.usage_percent ??
+    data.cpu.load_percent_1m ??
+    null;
+  const totalVramUsed = data.gpus.reduce(
+    (sum, gpu) => sum + gpu.memory_used_bytes,
+    0,
+  );
+  const totalVram = data.gpus.reduce(
+    (sum, gpu) => sum + gpu.memory_total_bytes,
+    0,
+  );
   const avgGpuUtil =
     data.gpus.length > 0
-      ? data.gpus.reduce((sum, gpu) => sum + (gpu.utilization_percent ?? 0), 0) / data.gpus.length
+      ? data.gpus.reduce(
+          (sum, gpu) => sum + (gpu.utilization_percent ?? 0),
+          0,
+        ) / data.gpus.length
       : null;
   const totalPower = sumFinite([
     data.cpu.power_draw_watts,
     ...data.gpus.map((gpu) => gpu.power_draw_watts),
   ]);
-  const totalPowerLimit = sumFinite(data.gpus.map((gpu) => gpu.power_limit_watts));
+  const totalPowerLimit = sumFinite(
+    data.gpus.map((gpu) => gpu.power_limit_watts),
+  );
   const gpuPower = sumFinite(data.gpus.map((gpu) => gpu.power_draw_watts));
   const cpuPowerLabel =
     data.cpu.power_draw_watts == null
       ? "CPU n/a"
       : `CPU ${formatGpuPower(data.cpu.power_draw_watts, undefined)}`;
-  const gpuPowerLabel = gpuPower == null ? "GPU n/a" : `GPU ${formatGpuPower(gpuPower, undefined)}`;
+  const gpuPowerLabel =
+    gpuPower == null ? "GPU n/a" : `GPU ${formatGpuPower(gpuPower, undefined)}`;
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
@@ -300,7 +349,10 @@ function buildSummary(
 
 function buildMetricSparklines(
   history: DashboardHistoryPoint[],
-): Record<"cpu" | "memory" | "vram" | "gpuUtil" | "power", DashboardUsageSample[]> {
+): Record<
+  "cpu" | "memory" | "vram" | "gpuUtil" | "power",
+  DashboardUsageSample[]
+> {
   const cpu = getCpuUsageSamples(history);
   const memory = history.map((point) => ({
     time: point.time,
@@ -310,11 +362,16 @@ function buildMetricSparklines(
   const gpuUtil = history.map((point) => {
     const values = point.gpus
       .map((gpu) => gpu.utilization_percent)
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+      .filter(
+        (value): value is number =>
+          typeof value === "number" && Number.isFinite(value),
+      );
     return {
       time: point.time,
       value:
-        values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+        values.length > 0
+          ? values.reduce((sum, value) => sum + value, 0) / values.length
+          : null,
     };
   });
   const power = getSystemPowerSamples(history);
@@ -345,7 +402,8 @@ function isFanHwmonAlert(alert: LinuxDashboardAlert): boolean {
 
 function knownBackendIds(statusData: DashboardLayoutProps): string[] {
   const values = new Set<string>();
-  if (statusData.currentProcess?.backend) values.add(statusData.currentProcess.backend);
+  if (statusData.currentProcess?.backend)
+    values.add(statusData.currentProcess.backend);
   for (const recipe of statusData.recipes) {
     if (recipe.backend) values.add(recipe.backend);
   }
@@ -365,7 +423,8 @@ function statusDotClass(status: LinuxDashboardHealth): string {
 
 function sumFinite(values: Array<number | null | undefined>): number | null {
   const total = values.reduce<number>(
-    (sum, value) => (typeof value === "number" && Number.isFinite(value) ? sum + value : sum),
+    (sum, value) =>
+      typeof value === "number" && Number.isFinite(value) ? sum + value : sum,
     0,
   );
   return total > 0 ? total : null;
