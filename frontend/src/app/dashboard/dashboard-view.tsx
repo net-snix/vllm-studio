@@ -136,6 +136,7 @@ export function LinuxDashboardView({
                 value={summary.cpu}
                 unit="%"
                 detail={summary.cpuDetail}
+                detailWrap
                 sparkline={
                   <DashboardSparkline samples={metricSparklines.cpu} />
                 }
@@ -179,7 +180,7 @@ export function LinuxDashboardView({
               <MetricCard
                 label="Uptime"
                 value={summary.uptime}
-                detail={summary.collectedAt}
+                detail={summary.bootedAt}
               />
             </dl>
           ) : null}
@@ -242,12 +243,14 @@ function MetricCard({
   value,
   unit,
   detail,
+  detailWrap = false,
   sparkline,
 }: {
   label: string;
   value: string | null;
   unit?: string;
   detail?: string;
+  detailWrap?: boolean;
   sparkline?: React.ReactNode;
 }) {
   return (
@@ -265,7 +268,11 @@ function MetricCard({
       </dd>
       <div className="mt-2 flex min-w-0 items-center gap-2.5">
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-(--dim)/70"
+          className={`min-w-0 flex-1 font-mono text-[10.5px] text-(--dim)/70 ${
+            detailWrap
+              ? "whitespace-normal break-words leading-snug"
+              : "truncate"
+          }`}
           title={detail}
         >
           {detail ?? "\u00a0"}
@@ -339,12 +346,36 @@ function buildSummary(
     power: formatGpuPower(totalPower, undefined),
     powerDetail: `${cpuPowerLabel} + ${gpuPowerLabel}`,
     uptime: formatUptime(data.host.uptime_seconds),
-    collectedAt: new Date(data.collected_at).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }),
+    bootedAt: `since ${formatBootedAt(data)}`,
   };
+}
+
+function formatBootedAt(data: LinuxDashboardSnapshot): string {
+  const collectedMs = Date.parse(data.collected_at);
+  if (!Number.isFinite(collectedMs)) return "unknown";
+
+  const bootedAt = new Date(collectedMs - data.host.uptime_seconds * 1000);
+  const collectedAt = new Date(collectedMs);
+  const sameDay =
+    bootedAt.getFullYear() === collectedAt.getFullYear() &&
+    bootedAt.getMonth() === collectedAt.getMonth() &&
+    bootedAt.getDate() === collectedAt.getDate();
+
+  return bootedAt.toLocaleString(
+    [],
+    sameDay
+      ? {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        }
+      : {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        },
+  );
 }
 
 function buildMetricSparklines(
