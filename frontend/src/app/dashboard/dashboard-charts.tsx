@@ -282,7 +282,6 @@ export function SystemOverview({
         <TrendPanel
           title="CPU usage"
           value={formatPercent(cpuCurrent)}
-          detail={`${formatCpuTopology(data)}  load ${data.host.load_average.join(" / ")}`}
           size="large"
         >
           <UsageLineChart
@@ -398,7 +397,7 @@ function TrendPanel({
 }: {
   title: string;
   value: string;
-  detail: string;
+  detail?: string;
   children: React.ReactNode;
   size?: "normal" | "large";
 }) {
@@ -409,9 +408,11 @@ function TrendPanel({
           <div className="font-mono text-[9.5px] uppercase tracking-[0.18em] text-(--dim)/70">
             {title}
           </div>
-          <div className="mt-1 truncate font-mono text-[11px] text-(--dim)/55">
-            {detail}
-          </div>
+          {detail ? (
+            <div className="mt-1 truncate font-mono text-[11px] text-(--dim)/55">
+              {detail}
+            </div>
+          ) : null}
         </div>
         <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">
           {value}
