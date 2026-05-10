@@ -44,4 +44,39 @@ describe("linux dashboard routes", () => {
     );
     expect(Array.isArray(body.alerts)).toBe(true);
   });
+
+  it("streams dashboard snapshots as SSE", async () => {
+    const app = new Hono();
+    const context = {
+      config: {
+        inference_port: 8000,
+      },
+      logger: {
+        debug: mock(() => undefined),
+        info: mock(() => undefined),
+        warn: mock(() => undefined),
+        error: mock(() => undefined),
+      },
+    } as unknown as AppContext;
+
+    registerLinuxDashboardRoutes(app, context);
+
+    const abort = new AbortController();
+    const response = await app.request("/linux-dashboard/stream", {
+      signal: abort.signal,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    const chunk = await reader?.read();
+    abort.abort();
+    await reader?.cancel().catch(() => undefined);
+
+    const text = new TextDecoder().decode(chunk?.value);
+    expect(text).toContain("event: linux-dashboard");
+    expect(text).toContain('"host"');
+  });
 });

@@ -22,7 +22,8 @@ export type DashboardHistoryPoint = {
   gpus: DashboardHistoryGpu[];
 };
 
-const DEFAULT_HISTORY_LIMIT = 96;
+const DASHBOARD_HISTORY_WINDOW_MS = 10 * 60 * 1000;
+const DEFAULT_HISTORY_LIMIT = 900;
 const DASHBOARD_HISTORY_STORAGE_KEY = "vllm-studio-dashboard-history";
 
 export type DashboardUsageSample = {
@@ -103,7 +104,11 @@ export const appendDashboardHistory = (
   const last = history.at(-1);
   if (last?.collected_at === snapshot.collected_at) return history;
 
-  return [...history, snapshotToHistoryPoint(snapshot)].slice(-limit);
+  const next = snapshotToHistoryPoint(snapshot);
+  const earliest = next.time - DASHBOARD_HISTORY_WINDOW_MS;
+  return [...history, next]
+    .filter((point) => point.time >= earliest)
+    .slice(-limit);
 };
 
 export const loadStoredDashboardHistory = (): DashboardHistoryPoint[] => {
@@ -114,7 +119,11 @@ export const loadStoredDashboardHistory = (): DashboardHistoryPoint[] => {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isHistoryPoint).slice(-DEFAULT_HISTORY_LIMIT);
+    const history = parsed.filter(isHistoryPoint).slice(-DEFAULT_HISTORY_LIMIT);
+    const latest = history.at(-1);
+    if (!latest) return [];
+    const earliest = latest.time - DASHBOARD_HISTORY_WINDOW_MS;
+    return history.filter((point) => point.time >= earliest);
   } catch {
     return [];
   }

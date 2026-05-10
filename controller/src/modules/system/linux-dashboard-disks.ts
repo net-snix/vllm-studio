@@ -110,6 +110,11 @@ export const collectDisks = (): DashboardDisk[] =>
     collectDisk(path, label)
   );
 
+/**
+ * Parse configured dashboard disk targets.
+ * @param value Comma-separated `label:path` entries.
+ * @returns Disk targets or the default root target.
+ */
 export function parseDiskTargets(value: string | undefined): DiskTarget[] {
   if (!value?.trim()) return DEFAULT_DISKS;
 

@@ -9,7 +9,7 @@ import type {
   UsageStats,
   VRAMCalculation,
 } from "../types";
-import type { ApiCore, RequestOptions } from "./core";
+import type { ApiCore, ChatRunStreamEvent, RequestOptions } from "./core";
 
 export function createSystemApi(core: ApiCore) {
   return {
@@ -108,6 +108,11 @@ export function createSystemApi(core: ApiCore) {
 
     getLinuxDashboard: (options?: RequestOptions): Promise<LinuxDashboardSnapshot> =>
       core.request("/linux-dashboard", options),
+
+    streamLinuxDashboard: (options?: {
+      signal?: AbortSignal;
+    }): Promise<AsyncGenerator<ChatRunStreamEvent>> =>
+      core.getSseJson("/linux-dashboard/stream", options),
 
     getStatus: async (
       options?: RequestOptions,
