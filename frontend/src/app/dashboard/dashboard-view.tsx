@@ -25,6 +25,7 @@ import {
   Sensors,
   ServicesTable,
 } from "./dashboard-system-sections";
+import { ShutdownHostConfirm } from "./shutdown-host-confirm";
 
 type LinuxDashboardViewProps = {
   data: LinuxDashboardSnapshot | null;
@@ -36,6 +37,7 @@ type LinuxDashboardViewProps = {
   autoRefresh: boolean;
   onAutoRefreshChange: (value: boolean) => void;
   onRefresh: () => void;
+  onShutdown: () => Promise<void>;
 };
 
 export function LinuxDashboardView({
@@ -48,6 +50,7 @@ export function LinuxDashboardView({
   autoRefresh,
   onAutoRefreshChange,
   onRefresh,
+  onShutdown,
 }: LinuxDashboardViewProps) {
   const visibleAlerts = useMemo(
     () => (data ? data.alerts.filter((alert) => !isFanHwmonAlert(alert)) : []),
@@ -117,6 +120,18 @@ export function LinuxDashboardView({
                 />
                 Refresh
               </button>
+              <ShutdownHostConfirm
+                onShutdown={onShutdown}
+                trigger={({ open, shuttingDown }) => (
+                  <button
+                    onClick={open}
+                    disabled={shuttingDown}
+                    className="inline-flex h-8 items-center border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+                  >
+                    {shuttingDown ? "Shutting..." : "Shut down"}
+                  </button>
+                )}
+              />
             </div>
           </div>
 

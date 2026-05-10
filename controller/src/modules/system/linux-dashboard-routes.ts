@@ -6,6 +6,7 @@ import {
   LinuxDashboardTelemetry,
   type LinuxDashboardTelemetryEvent,
 } from "./linux-dashboard-telemetry";
+import { scheduleHostShutdown } from "./host-shutdown";
 
 const telemetryByContext = new WeakMap<AppContext, LinuxDashboardTelemetry>();
 
@@ -57,6 +58,19 @@ export const registerLinuxDashboardRoutes = (app: Hono, context: AppContext): vo
     );
     return new Response(stream, {
       headers: buildSseHeaders(),
+    });
+  });
+
+  app.post("/linux-dashboard/shutdown", (ctx) => {
+    const result = scheduleHostShutdown();
+    if (!result.success) {
+      return ctx.json({ success: false, error: result.error }, { status: 500 });
+    }
+    context.logger.warn("Host shutdown requested from dashboard");
+    return ctx.json({
+      success: true,
+      message: "Shutdown scheduled",
+      command: result.command,
     });
   });
 };

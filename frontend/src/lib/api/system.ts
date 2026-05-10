@@ -114,6 +114,13 @@ export function createSystemApi(core: ApiCore) {
     }): Promise<AsyncGenerator<ChatRunStreamEvent>> =>
       core.getSseJson("/linux-dashboard/stream", options),
 
+    shutdownHost: (): Promise<{ success: boolean; message: string }> =>
+      core.request("/linux-dashboard/shutdown", {
+        method: "POST",
+        timeout: 5_000,
+        retries: 0,
+      }),
+
     getStatus: async (
       options?: RequestOptions,
     ): Promise<{

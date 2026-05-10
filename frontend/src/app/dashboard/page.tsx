@@ -134,6 +134,9 @@ export default function LinuxDashboardPage() {
       autoRefresh={autoRefresh}
       onAutoRefreshChange={setAutoRefresh}
       onRefresh={() => void load()}
+      onShutdown={async () => {
+        await api.shutdownHost();
+      }}
     />
   );
 }
