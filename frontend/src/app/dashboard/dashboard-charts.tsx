@@ -34,14 +34,6 @@ const latestNumber = (
   return null;
 };
 
-const maxNumber = (values: Array<number | null | undefined>): number | null => {
-  const valid = values.filter(
-    (value): value is number =>
-      typeof value === "number" && Number.isFinite(value),
-  );
-  return valid.length > 0 ? Math.max(...valid) : null;
-};
-
 const latestSampleTime = (samples: DashboardUsageSample[]): number | null => {
   for (let index = samples.length - 1; index >= 0; index -= 1) {
     const time = samples[index]?.time;
@@ -328,40 +320,7 @@ export function GpuTelemetry({
   const sortedGpus = [...data.gpus].sort(
     (a, b) => b.memory_total_bytes - a.memory_total_bytes,
   );
-  const totalUsed = sortedGpus.reduce(
-    (sum, gpu) => sum + gpu.memory_used_bytes,
-    0,
-  );
-  const totalCap = sortedGpus.reduce(
-    (sum, gpu) => sum + gpu.memory_total_bytes,
-    0,
-  );
-  const totalPower = sumFinite(sortedGpus.map((gpu) => gpu.power_draw_watts));
-  const totalPowerLimit = sumFinite(
-    sortedGpus.map((gpu) => gpu.power_limit_watts),
-  );
-  const avgUtil =
-    sortedGpus.length > 0
-      ? sortedGpus.reduce(
-          (sum, gpu) => sum + (gpu.utilization_percent ?? 0),
-          0,
-        ) / sortedGpus.length
-      : null;
-  const maxTemp = maxNumber(sortedGpus.map((gpu) => gpu.temperature_c));
-  const maxMemoryTemp = maxNumber(
-    sortedGpus.map((gpu) => gpu.memory_temperature_c),
-  );
-  const memoryTempUnavailableReason =
-    maxMemoryTemp === null
-      ? sortedGpus
-          .map((gpu) => gpu.memory_temperature_unavailable_reason)
-          .find((reason): reason is string => Boolean(reason)) ?? undefined
-      : undefined;
-  const avgFan =
-    sortedGpus.length > 0
-      ? sortedGpus.reduce((sum, gpu) => sum + (gpu.fan_percent ?? 0), 0) /
-        sortedGpus.length
-      : null;
+
   return (
     <Section
       title="GPUs"
@@ -369,25 +328,6 @@ export function GpuTelemetry({
     >
       {sortedGpus.length > 0 ? (
         <div className="space-y-2.5">
-          <div className="grid min-h-[66px] grid-cols-2 border border-(--border)/55 bg-(--bg)/35 font-mono sm:grid-cols-6">
-            <GpuStat
-              label="VRAM"
-              value={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
-            />
-            <GpuStat label="Util" value={formatPercent(avgUtil)} />
-            <GpuStat label="Temp" value={formatTemp(maxTemp)} />
-            <GpuStat
-              label="VRAM Temp"
-              value={formatTemp(maxMemoryTemp)}
-              unavailableReason={memoryTempUnavailableReason}
-            />
-            <GpuStat label="Fan" value={formatPercent(avgFan)} />
-            <GpuStat
-              label="Pwr"
-              value={formatGpuPower(totalPower, totalPowerLimit)}
-            />
-          </div>
-
           <div className="grid gap-2.5 lg:grid-cols-2">
             {sortedGpus.map((gpu) => (
               <GpuUsageGraph
@@ -577,27 +517,6 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
   );
 }
 
-function GpuStat({
-  label,
-  value,
-  unavailableReason,
-}: {
-  label: string;
-  value: string;
-  unavailableReason?: string;
-}) {
-  return (
-    <div className="min-w-0 border-b border-r border-(--border)/40 px-3 py-1.5 last:border-r-0 sm:border-b-0">
-      <div className="font-mono text-[9.5px] uppercase tracking-[0.18em] text-(--dim)/65">
-        {label}
-      </div>
-      <div className="mt-1.5 truncate font-mono text-[14px] tabular-nums text-(--fg)/90">
-        <UnavailableValue value={value} unavailableReason={unavailableReason} />
-      </div>
-    </div>
-  );
-}
-
 function UnavailableValue({
   value,
   unavailableReason,
@@ -648,13 +567,4 @@ export function formatCpuTopology(data: LinuxDashboardSnapshot): string {
   const physicalCores = data.host.cpu_physical_cores || data.cpu.cores;
   const threads = data.host.cpu_threads || data.cpu.cores;
   return `${physicalCores} cores / ${threads} threads`;
-}
-
-function sumFinite(values: Array<number | null | undefined>): number | null {
-  const total = values.reduce<number>(
-    (sum, value) =>
-      typeof value === "number" && Number.isFinite(value) ? sum + value : sum,
-    0,
-  );
-  return total > 0 ? total : null;
 }
