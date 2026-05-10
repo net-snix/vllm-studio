@@ -8,7 +8,7 @@ import type {
   DashboardHistoryPoint,
   DashboardUsageSample,
 } from "./dashboard-history";
-import { getCpuUsageSamples } from "./dashboard-history";
+import { getCpuUsageSamples, getGpuUsageSamples } from "./dashboard-history";
 import { Meter, Section } from "./dashboard-system-sections";
 
 const CHART_WIDTH = 360;
@@ -295,6 +295,7 @@ export function SystemOverview({
         >
           <UsageLineChart
             samples={cpuSamples}
+            stroke="var(--hl1)"
             scale="active"
             windowMs={COMPACT_CHART_WINDOW_MS}
           />
@@ -317,7 +318,13 @@ export function SystemOverview({
   );
 }
 
-export function GpuTelemetry({ data }: { data: LinuxDashboardSnapshot }) {
+export function GpuTelemetry({
+  data,
+  history,
+}: {
+  data: LinuxDashboardSnapshot;
+  history: DashboardHistoryPoint[];
+}) {
   const sortedGpus = [...data.gpus].sort(
     (a, b) => b.memory_total_bytes - a.memory_total_bytes,
   );
@@ -367,6 +374,16 @@ export function GpuTelemetry({ data }: { data: LinuxDashboardSnapshot }) {
             />
           </div>
 
+          <div className="grid gap-2.5 lg:grid-cols-2">
+            {sortedGpus.map((gpu) => (
+              <GpuUsageGraph
+                key={`${gpu.index}-${gpu.uuid ?? gpu.name}`}
+                gpu={gpu}
+                history={history}
+              />
+            ))}
+          </div>
+
           <GpuListTable gpus={sortedGpus} />
         </div>
       ) : (
@@ -375,6 +392,46 @@ export function GpuTelemetry({ data }: { data: LinuxDashboardSnapshot }) {
         </div>
       )}
     </Section>
+  );
+}
+
+function GpuUsageGraph({
+  gpu,
+  history,
+}: {
+  gpu: LinuxDashboardGpu;
+  history: DashboardHistoryPoint[];
+}) {
+  const samples = getGpuUsageSamples(history, gpu);
+
+  return (
+    <div className="min-w-0 border border-(--border)/45 bg-(--bg)/35 px-3 py-2 font-mono">
+      <div className="mb-1.5 flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <div
+            className="truncate text-[10.5px] text-(--fg)/82"
+            title={gpu.name}
+          >
+            G{gpu.index}{" "}
+            <span className="text-(--dim)/60">{gpu.name}</span>
+          </div>
+          <div className="mt-px text-[9px] uppercase tracking-[0.14em] text-(--dim)/55">
+            Utilization
+          </div>
+        </div>
+        <div className="shrink-0 text-[12px] tabular-nums text-(--fg)/85">
+          {formatPercent(gpu.utilization_percent)}
+        </div>
+      </div>
+      <div className="h-14">
+        <UsageLineChart
+          samples={samples}
+          stroke="var(--hl1)"
+          scale="active"
+          windowMs={COMPACT_CHART_WINDOW_MS}
+        />
+      </div>
+    </div>
   );
 }
 

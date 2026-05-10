@@ -198,7 +198,7 @@ export function LinuxDashboardView({
             ) : null}
 
             <SystemOverview data={data} history={history} status={topStatus} />
-            <GpuTelemetry data={data} />
+            <GpuTelemetry data={data} history={history} />
 
             <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.84fr)_minmax(0,0.98fr)_minmax(0,1.18fr)]">
               <Section title="Disks" meta={`${data.disks.length} mounts`}>
