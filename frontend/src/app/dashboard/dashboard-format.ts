@@ -44,4 +44,4 @@ export const alertClasses: Record<LinuxDashboardAlert["severity"], string> = {
 };
 
 export const serviceDot = (status: LinuxDashboardService["status"]): string =>
-  status === "running" ? "bg-(--fg)/55" : "bg-(--dim)";
+  status === "running" ? "bg-(--hl2)" : "bg-(--dim)";
