@@ -539,7 +539,7 @@ function GpuPowerValue({
 
   return (
     <>
-      {draw}
+      {draw === "n/a" ? draw : `${draw}W`}
       <span className="text-(--dim)/55">/{Math.round(limitWatts)}W</span>
     </>
   );
