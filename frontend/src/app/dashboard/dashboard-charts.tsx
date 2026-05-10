@@ -489,13 +489,13 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
           </span>
         </div>
       </td>
-      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--fg)/78">
         {formatPercent(gpu.utilization_percent)}
       </td>
-      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--fg)/78">
         {formatTemp(gpu.temperature_c)}
       </td>
-      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--fg)/78">
         <UnavailableValue
           value={formatTemp(gpu.memory_temperature_c)}
           unavailableReason={
@@ -505,10 +505,10 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
           }
         />
       </td>
-      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--fg)/78">
         {formatPercent(gpu.fan_percent)}
       </td>
-      <td className="whitespace-nowrap py-[5px] pl-4 text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap py-[5px] pl-4 text-right tabular-nums text-(--fg)/78">
         {formatGpuPower(gpu.power_draw_watts, gpu.power_limit_watts)}
       </td>
     </tr>
