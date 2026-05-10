@@ -367,9 +367,6 @@ function GpuUsageGraph({
             G{gpu.index}{" "}
             <span className="text-(--dim)/60">{gpu.name}</span>
           </div>
-          <div className="mt-px text-[9px] uppercase tracking-[0.14em] text-(--dim)/55">
-            Utilization
-          </div>
         </div>
         <div className="shrink-0 text-[12px] tabular-nums text-(--fg)/85">
           {formatPercent(gpu.utilization_percent)}

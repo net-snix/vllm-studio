@@ -102,18 +102,6 @@ const DISK_TITLES: Record<string, string> = {
   training: "training",
 };
 
-function diskSubtitle(disk: LinuxDashboardDisk): string {
-  if (!disk.mounted) return "missing";
-
-  const hardware = [disk.device_model, disk.device_size]
-    .filter(Boolean)
-    .join(" ");
-  const device = disk.device ?? "unknown device";
-  const mount = disk.mountpoint ?? disk.path;
-  const fs = disk.filesystem ?? "unknown fs";
-  return [hardware || null, device, fs, mount].filter(Boolean).join("  ");
-}
-
 export function DisksTable({ disks }: { disks: LinuxDashboardDisk[] }) {
   return (
     <div className="overflow-x-auto">
@@ -123,18 +111,6 @@ export function DisksTable({ disks }: { disks: LinuxDashboardDisk[] }) {
           <col className="w-[24%]" />
           <col className="w-[24%]" />
         </colgroup>
-        <thead className="uppercase tracking-[0.14em] text-(--dim)/65">
-          <tr className="border-b border-(--border)/45">
-            {["Mount", "Free", "Use"].map((heading) => (
-              <th
-                key={heading}
-                className="py-1.5 pr-3 font-medium last:pr-0 last:text-right"
-              >
-                {heading}
-              </th>
-            ))}
-          </tr>
-        </thead>
         <tbody>
           {disks.map((disk) => (
             <tr
@@ -148,15 +124,11 @@ export function DisksTable({ disks }: { disks: LinuxDashboardDisk[] }) {
                       className={`h-1.5 w-1.5 shrink-0 ${healthDotClass(disk.status)}`}
                     />
                     <span className="truncate">
-                      {DISK_TITLES[disk.label] ?? disk.label}
+                      {disk.device_model ??
+                        DISK_TITLES[disk.label] ??
+                        disk.label}
                     </span>
                   </span>
-                  <div
-                    className="mt-0.5 truncate text-[10px] normal-case tracking-normal text-(--dim)/55"
-                    title={diskSubtitle(disk)}
-                  >
-                    {disk.device ?? disk.mountpoint ?? disk.path}
-                  </div>
                 </div>
               </td>
               <td className="py-1.5 pr-3 tabular-nums text-(--fg)/82">
@@ -182,7 +154,7 @@ export function ServicesTable({
   services: LinuxDashboardService[];
 }) {
   return (
-    <MiniTable columns={["Svc", "Port", "State"]}>
+    <MiniTable>
       {services.map((service) => (
         <MiniRow
           key={service.id}
@@ -217,7 +189,7 @@ export function BackendsTable({
   }
 
   return (
-    <MiniTable columns={["Runtime", "Ver", "State"]}>
+    <MiniTable>
       {rows.map((row) => (
         <MiniRow
           key={row.id}
@@ -369,22 +341,9 @@ function SensorGroup({
   );
 }
 
-function MiniTable({
-  columns,
-  children,
-}: {
-  columns: [string, string, string];
-  children: React.ReactNode;
-}) {
+function MiniTable({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <div className="grid grid-cols-[minmax(0,1fr)_3.75rem_5.25rem] gap-2 border-b border-(--border)/45 pb-1.5 font-mono text-[8.5px] uppercase tracking-[0.12em] text-(--dim)/65">
-        {columns.map((column, index) => (
-          <div key={column} className={index === 2 ? "text-right" : ""}>
-            {column}
-          </div>
-        ))}
-      </div>
       <div>{children}</div>
     </div>
   );

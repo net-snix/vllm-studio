@@ -10,7 +10,6 @@ import type {
 } from "@/lib/types";
 import { formatBytes, formatUptime } from "./dashboard-format";
 import {
-  formatCpuTopology,
   formatGpuGb,
   formatGpuPower,
   GpuTelemetry,
@@ -62,7 +61,7 @@ export function LinuxDashboardView({
       return "warning";
     return "ok";
   }, [data, visibleAlerts]);
-  const summary = data ? buildSummary(data, history, statusData) : null;
+  const summary = data ? buildSummary(data, history) : null;
 
   if (loading && !data) {
     return (
@@ -127,29 +126,24 @@ export function LinuxDashboardView({
                 label="CPU"
                 value={summary.cpu}
                 unit="%"
-                detail={summary.cpuDetail}
                 detailWrap
               />
               <MetricCard
                 label="Memory"
                 value={summary.memory}
-                unit="%"
-                detail={summary.memoryDetail}
               />
               <MetricCard
                 label="VRAM"
                 value={summary.vram}
-                detail={summary.vramDetail}
               />
               <MetricCard
                 label="System Power"
                 value={summary.power}
-                detail={summary.powerDetail}
+                compactValue
               />
               <MetricCard
                 label="Uptime"
                 value={summary.uptime}
-                detail={summary.bootedAt}
               />
             </dl>
           ) : null}
@@ -171,14 +165,14 @@ export function LinuxDashboardView({
             <GpuTelemetry data={data} history={history} />
 
             <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.84fr)_minmax(0,0.98fr)_minmax(0,1.18fr)]">
-              <Section title="Disks" meta={`${data.disks.length} mounts`}>
+              <Section title="Disks">
                 <DisksTable disks={data.disks} />
               </Section>
-              <Section title="Services" meta="local ports">
+              <Section title="Services">
                 <ServicesTable services={data.services} />
               </Section>
 
-              <Section title="Backends" meta="runtime">
+              <Section title="Backends">
                 <BackendsTable
                   runtimeSummary={statusData.runtimeSummary}
                   knownBackendIds={knownBackendIds(statusData)}
@@ -186,18 +180,12 @@ export function LinuxDashboardView({
                 />
               </Section>
 
-              <Section
-                title="Sensors / Thermals"
-                meta={`${data.thermals.length + data.fans.length} sensors`}
-              >
+              <Section title="Sensors / Thermals">
                 <Sensors data={data} />
               </Section>
             </div>
 
-            <Section
-              title="Containers"
-              meta={data.docker_error ? "docker unavailable" : "docker"}
-            >
+            <Section title="Containers">
               <ContainersTable data={data} />
             </Section>
           </main>
@@ -213,12 +201,14 @@ function MetricCard({
   unit,
   detail,
   detailWrap = false,
+  compactValue = false,
 }: {
   label: string;
   value: string | null;
   unit?: string;
   detail?: string;
   detailWrap?: boolean;
+  compactValue?: boolean;
 }) {
   return (
     <div className="min-w-0 rounded-[4px] border border-(--border)/70 bg-(--surface)/35 px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
@@ -226,7 +216,13 @@ function MetricCard({
         {label}
       </dt>
       <dd className="mt-2 flex min-w-0 items-baseline gap-1.5 font-mono tabular-nums">
-        <span className="min-w-0 truncate text-[22px] font-light leading-none text-(--fg)/95">
+        <span
+          className={`min-w-0 font-light text-(--fg)/95 ${
+            compactValue
+              ? "whitespace-normal break-words text-[17px] leading-tight"
+              : "truncate text-[22px] leading-none"
+          }`}
+        >
           {value ?? "n/a"}
         </span>
         {unit ? (
@@ -260,7 +256,6 @@ function Tag({ children }: { children: React.ReactNode }) {
 function buildSummary(
   data: LinuxDashboardSnapshot,
   history: DashboardHistoryPoint[],
-  statusData: DashboardLayoutProps,
 ) {
   const latestHistory = history.at(-1);
   const cpuValue =
@@ -276,13 +271,6 @@ function buildSummary(
     (sum, gpu) => sum + gpu.memory_total_bytes,
     0,
   );
-  const totalPower = sumFinite([
-    data.cpu.power_draw_watts,
-    ...data.gpus.map((gpu) => gpu.power_draw_watts),
-  ]);
-  const totalPowerLimit = sumFinite(
-    data.gpus.map((gpu) => gpu.power_limit_watts),
-  );
   const gpuPower = sumFinite(data.gpus.map((gpu) => gpu.power_draw_watts));
   const cpuPowerLabel =
     data.cpu.power_draw_watts == null
@@ -293,60 +281,11 @@ function buildSummary(
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
-    cpuDetail: data.host.cpu_model ?? "Unknown CPU",
-    memory: String(Math.round(data.memory.used_percent)),
-    memoryDetail: `${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`,
+    memory: `${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`,
     vram: `${formatGpuGb(totalVramUsed)}/${formatGpuGb(totalVram)}`,
-    vramDetail: currentModelLabel(statusData),
-    power: formatGpuPower(totalPower, undefined),
-    powerDetail: `${cpuPowerLabel} + ${gpuPowerLabel}`,
+    power: `${cpuPowerLabel} + ${gpuPowerLabel}`,
     uptime: formatUptime(data.host.uptime_seconds),
-    bootedAt: `since ${formatBootedAt(data)}`,
   };
-}
-
-function formatBootedAt(data: LinuxDashboardSnapshot): string {
-  const collectedMs = Date.parse(data.collected_at);
-  if (!Number.isFinite(collectedMs)) return "unknown";
-
-  const bootedAt = new Date(collectedMs - data.host.uptime_seconds * 1000);
-  const collectedAt = new Date(collectedMs);
-  const sameDay =
-    bootedAt.getFullYear() === collectedAt.getFullYear() &&
-    bootedAt.getMonth() === collectedAt.getMonth() &&
-    bootedAt.getDate() === collectedAt.getDate();
-
-  return bootedAt.toLocaleString(
-    [],
-    sameDay
-      ? {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        }
-      : {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        },
-  );
-}
-
-function currentModelLabel(statusData: DashboardLayoutProps): string {
-  const process = statusData.currentProcess;
-  if (!process) return "No model loaded";
-  return (
-    process.served_model_name ||
-    shortModelPath(process.model_path) ||
-    `${process.backend}:${process.port}`
-  );
-}
-
-function shortModelPath(pathValue: string | null): string | null {
-  if (!pathValue) return null;
-  const parts = pathValue.split("/").filter(Boolean);
-  return parts.at(-1) ?? pathValue;
 }
 
 function isFanHwmonAlert(alert: LinuxDashboardAlert): boolean {
