@@ -10,20 +10,13 @@ import type {
 } from "@/lib/types";
 import { formatBytes, formatPercent, formatUptime } from "./dashboard-format";
 import {
-  DashboardSparkline,
   formatCpuTopology,
   formatGpuGb,
   formatGpuPower,
   GpuTelemetry,
   SystemOverview,
 } from "./dashboard-charts";
-import {
-  getCpuUsageSamples,
-  getGpuMemoryUsageSamples,
-  getSystemPowerSamples,
-  type DashboardHistoryPoint,
-  type DashboardUsageSample,
-} from "./dashboard-history";
+import { type DashboardHistoryPoint } from "./dashboard-history";
 import {
   AlertStrip,
   ContainersTable,
@@ -70,7 +63,6 @@ export function LinuxDashboardView({
     return "ok";
   }, [data, visibleAlerts]);
   const summary = data ? buildSummary(data, history, statusData) : null;
-  const metricSparklines = data ? buildMetricSparklines(history) : null;
 
   if (loading && !data) {
     return (
@@ -129,7 +121,7 @@ export function LinuxDashboardView({
             </div>
           </div>
 
-          {summary && metricSparklines ? (
+          {summary ? (
             <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1.1fr)_minmax(0,0.74fr)_minmax(0,1fr)_minmax(0,0.82fr)]">
               <MetricCard
                 label="CPU"
@@ -137,45 +129,27 @@ export function LinuxDashboardView({
                 unit="%"
                 detail={summary.cpuDetail}
                 detailWrap
-                sparkline={
-                  <DashboardSparkline samples={metricSparklines.cpu} />
-                }
               />
               <MetricCard
                 label="Memory"
                 value={summary.memory}
                 unit="%"
                 detail={summary.memoryDetail}
-                sparkline={
-                  <DashboardSparkline samples={metricSparklines.memory} />
-                }
               />
               <MetricCard
                 label="VRAM"
                 value={summary.vram}
                 detail={summary.vramDetail}
-                sparkline={
-                  <DashboardSparkline samples={metricSparklines.vram} />
-                }
               />
               <MetricCard
                 label="GPUs"
                 value={summary.gpus}
                 detail={summary.gpuUtil}
-                sparkline={
-                  <DashboardSparkline
-                    samples={metricSparklines.gpuUtil}
-                    dotted
-                  />
-                }
               />
               <MetricCard
                 label="System Power"
                 value={summary.power}
                 detail={summary.powerDetail}
-                sparkline={
-                  <DashboardSparkline samples={metricSparklines.power} />
-                }
               />
               <MetricCard
                 label="Uptime"
@@ -244,14 +218,12 @@ function MetricCard({
   unit,
   detail,
   detailWrap = false,
-  sparkline,
 }: {
   label: string;
   value: string | null;
   unit?: string;
   detail?: string;
   detailWrap?: boolean;
-  sparkline?: React.ReactNode;
 }) {
   return (
     <div className="min-w-0 rounded-[4px] border border-(--border)/70 bg-(--surface)/35 px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
@@ -266,9 +238,9 @@ function MetricCard({
           <span className="shrink-0 text-[11px] text-(--dim)/70">{unit}</span>
         ) : null}
       </dd>
-      <div className="mt-2 flex min-w-0 items-center gap-2.5">
+      <div className="mt-2 min-w-0">
         <span
-          className={`min-w-0 flex-1 font-mono text-[10.5px] text-(--dim)/70 ${
+          className={`block min-w-0 font-mono text-[10.5px] text-(--dim)/70 ${
             detailWrap
               ? "whitespace-normal break-words leading-snug"
               : "truncate"
@@ -277,9 +249,6 @@ function MetricCard({
         >
           {detail ?? "\u00a0"}
         </span>
-        {sparkline ? (
-          <div className="w-12 min-w-0 shrink-0">{sparkline}</div>
-        ) : null}
       </div>
     </div>
   );
@@ -376,38 +345,6 @@ function formatBootedAt(data: LinuxDashboardSnapshot): string {
           minute: "2-digit",
         },
   );
-}
-
-function buildMetricSparklines(
-  history: DashboardHistoryPoint[],
-): Record<
-  "cpu" | "memory" | "vram" | "gpuUtil" | "power",
-  DashboardUsageSample[]
-> {
-  const cpu = getCpuUsageSamples(history);
-  const memory = history.map((point) => ({
-    time: point.time,
-    value: point.memory_used_percent,
-  }));
-  const vram = getGpuMemoryUsageSamples(history);
-  const gpuUtil = history.map((point) => {
-    const values = point.gpus
-      .map((gpu) => gpu.utilization_percent)
-      .filter(
-        (value): value is number =>
-          typeof value === "number" && Number.isFinite(value),
-      );
-    return {
-      time: point.time,
-      value:
-        values.length > 0
-          ? values.reduce((sum, value) => sum + value, 0) / values.length
-          : null,
-    };
-  });
-  const power = getSystemPowerSamples(history);
-
-  return { cpu, memory, vram, gpuUtil, power };
 }
 
 function currentModelLabel(statusData: DashboardLayoutProps): string {
