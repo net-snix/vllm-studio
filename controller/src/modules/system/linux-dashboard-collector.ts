@@ -303,6 +303,7 @@ const collectNvidiaGpus = (): DashboardGpu[] => {
     "memory.total",
     "memory.used",
     "temperature.gpu",
+    "temperature.memory",
     "fan.speed",
     "power.draw",
     "power.limit",
@@ -325,6 +326,7 @@ const collectNvidiaGpus = (): DashboardGpu[] => {
       const totalBytes = totalMb * 1024 * 1024;
       const usedBytes = usedMb * 1024 * 1024;
       const temperature = toNumber(parts[7]);
+      const memoryTemperature = toNumber(parts[8]);
       const memoryPercent = totalBytes > 0 ? roundOne((usedBytes / totalBytes) * 100) : null;
       let status: LinuxDashboardHealth = "ok";
       if ((temperature ?? 0) >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
@@ -340,9 +342,10 @@ const collectNvidiaGpus = (): DashboardGpu[] => {
         memory_used_bytes: usedBytes,
         memory_used_percent: memoryPercent,
         temperature_c: temperature,
-        fan_percent: toNumber(parts[8]),
-        power_draw_watts: toNumber(parts[9]),
-        power_limit_watts: toNumber(parts[10]),
+        memory_temperature_c: memoryTemperature,
+        fan_percent: toNumber(parts[9]),
+        power_draw_watts: toNumber(parts[10]),
+        power_limit_watts: toNumber(parts[11]),
         status,
       };
     });
@@ -370,6 +373,7 @@ const collectGpus = (): DashboardGpu[] => {
       memory_used_bytes: used,
       memory_used_percent: memoryPercent,
       temperature_c: gpu.temp_c,
+      memory_temperature_c: null,
       fan_percent: null,
       power_draw_watts: gpu.power_draw,
       power_limit_watts: gpu.power_limit,

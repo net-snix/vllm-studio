@@ -348,6 +348,9 @@ export function GpuTelemetry({
         ) / sortedGpus.length
       : null;
   const maxTemp = maxNumber(sortedGpus.map((gpu) => gpu.temperature_c));
+  const maxMemoryTemp = maxNumber(
+    sortedGpus.map((gpu) => gpu.memory_temperature_c),
+  );
   const avgFan =
     sortedGpus.length > 0
       ? sortedGpus.reduce((sum, gpu) => sum + (gpu.fan_percent ?? 0), 0) /
@@ -360,13 +363,14 @@ export function GpuTelemetry({
     >
       {sortedGpus.length > 0 ? (
         <div className="space-y-2.5">
-          <div className="grid min-h-[66px] grid-cols-2 border border-(--border)/55 bg-(--bg)/35 font-mono sm:grid-cols-5">
+          <div className="grid min-h-[66px] grid-cols-2 border border-(--border)/55 bg-(--bg)/35 font-mono sm:grid-cols-6">
             <GpuStat
               label="VRAM"
               value={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
             />
             <GpuStat label="Util" value={formatPercent(avgUtil)} />
             <GpuStat label="Temp" value={formatTemp(maxTemp)} />
+            <GpuStat label="VRAM Temp" value={formatTemp(maxMemoryTemp)} />
             <GpuStat label="Fan" value={formatPercent(avgFan)} />
             <GpuStat
               label="Pwr"
@@ -471,13 +475,14 @@ function TrendPanel({
 function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] table-fixed font-mono text-[10.5px]">
+      <table className="w-full min-w-[860px] table-fixed font-mono text-[10.5px]">
         <colgroup>
-          <col className="w-[38%]" />
-          <col className="w-[30%]" />
-          <col className="w-[8%]" />
-          <col className="w-[8%]" />
+          <col className="w-[34%]" />
+          <col className="w-[28%]" />
           <col className="w-[7%]" />
+          <col className="w-[7%]" />
+          <col className="w-[9%]" />
+          <col className="w-[6%]" />
           <col className="w-[9%]" />
         </colgroup>
         <thead>
@@ -488,6 +493,7 @@ function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
                 ["VRAM", "px-6 text-left"],
                 ["Util", "px-4 text-right"],
                 ["Temp", "px-4 text-right"],
+                ["VRAM Temp", "px-4 text-right"],
                 ["Fan", "px-4 text-right"],
                 ["Power", "pl-4 text-right"],
               ] as const
@@ -540,6 +546,9 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
       </td>
       <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
         {formatTemp(gpu.temperature_c)}
+      </td>
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
+        {formatTemp(gpu.memory_temperature_c)}
       </td>
       <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
         {formatPercent(gpu.fan_percent)}
