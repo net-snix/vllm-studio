@@ -261,15 +261,11 @@ export function Sensors({ data }: { data: LinuxDashboardSnapshot }) {
       key: `thermal-${thermal.chip}-${thermal.label}-${index}`,
       label: cleanSensorLabel(thermal.chip, thermal.label),
       value: `${Math.round(thermal.value_c)}°`,
-      meter: Math.min(100, (thermal.value_c / 95) * 100),
-      status: thermal.value_c >= 82 ? ("warning" as const) : ("ok" as const),
     })),
     ...fans.map((fan, index) => ({
       key: `fan-${fan.chip}-${fan.label}-${index}`,
       label: cleanSensorLabel(fan.chip, fan.label),
       value: `${Math.round(fan.rpm)} rpm`,
-      meter: null,
-      status: "ok" as const,
     })),
   ].slice(0, 7);
 
@@ -300,8 +296,6 @@ function SensorGroup({
     key: string;
     label: string;
     value: string;
-    meter: number | null;
-    status: LinuxDashboardHealth;
   }>;
   empty: string;
 }) {
@@ -326,9 +320,6 @@ function SensorGroup({
                 </span>
                 <span className="tabular-nums text-(--fg)/82">{row.value}</span>
               </div>
-              {row.meter != null && (
-                <Meter value={row.meter} status={row.status} slim />
-              )}
             </div>
           ))}
         </div>
