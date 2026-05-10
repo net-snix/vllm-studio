@@ -281,7 +281,7 @@ function buildSummary(
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
-    memory: `${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`,
+    memory: `${formatGpuGb(data.memory.used_bytes)}/${formatGpuGb(data.memory.total_bytes)}`,
     vram: `${formatGpuGb(totalVramUsed)}/${formatGpuGb(totalVram)}`,
     power: `${cpuPowerLabel} + ${gpuPowerLabel}`,
     uptime: formatUptime(data.host.uptime_seconds),
