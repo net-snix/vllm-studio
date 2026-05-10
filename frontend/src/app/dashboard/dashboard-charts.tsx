@@ -287,7 +287,6 @@ export function SystemOverview({
           <UsageLineChart
             samples={cpuSamples}
             stroke="var(--hl1)"
-            scale="active"
             windowMs={COMPACT_CHART_WINDOW_MS}
           />
         </TrendPanel>
@@ -380,7 +379,6 @@ function GpuUsageGraph({
         <UsageLineChart
           samples={samples}
           stroke="var(--hl1)"
-          scale="active"
           windowMs={COMPACT_CHART_WINDOW_MS}
         />
       </div>
