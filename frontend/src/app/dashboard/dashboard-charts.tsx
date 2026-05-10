@@ -509,9 +509,39 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
         {formatPercent(gpu.fan_percent)}
       </td>
       <td className="whitespace-nowrap py-[5px] pl-4 text-right tabular-nums text-(--fg)/78">
-        {formatGpuPower(gpu.power_draw_watts, gpu.power_limit_watts)}
+        <GpuPowerValue
+          drawWatts={gpu.power_draw_watts}
+          limitWatts={gpu.power_limit_watts}
+        />
       </td>
     </tr>
+  );
+}
+
+function GpuPowerValue({
+  drawWatts,
+  limitWatts,
+}: {
+  drawWatts: number | null | undefined;
+  limitWatts: number | null | undefined;
+}) {
+  const draw =
+    typeof drawWatts === "number" && Number.isFinite(drawWatts)
+      ? `${Math.round(drawWatts)}`
+      : "n/a";
+  if (
+    typeof limitWatts !== "number" ||
+    !Number.isFinite(limitWatts) ||
+    limitWatts <= 0
+  ) {
+    return <>{draw === "n/a" ? draw : `${draw}W`}</>;
+  }
+
+  return (
+    <>
+      {draw}
+      <span className="text-(--dim)/55">/{Math.round(limitWatts)}W</span>
+    </>
   );
 }
 
