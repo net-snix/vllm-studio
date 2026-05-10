@@ -35,6 +35,13 @@ describe("linux dashboard routes", () => {
     expect(body.disks[0]).toHaveProperty("device");
     expect(body.disks[0]).toHaveProperty("device_model");
     expect(Array.isArray(body.services)).toBe(true);
+    expect(body.services).toContainEqual(
+      expect.objectContaining({
+        id: "lact",
+        endpoint: "socket",
+        status: expect.stringMatching(/^(running|stopped)$/),
+      })
+    );
     expect(Array.isArray(body.alerts)).toBe(true);
   });
 });

@@ -44,7 +44,7 @@ export interface LinuxDashboardDisk {
 export interface LinuxDashboardService {
   id: string;
   name: string;
-  port: number;
+  endpoint: string;
   status: "running" | "stopped";
   description: string;
 }

@@ -44,7 +44,7 @@ export type DashboardDisk = {
 export type DashboardService = {
   id: string;
   name: string;
-  port: number;
+  endpoint: string;
   status: "running" | "stopped";
   description: string;
 };

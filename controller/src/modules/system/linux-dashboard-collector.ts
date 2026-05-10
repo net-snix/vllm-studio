@@ -468,26 +468,67 @@ const checkPort = (port: number, timeoutMs = 600): Promise<boolean> =>
     socket.once("error", () => done(false));
   });
 
+const checkSystemdService = (serviceName: string): boolean =>
+  runCommand("systemctl", ["is-active", "--quiet", serviceName], 1_000).status === 0;
+
 const collectServices = async (inferencePort: number): Promise<DashboardService[]> => {
-  const services = [
+  const portServices = [
     {
       id: "model",
       name: "Model API",
       port: inferencePort,
+      endpoint: `:${inferencePort}`,
       description: "active inference endpoint",
     },
-    { id: "studio", name: "vLLM Studio", port: 3000, description: "remote frontend" },
-    { id: "grafana", name: "Grafana", port: 3030, description: "monitoring UI" },
-    { id: "prometheus", name: "Prometheus", port: 9090, description: "metrics store" },
-    { id: "searxng", name: "SearXNG", port: 8081, description: "private search" },
-    { id: "infisical", name: "Infisical", port: 8082, description: "secrets UI" },
+    {
+      id: "studio",
+      name: "vLLM Studio",
+      port: 3000,
+      endpoint: ":3000",
+      description: "remote frontend",
+    },
+    { id: "grafana", name: "Grafana", port: 3030, endpoint: ":3030", description: "monitoring UI" },
+    {
+      id: "prometheus",
+      name: "Prometheus",
+      port: 9090,
+      endpoint: ":9090",
+      description: "metrics store",
+    },
+    {
+      id: "searxng",
+      name: "SearXNG",
+      port: 8081,
+      endpoint: ":8081",
+      description: "private search",
+    },
+    {
+      id: "infisical",
+      name: "Infisical",
+      port: 8082,
+      endpoint: ":8082",
+      description: "secrets UI",
+    },
   ];
 
-  const checks = await Promise.all(services.map((service) => checkPort(service.port)));
-  return services.map((service, index) => ({
-    ...service,
+  const checks = await Promise.all(portServices.map((service) => checkPort(service.port)));
+  const services: DashboardService[] = portServices.map((service, index) => ({
+    id: service.id,
+    name: service.name,
+    endpoint: service.endpoint,
+    description: service.description,
     status: checks[index] ? "running" : "stopped",
   }));
+
+  services.push({
+    id: "lact",
+    name: "LACT",
+    endpoint: "socket",
+    description: "GPU control daemon",
+    status: checkSystemdService("lactd.service") ? "running" : "stopped",
+  });
+
+  return services;
 };
 
 const collectContainers = (): { containers: DashboardContainer[]; docker_error: string | null } => {

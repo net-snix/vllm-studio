@@ -187,7 +187,7 @@ export function ServicesTable({
         <MiniRow
           key={service.id}
           label={service.name}
-          value={`:${service.port}`}
+          value={service.endpoint}
           extra={service.status}
           dotClass={serviceDot(service.status)}
           title={service.description}
