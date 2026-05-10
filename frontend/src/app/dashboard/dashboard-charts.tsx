@@ -353,53 +353,18 @@ export function GpuTelemetry({ data }: { data: LinuxDashboardSnapshot }) {
     >
       {sortedGpus.length > 0 ? (
         <div className="space-y-2.5">
-          <div className="grid items-start gap-2.5 xl:grid-cols-[minmax(0,1fr)_minmax(30rem,0.9fr)]">
-            <div className="min-w-0">
-              <div className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-(--dim)/70">
-                Overview
-              </div>
-              <div className="grid gap-1.5">
-                {sortedGpus.slice(0, 1).map((gpu) => (
-                  <div
-                    key={`${gpu.index}-${gpu.uuid ?? gpu.name}-overview`}
-                    className="grid grid-cols-[1.8rem_minmax(0,1fr)_3rem] items-center gap-2.5 rounded-[3px] border border-(--border)/45 bg-(--bg)/45 px-2.5 py-1 font-mono"
-                  >
-                    <div className="grid h-5 w-5 place-items-center border border-(--border)/70 text-[8px] text-(--fg)/80">
-                      G{gpu.index}
-                    </div>
-                    <div className="min-w-0">
-                      <div
-                        className="truncate text-[11px] text-(--fg)/85"
-                        title={gpu.name}
-                      >
-                        G{gpu.index}{" "}
-                        <span className="text-(--dim)/65">{gpu.name}</span>
-                      </div>
-                      <div className="mt-px text-[9.5px] uppercase tracking-[0.12em] text-(--dim)/55">
-                        {gpu.uuid ? gpu.uuid.slice(0, 8) : "local gpu"}
-                      </div>
-                    </div>
-                    <div className="text-right text-[12px] tabular-nums text-(--fg)/88">
-                      {formatPercent(gpu.utilization_percent)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid min-h-[66px] grid-cols-2 border border-(--border)/55 bg-(--bg)/35 font-mono sm:grid-cols-5">
-              <GpuStat
-                label="VRAM"
-                value={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
-              />
-              <GpuStat label="Util" value={formatPercent(avgUtil)} />
-              <GpuStat label="Temp" value={formatTemp(maxTemp)} />
-              <GpuStat label="Fan" value={formatPercent(avgFan)} />
-              <GpuStat
-                label="Pwr"
-                value={formatGpuPower(totalPower, totalPowerLimit)}
-              />
-            </div>
+          <div className="grid min-h-[66px] grid-cols-2 border border-(--border)/55 bg-(--bg)/35 font-mono sm:grid-cols-5">
+            <GpuStat
+              label="VRAM"
+              value={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
+            />
+            <GpuStat label="Util" value={formatPercent(avgUtil)} />
+            <GpuStat label="Temp" value={formatTemp(maxTemp)} />
+            <GpuStat label="Fan" value={formatPercent(avgFan)} />
+            <GpuStat
+              label="Pwr"
+              value={formatGpuPower(totalPower, totalPowerLimit)}
+            />
           </div>
 
           <GpuListTable gpus={sortedGpus} />
