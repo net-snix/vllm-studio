@@ -18,6 +18,7 @@ export interface LinuxDashboardGpu {
   memory_used_percent: number | null;
   temperature_c: number | null;
   memory_temperature_c: number | null;
+  memory_temperature_unavailable_reason: string | null;
   fan_percent: number | null;
   power_draw_watts: number | null;
   power_limit_watts: number | null;

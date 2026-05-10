@@ -7,6 +7,7 @@ import { runCommand } from "../../core/command";
 import { getGpuInfo } from "./platform/gpu";
 import { resolveNvidiaSmiBinary } from "./platform/smi-tools";
 import { collectDisks } from "./linux-dashboard-disks";
+import { collectLactMemoryTemperatures, normalizePciBusId } from "./linux-dashboard-lact";
 import type {
   DashboardAlert,
   DashboardContainer,
@@ -315,40 +316,62 @@ const collectNvidiaGpus = (): DashboardGpu[] => {
   );
   if (result.status !== 0 || !result.stdout) return [];
 
-  return result.stdout
+  const rows = result.stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line, fallbackIndex) => {
-      const parts = line.split(",").map((part) => part.trim());
-      const totalMb = toNumber(parts[5]) ?? 0;
-      const usedMb = toNumber(parts[6]) ?? 0;
-      const totalBytes = totalMb * 1024 * 1024;
-      const usedBytes = usedMb * 1024 * 1024;
-      const temperature = toNumber(parts[7]);
-      const memoryTemperature = toNumber(parts[8]);
-      const memoryPercent = totalBytes > 0 ? roundOne((usedBytes / totalBytes) * 100) : null;
-      let status: LinuxDashboardHealth = "ok";
-      if ((temperature ?? 0) >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
-      else if ((temperature ?? 0) >= 82 || (memoryPercent ?? 0) >= 95) status = "warning";
+    .filter(Boolean);
+  const parsedRows = rows.map((line, fallbackIndex) => ({
+    parts: line.split(",").map((part) => part.trim()),
+    fallbackIndex,
+  }));
+  const needsLactFallback = parsedRows.some(({ parts }) => toNumber(parts[8]) === null);
+  const lactMemoryTemperatures = needsLactFallback ? collectLactMemoryTemperatures() : null;
 
-      return {
-        index: toNumber(parts[0]) ?? fallbackIndex,
-        name: parts[1] || "NVIDIA GPU",
-        uuid: parts[2] || null,
-        pci_bus_id: parts[3] || null,
-        utilization_percent: toNumber(parts[4]),
-        memory_total_bytes: totalBytes,
-        memory_used_bytes: usedBytes,
-        memory_used_percent: memoryPercent,
-        temperature_c: temperature,
-        memory_temperature_c: memoryTemperature,
-        fan_percent: toNumber(parts[9]),
-        power_draw_watts: toNumber(parts[10]),
-        power_limit_watts: toNumber(parts[11]),
-        status,
-      };
-    });
+  return parsedRows.map(({ parts, fallbackIndex }) => {
+    const totalMb = toNumber(parts[5]) ?? 0;
+    const usedMb = toNumber(parts[6]) ?? 0;
+    const totalBytes = totalMb * 1024 * 1024;
+    const usedBytes = usedMb * 1024 * 1024;
+    const temperature = toNumber(parts[7]);
+    const nvidiaMemoryTemperature = toNumber(parts[8]);
+    const normalizedPciBusId = normalizePciBusId(parts[3]);
+    const lactMemoryTemperature =
+      nvidiaMemoryTemperature === null && normalizedPciBusId && lactMemoryTemperatures
+        ? lactMemoryTemperatures.byPciBus.get(normalizedPciBusId)
+        : undefined;
+    const memoryTemperature = nvidiaMemoryTemperature ?? lactMemoryTemperature?.value ?? null;
+    const memoryTemperatureUnavailableReason =
+      memoryTemperature === null
+        ? [
+            "NVIDIA SMI reported N/A.",
+            lactMemoryTemperatures?.unavailableReason ??
+              lactMemoryTemperature?.unavailableReason ??
+              "LACT did not report this GPU.",
+          ].join(" ")
+        : null;
+    const memoryPercent = totalBytes > 0 ? roundOne((usedBytes / totalBytes) * 100) : null;
+    let status: LinuxDashboardHealth = "ok";
+    if ((temperature ?? 0) >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
+    else if ((temperature ?? 0) >= 82 || (memoryPercent ?? 0) >= 95) status = "warning";
+
+    return {
+      index: toNumber(parts[0]) ?? fallbackIndex,
+      name: parts[1] || "NVIDIA GPU",
+      uuid: parts[2] || null,
+      pci_bus_id: parts[3] || null,
+      utilization_percent: toNumber(parts[4]),
+      memory_total_bytes: totalBytes,
+      memory_used_bytes: usedBytes,
+      memory_used_percent: memoryPercent,
+      temperature_c: temperature,
+      memory_temperature_c: memoryTemperature,
+      memory_temperature_unavailable_reason: memoryTemperatureUnavailableReason,
+      fan_percent: toNumber(parts[9]),
+      power_draw_watts: toNumber(parts[10]),
+      power_limit_watts: toNumber(parts[11]),
+      status,
+    };
+  });
 };
 
 const collectGpus = (): DashboardGpu[] => {
@@ -374,6 +397,8 @@ const collectGpus = (): DashboardGpu[] => {
       memory_used_percent: memoryPercent,
       temperature_c: gpu.temp_c,
       memory_temperature_c: null,
+      memory_temperature_unavailable_reason:
+        "NVIDIA SMI was unavailable and this GPU source does not report VRAM temperature.",
       fan_percent: null,
       power_draw_watts: gpu.power_draw,
       power_limit_watts: gpu.power_limit,

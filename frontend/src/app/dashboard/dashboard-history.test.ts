@@ -54,6 +54,7 @@ const makeSnapshot = (
     memory_used_percent: index === 0 ? 50 : 10,
     temperature_c: 40,
     memory_temperature_c: 45,
+    memory_temperature_unavailable_reason: null,
     fan_percent: 20,
     power_draw_watts: 100 + index,
     power_limit_watts: 300,

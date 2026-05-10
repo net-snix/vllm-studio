@@ -351,6 +351,12 @@ export function GpuTelemetry({
   const maxMemoryTemp = maxNumber(
     sortedGpus.map((gpu) => gpu.memory_temperature_c),
   );
+  const memoryTempUnavailableReason =
+    maxMemoryTemp === null
+      ? sortedGpus
+          .map((gpu) => gpu.memory_temperature_unavailable_reason)
+          .find((reason): reason is string => Boolean(reason)) ?? undefined
+      : undefined;
   const avgFan =
     sortedGpus.length > 0
       ? sortedGpus.reduce((sum, gpu) => sum + (gpu.fan_percent ?? 0), 0) /
@@ -370,7 +376,11 @@ export function GpuTelemetry({
             />
             <GpuStat label="Util" value={formatPercent(avgUtil)} />
             <GpuStat label="Temp" value={formatTemp(maxTemp)} />
-            <GpuStat label="VRAM Temp" value={formatTemp(maxMemoryTemp)} />
+            <GpuStat
+              label="VRAM Temp"
+              value={formatTemp(maxMemoryTemp)}
+              unavailableReason={memoryTempUnavailableReason}
+            />
             <GpuStat label="Fan" value={formatPercent(avgFan)} />
             <GpuStat
               label="Pwr"
@@ -548,7 +558,14 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
         {formatTemp(gpu.temperature_c)}
       </td>
       <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
-        {formatTemp(gpu.memory_temperature_c)}
+        <UnavailableValue
+          value={formatTemp(gpu.memory_temperature_c)}
+          unavailableReason={
+            gpu.memory_temperature_c === null
+              ? gpu.memory_temperature_unavailable_reason
+              : null
+          }
+        />
       </td>
       <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
         {formatPercent(gpu.fan_percent)}
@@ -560,16 +577,45 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
   );
 }
 
-function GpuStat({ label, value }: { label: string; value: string }) {
+function GpuStat({
+  label,
+  value,
+  unavailableReason,
+}: {
+  label: string;
+  value: string;
+  unavailableReason?: string;
+}) {
   return (
     <div className="min-w-0 border-b border-r border-(--border)/40 px-3 py-1.5 last:border-r-0 sm:border-b-0">
       <div className="font-mono text-[9.5px] uppercase tracking-[0.18em] text-(--dim)/65">
         {label}
       </div>
       <div className="mt-1.5 truncate font-mono text-[14px] tabular-nums text-(--fg)/90">
-        {value}
+        <UnavailableValue value={value} unavailableReason={unavailableReason} />
       </div>
     </div>
+  );
+}
+
+function UnavailableValue({
+  value,
+  unavailableReason,
+}: {
+  value: string;
+  unavailableReason?: string | null;
+}) {
+  return (
+    <span
+      className={
+        unavailableReason
+          ? "cursor-help underline decoration-(--dim)/35 underline-offset-4"
+          : undefined
+      }
+      title={unavailableReason || undefined}
+    >
+      {value}
+    </span>
   );
 }
 
