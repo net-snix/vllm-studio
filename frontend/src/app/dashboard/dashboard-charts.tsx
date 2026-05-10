@@ -357,7 +357,7 @@ function GpuUsageGraph({
   const samples = getGpuUsageSamples(history, gpu);
 
   return (
-    <div className="min-w-0 border border-(--border)/45 bg-(--bg)/35 px-3 py-2 font-mono">
+    <div className="min-w-0 border border-(--border)/45 bg-transparent px-3 py-2 font-mono">
       <div className="mb-1.5 flex items-baseline justify-between gap-3">
         <div className="min-w-0">
           <div
@@ -372,7 +372,7 @@ function GpuUsageGraph({
           {formatPercent(gpu.utilization_percent)}
         </div>
       </div>
-      <div className="h-[4.2rem]">
+      <div className="h-24">
         <UsageLineChart
           samples={samples}
           stroke="var(--hl1)"
