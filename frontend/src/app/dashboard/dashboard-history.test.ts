@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LinuxDashboardSnapshot } from "@/lib/types";
 import {
   appendDashboardHistory,
+  getGpuMemoryUsageSamples,
   getCpuUsageSamples,
   getGpuUsageSeries,
+  getSystemPowerSamples,
   loadStoredDashboardHistory,
   storeDashboardHistory,
 } from "./dashboard-history";
@@ -47,12 +49,12 @@ const makeSnapshot = (
     uuid: `GPU-${index}`,
     pci_bus_id: null,
     utilization_percent: usage,
-    memory_total_bytes: 100,
-    memory_used_bytes: 10,
-    memory_used_percent: 10,
+    memory_total_bytes: index === 0 ? 100 : 300,
+    memory_used_bytes: index === 0 ? 50 : 30,
+    memory_used_percent: index === 0 ? 50 : 10,
     temperature_c: 40,
     fan_percent: 20,
-    power_draw_watts: 100,
+    power_draw_watts: 100 + index,
     power_limit_watts: 300,
     status: "ok",
   })),
@@ -135,6 +137,36 @@ describe("dashboard history", () => {
     expect(getCpuUsageSamples(history)).toEqual([
       { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 10 },
       { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 15 },
+    ]);
+  });
+
+  it("returns weighted total VRAM samples across mixed-size GPUs", () => {
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
+      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    expect(getGpuMemoryUsageSamples(history)).toEqual([
+      { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 20 },
+      { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 50 },
+    ]);
+  });
+
+  it("returns system power samples from CPU and all GPUs", () => {
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
+      makeSnapshot("2026-04-29T10:00:05.000Z", 15, []),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    expect(getSystemPowerSamples(history)).toEqual([
+      { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 243 },
+      { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 42 },
     ]);
   });
 

@@ -1,7 +1,14 @@
-import type { LinuxDashboardGpu, LinuxDashboardHealth, LinuxDashboardSnapshot } from "@/lib/types";
+import type {
+  LinuxDashboardGpu,
+  LinuxDashboardHealth,
+  LinuxDashboardSnapshot,
+} from "@/lib/types";
 import { formatBytes, formatPercent, formatTemp } from "./dashboard-format";
-import type { DashboardHistoryPoint, DashboardUsageSample } from "./dashboard-history";
-import { getCpuUsageSamples, getGpuUsageSamples } from "./dashboard-history";
+import type {
+  DashboardHistoryPoint,
+  DashboardUsageSample,
+} from "./dashboard-history";
+import { getCpuUsageSamples } from "./dashboard-history";
 import { Meter, Section } from "./dashboard-system-sections";
 
 const CHART_WIDTH = 360;
@@ -17,7 +24,9 @@ type ChartPoint = {
 
 type ChartScale = "percent" | "active";
 
-const latestNumber = (values: Array<number | null | undefined>): number | null => {
+const latestNumber = (
+  values: Array<number | null | undefined>,
+): number | null => {
   for (let index = values.length - 1; index >= 0; index -= 1) {
     const value = values[index];
     if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -27,7 +36,8 @@ const latestNumber = (values: Array<number | null | undefined>): number | null =
 
 const maxNumber = (values: Array<number | null | undefined>): number | null => {
   const valid = values.filter(
-    (value): value is number => typeof value === "number" && Number.isFinite(value),
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value),
   );
   return valid.length > 0 ? Math.max(...valid) : null;
 };
@@ -50,16 +60,26 @@ const samplesInWindow = (
   return samples.filter((sample) => sample.time >= start && sample.time <= end);
 };
 
-const chartScaleMax = (samples: DashboardUsageSample[], scale: ChartScale): number => {
+const chartScaleMax = (
+  samples: DashboardUsageSample[],
+  scale: ChartScale,
+): number => {
   if (scale === "percent") return 100;
   const values = samples
     .map((sample) => sample.value)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    .filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    );
   const peak = values.length > 0 ? Math.max(...values) : 0;
   if (peak <= 10) return 10;
   if (peak <= 25) return 25;
   if (peak <= 50) return 50;
-  return 100;
+  if (peak <= 100) return 100;
+  if (peak <= 250) return 250;
+  if (peak <= 500) return 500;
+  if (peak <= 1000) return 1000;
+  return Math.ceil(peak / 500) * 500;
 };
 
 const toChartPoints = (
@@ -67,16 +87,18 @@ const toChartPoints = (
   scaleMax: number,
   windowMs: number,
 ): ChartPoint[] => {
-  const visibleSamples = samples.flatMap((sample): Array<{ time: number; value: number }> => {
-    if (
-      typeof sample.value !== "number" ||
-      !Number.isFinite(sample.value) ||
-      !Number.isFinite(sample.time)
-    ) {
-      return [];
-    }
-    return [{ time: sample.time, value: sample.value }];
-  });
+  const visibleSamples = samples.flatMap(
+    (sample): Array<{ time: number; value: number }> => {
+      if (
+        typeof sample.value !== "number" ||
+        !Number.isFinite(sample.value) ||
+        !Number.isFinite(sample.time)
+      ) {
+        return [];
+      }
+      return [{ time: sample.time, value: sample.value }];
+    },
+  );
   const first = visibleSamples[0];
   const last = visibleSamples.at(-1);
   if (!first || !last) return [];
@@ -87,7 +109,9 @@ const toChartPoints = (
 
   return visibleSamples.flatMap((sample): ChartPoint[] => {
     const value = sample.value;
-    const x = CHART_PAD + ((sample.time - start) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
+    const x =
+      CHART_PAD +
+      ((sample.time - start) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
     const y =
       CHART_PAD +
       ((scaleMax - Math.min(scaleMax, Math.max(0, value))) / scaleMax) *
@@ -99,7 +123,10 @@ const toChartPoints = (
 const buildLinePath = (points: ChartPoint[]): string => {
   if (points.length < 2) return "";
   const [first, ...rest] = points;
-  return rest.reduce((path, point) => `${path} L ${point.x} ${point.y}`, `M ${first.x} ${first.y}`);
+  return rest.reduce(
+    (path, point) => `${path} L ${point.x} ${point.y}`,
+    `M ${first.x} ${first.y}`,
+  );
 };
 
 function UsageLineChart({
@@ -125,12 +152,14 @@ function UsageLineChart({
       role="img"
       aria-label="Usage history graph"
       viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-      className="h-full min-h-24 w-full overflow-visible"
+      className="h-full min-h-0 w-full overflow-visible"
       preserveAspectRatio="none"
     >
       {[25, 50, 75].map((mark) => {
         const value = (mark / 100) * scaleMax;
-        const y = CHART_PAD + ((scaleMax - value) / scaleMax) * (CHART_HEIGHT - CHART_PAD * 2);
+        const y =
+          CHART_PAD +
+          ((scaleMax - value) / scaleMax) * (CHART_HEIGHT - CHART_PAD * 2);
         return (
           <line
             key={mark}
@@ -141,6 +170,7 @@ function UsageLineChart({
             stroke="var(--border)"
             strokeOpacity="0.35"
             strokeWidth="1"
+            strokeDasharray="2 3"
           />
         );
       })}
@@ -156,9 +186,81 @@ function UsageLineChart({
           vectorEffect="non-scaling-stroke"
         />
       ) : (
-        <text x="50%" y="50%" textAnchor="middle" className="fill-(--dim) text-[10px]">
+        <text
+          x="50%"
+          y="50%"
+          textAnchor="middle"
+          className="fill-(--dim) text-[10px]"
+        >
           collecting samples
         </text>
+      )}
+    </svg>
+  );
+}
+
+export function DashboardSparkline({
+  samples,
+  stroke = "var(--hl1)",
+  dotted = false,
+  scale = "active",
+}: {
+  samples: DashboardUsageSample[];
+  stroke?: string;
+  dotted?: boolean;
+  scale?: ChartScale;
+}) {
+  const visibleSamples = samplesInWindow(samples, COMPACT_CHART_WINDOW_MS);
+  const scaleMax = chartScaleMax(visibleSamples, scale);
+  const points = toChartPoints(
+    visibleSamples,
+    scaleMax,
+    COMPACT_CHART_WINDOW_MS,
+  );
+  const linePath = buildLinePath(points);
+
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+      className="h-8 w-full overflow-visible"
+      preserveAspectRatio="none"
+    >
+      {dotted ? (
+        <line
+          x1={CHART_PAD}
+          x2={CHART_WIDTH - CHART_PAD}
+          y1={CHART_HEIGHT / 2}
+          y2={CHART_HEIGHT / 2}
+          stroke="var(--dim)"
+          strokeDasharray="2 8"
+          strokeLinecap="square"
+          strokeOpacity="0.55"
+          strokeWidth="1.6"
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : linePath ? (
+        <path
+          d={linePath}
+          fill="none"
+          stroke={stroke}
+          strokeLinecap="square"
+          strokeLinejoin="miter"
+          strokeOpacity="0.92"
+          strokeWidth="1.8"
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : (
+        <line
+          x1={CHART_PAD}
+          x2={CHART_WIDTH - CHART_PAD}
+          y1={CHART_HEIGHT / 2}
+          y2={CHART_HEIGHT / 2}
+          stroke={stroke}
+          strokeOpacity="0.6"
+          strokeWidth="1.4"
+          vectorEffect="non-scaling-stroke"
+        />
       )}
     </svg>
   );
@@ -184,15 +286,20 @@ export function SystemOverview({
 
   return (
     <Section title="Host telemetry" meta="last 10 minutes">
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)]">
         <TrendPanel
           title="CPU usage"
           value={formatPercent(cpuCurrent)}
           detail={`${formatCpuTopology(data)}  load ${data.host.load_average.join(" / ")}`}
           size="large"
         >
-          <UsageLineChart samples={cpuSamples} scale="active" windowMs={COMPACT_CHART_WINDOW_MS} />
+          <UsageLineChart
+            samples={cpuSamples}
+            scale="active"
+            windowMs={COMPACT_CHART_WINDOW_MS}
+          />
         </TrendPanel>
+        <div className="hidden bg-(--border)/55 lg:block" />
         <TrendPanel
           title="Memory"
           value={formatPercent(data.memory.used_percent)}
@@ -201,8 +308,7 @@ export function SystemOverview({
         >
           <UsageLineChart
             samples={memorySamples}
-            stroke="var(--dim)"
-            muted
+            stroke="var(--hl1)"
             windowMs={COMPACT_CHART_WINDOW_MS}
           />
         </TrendPanel>
@@ -211,57 +317,97 @@ export function SystemOverview({
   );
 }
 
-export function GpuTelemetry({
-  data,
-  history,
-}: {
-  data: LinuxDashboardSnapshot;
-  history: DashboardHistoryPoint[];
-}) {
-  const sortedGpus = [...data.gpus].sort((a, b) => b.memory_total_bytes - a.memory_total_bytes);
-  const totalUsed = sortedGpus.reduce((sum, gpu) => sum + gpu.memory_used_bytes, 0);
-  const totalCap = sortedGpus.reduce((sum, gpu) => sum + gpu.memory_total_bytes, 0);
+export function GpuTelemetry({ data }: { data: LinuxDashboardSnapshot }) {
+  const sortedGpus = [...data.gpus].sort(
+    (a, b) => b.memory_total_bytes - a.memory_total_bytes,
+  );
+  const totalUsed = sortedGpus.reduce(
+    (sum, gpu) => sum + gpu.memory_used_bytes,
+    0,
+  );
+  const totalCap = sortedGpus.reduce(
+    (sum, gpu) => sum + gpu.memory_total_bytes,
+    0,
+  );
   const totalPower = sumFinite(sortedGpus.map((gpu) => gpu.power_draw_watts));
-  const totalPowerLimit = sumFinite(sortedGpus.map((gpu) => gpu.power_limit_watts));
+  const totalPowerLimit = sumFinite(
+    sortedGpus.map((gpu) => gpu.power_limit_watts),
+  );
   const avgUtil =
     sortedGpus.length > 0
-      ? sortedGpus.reduce((sum, gpu) => sum + (gpu.utilization_percent ?? 0), 0) / sortedGpus.length
+      ? sortedGpus.reduce(
+          (sum, gpu) => sum + (gpu.utilization_percent ?? 0),
+          0,
+        ) / sortedGpus.length
       : null;
   const maxTemp = maxNumber(sortedGpus.map((gpu) => gpu.temperature_c));
-  const memPct = totalCap > 0 ? (totalUsed / totalCap) * 100 : null;
-
+  const avgFan =
+    sortedGpus.length > 0
+      ? sortedGpus.reduce((sum, gpu) => sum + (gpu.fan_percent ?? 0), 0) /
+        sortedGpus.length
+      : null;
   return (
     <Section
-      title={`GPUs ${sortedGpus.length}`}
-      meta={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
+      title="GPUs"
+      meta={`${sortedGpus.length} ${sortedGpus.length === 1 ? "gpu" : "gpus"}`}
     >
       {sortedGpus.length > 0 ? (
-        <div className="space-y-3.5">
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[10.5px] tabular-nums">
-            <div className="flex min-w-[16rem] flex-1 items-center gap-3">
-              <div className="h-[3px] min-w-24 flex-1 overflow-hidden bg-(--dim)/15">
-                <div className="h-full bg-(--fg)/55" style={{ width: `${memPct ?? 0}%` }} />
+        <div className="space-y-2.5">
+          <div className="grid items-start gap-2.5 xl:grid-cols-[minmax(0,1fr)_minmax(30rem,0.9fr)]">
+            <div className="min-w-0">
+              <div className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-(--dim)/70">
+                Overview
               </div>
-              <span className="text-(--fg)/85">
-                {formatGpuGb(totalUsed)}
-                <span className="text-(--dim)/60">/{formatGpuGb(totalCap)}</span>
-              </span>
+              <div className="grid gap-1.5">
+                {sortedGpus.slice(0, 1).map((gpu) => (
+                  <div
+                    key={`${gpu.index}-${gpu.uuid ?? gpu.name}-overview`}
+                    className="grid grid-cols-[1.8rem_minmax(0,1fr)_3rem] items-center gap-2.5 rounded-[3px] border border-(--border)/45 bg-(--bg)/45 px-2.5 py-1 font-mono"
+                  >
+                    <div className="grid h-5 w-5 place-items-center border border-(--border)/70 text-[8px] text-(--fg)/80">
+                      G{gpu.index}
+                    </div>
+                    <div className="min-w-0">
+                      <div
+                        className="truncate text-[11px] text-(--fg)/85"
+                        title={gpu.name}
+                      >
+                        G{gpu.index}{" "}
+                        <span className="text-(--dim)/65">{gpu.name}</span>
+                      </div>
+                      <div className="mt-px text-[9.5px] uppercase tracking-[0.12em] text-(--dim)/55">
+                        {gpu.uuid ? gpu.uuid.slice(0, 8) : "local gpu"}
+                      </div>
+                    </div>
+                    <div className="text-right text-[12px] tabular-nums text-(--fg)/88">
+                      {formatPercent(gpu.utilization_percent)}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-            <Aggregate label="util" value={formatPercent(avgUtil)} />
-            <Aggregate label="temp" value={formatTemp(maxTemp)} />
-            <Aggregate label="pwr" value={formatGpuPower(totalPower, totalPowerLimit)} />
-          </div>
 
-          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            {sortedGpus.map((gpu) => (
-              <GpuGraph key={`${gpu.index}-${gpu.uuid ?? gpu.name}`} gpu={gpu} history={history} />
-            ))}
+            <div className="grid min-h-[66px] grid-cols-2 border border-(--border)/55 bg-(--bg)/35 font-mono sm:grid-cols-5">
+              <GpuStat
+                label="VRAM"
+                value={`${formatGpuGb(totalUsed)}/${formatGpuGb(totalCap)}`}
+              />
+              <GpuStat label="Util" value={formatPercent(avgUtil)} />
+              <GpuStat label="Temp" value={formatTemp(maxTemp)} />
+              <GpuStat label="Fan" value={formatPercent(avgFan)} />
+              <GpuStat
+                label="Pwr"
+                value={formatGpuPower(totalPower, totalPowerLimit)}
+              />
+            </div>
           </div>
 
           <GpuListTable gpus={sortedGpus} />
         </div>
       ) : (
-        <div className="font-mono text-[11px] text-(--dim)/65">No GPU telemetry available.</div>
+        <div className="font-mono text-[11px] text-(--dim)/65">
+          No GPU telemetry available.
+        </div>
       )}
     </Section>
   );
@@ -287,35 +433,15 @@ function TrendPanel({
           <div className="font-mono text-[9.5px] uppercase tracking-[0.18em] text-(--dim)/70">
             {title}
           </div>
-          <div className="mt-1 truncate font-mono text-[11px] text-(--dim)/55">{detail}</div>
-        </div>
-        <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">{value}</div>
-      </div>
-      <div className={size === "large" ? "h-36 sm:h-40" : "h-24 sm:h-28"}>{children}</div>
-    </div>
-  );
-}
-
-function GpuGraph({ gpu, history }: { gpu: LinuxDashboardGpu; history: DashboardHistoryPoint[] }) {
-  const samples = getGpuUsageSamples(history, gpu);
-  return (
-    <div className="min-w-0">
-      <div className="mb-2 flex items-baseline justify-between gap-3 font-mono">
-        <div className="min-w-0">
-          <div className="text-[9.5px] uppercase tracking-[0.18em] text-(--dim)/70">
-            G{gpu.index}
-          </div>
-          <div className="mt-1 truncate text-[11px] text-(--dim)/60" title={gpu.name}>
-            {gpu.name}
+          <div className="mt-1 truncate font-mono text-[11px] text-(--dim)/55">
+            {detail}
           </div>
         </div>
-        <div className="text-[12px] tabular-nums text-(--fg)/82">
-          {formatPercent(gpu.utilization_percent)}
+        <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">
+          {value}
         </div>
       </div>
-      <div className="h-28 sm:h-32">
-        <UsageLineChart samples={samples} scale="active" windowMs={COMPACT_CHART_WINDOW_MS} />
-      </div>
+      <div className={size === "large" ? "h-20" : "h-16"}>{children}</div>
     </div>
   );
 }
@@ -323,7 +449,7 @@ function GpuGraph({ gpu, history }: { gpu: LinuxDashboardGpu; history: Dashboard
 function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] table-fixed font-mono text-[11px]">
+      <table className="w-full min-w-[760px] table-fixed font-mono text-[10.5px]">
         <colgroup>
           <col className="w-[38%]" />
           <col className="w-[30%]" />
@@ -334,15 +460,17 @@ function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
         </colgroup>
         <thead>
           <tr className="border-b border-(--border)/35 uppercase tracking-[0.16em] text-(--dim)/55">
-            {([
-              ["GPU", "pr-6 text-left"],
-              ["VRAM", "px-6 text-left"],
-              ["Util", "px-4 text-right"],
-              ["Temp", "px-4 text-right"],
-              ["Fan", "px-4 text-right"],
-              ["Power", "pl-4 text-right"],
-            ] as const).map(([heading, alignClass]) => (
-              <th key={heading} className={`py-2 font-medium ${alignClass}`}>
+            {(
+              [
+                ["GPU", "pr-6 text-left"],
+                ["VRAM", "px-6 text-left"],
+                ["Util", "px-4 text-right"],
+                ["Temp", "px-4 text-right"],
+                ["Fan", "px-4 text-right"],
+                ["Power", "pl-4 text-right"],
+              ] as const
+            ).map(([heading, alignClass]) => (
+              <th key={heading} className={`py-1.5 font-medium ${alignClass}`}>
                 {heading}
               </th>
             ))}
@@ -350,7 +478,10 @@ function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
         </thead>
         <tbody>
           {gpus.map((gpu) => (
-            <GpuMemoryRow key={`${gpu.index}-${gpu.uuid ?? gpu.name}`} gpu={gpu} />
+            <GpuMemoryRow
+              key={`${gpu.index}-${gpu.uuid ?? gpu.name}`}
+              gpu={gpu}
+            />
           ))}
         </tbody>
       </table>
@@ -361,12 +492,12 @@ function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
 function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
   return (
     <tr className="border-b border-(--border)/25 last:border-b-0">
-      <td className="py-1.5 pr-6 text-(--fg)/82" title={gpu.name}>
+      <td className="py-[5px] pr-6 text-(--fg)/82" title={gpu.name}>
         <span className="block truncate">
           G{gpu.index} <span className="text-(--dim)/55">{gpu.name}</span>
         </span>
       </td>
-      <td className="py-1.5 px-6">
+      <td className="px-6 py-[5px]">
         <div className="grid grid-cols-[minmax(6rem,1fr)_4.75rem] items-center gap-4">
           <div className="h-[2px] bg-(--dim)/15">
             <div
@@ -376,32 +507,38 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
           </div>
           <span className="whitespace-nowrap text-right tabular-nums text-(--fg)/78">
             {formatGpuGb(gpu.memory_used_bytes)}
-            <span className="text-(--dim)/55">/{formatGpuGb(gpu.memory_total_bytes)}</span>
+            <span className="text-(--dim)/55">
+              /{formatGpuGb(gpu.memory_total_bytes)}
+            </span>
           </span>
         </div>
       </td>
-      <td className="whitespace-nowrap px-4 py-1.5 text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
         {formatPercent(gpu.utilization_percent)}
       </td>
-      <td className="whitespace-nowrap px-4 py-1.5 text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
         {formatTemp(gpu.temperature_c)}
       </td>
-      <td className="whitespace-nowrap px-4 py-1.5 text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap px-4 py-[5px] text-right tabular-nums text-(--dim)/70">
         {formatPercent(gpu.fan_percent)}
       </td>
-      <td className="whitespace-nowrap py-1.5 pl-4 text-right tabular-nums text-(--dim)/70">
+      <td className="whitespace-nowrap py-[5px] pl-4 text-right tabular-nums text-(--dim)/70">
         {formatGpuPower(gpu.power_draw_watts, gpu.power_limit_watts)}
       </td>
     </tr>
   );
 }
 
-function Aggregate({ label, value }: { label: string; value: string }) {
+function GpuStat({ label, value }: { label: string; value: string }) {
   return (
-    <span className="inline-flex items-baseline gap-1.5">
-      <span className="text-[9px] uppercase tracking-[0.14em] text-(--dim)/55">{label}</span>
-      <span className="text-(--fg)/85">{value}</span>
-    </span>
+    <div className="min-w-0 border-b border-r border-(--border)/40 px-3 py-1.5 last:border-r-0 sm:border-b-0">
+      <div className="font-mono text-[9.5px] uppercase tracking-[0.18em] text-(--dim)/65">
+        {label}
+      </div>
+      <div className="mt-1.5 truncate font-mono text-[14px] tabular-nums text-(--fg)/90">
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -416,8 +553,14 @@ export function formatGpuPower(
   limitWatts: number | null | undefined,
 ): string {
   const current =
-    typeof drawWatts === "number" && Number.isFinite(drawWatts) ? Math.round(drawWatts) : null;
-  if (typeof limitWatts !== "number" || !Number.isFinite(limitWatts) || limitWatts <= 0) {
+    typeof drawWatts === "number" && Number.isFinite(drawWatts)
+      ? Math.round(drawWatts)
+      : null;
+  if (
+    typeof limitWatts !== "number" ||
+    !Number.isFinite(limitWatts) ||
+    limitWatts <= 0
+  ) {
     return current == null ? "n/a" : `${current}W`;
   }
   const limit = Math.round(limitWatts);
@@ -432,7 +575,8 @@ export function formatCpuTopology(data: LinuxDashboardSnapshot): string {
 
 function sumFinite(values: Array<number | null | undefined>): number | null {
   const total = values.reduce<number>(
-    (sum, value) => (typeof value === "number" && Number.isFinite(value) ? sum + value : sum),
+    (sum, value) =>
+      typeof value === "number" && Number.isFinite(value) ? sum + value : sum,
     0,
   );
   return total > 0 ? total : null;
