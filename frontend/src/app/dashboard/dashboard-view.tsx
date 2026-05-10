@@ -8,7 +8,7 @@ import type {
   LinuxDashboardHealth,
   LinuxDashboardSnapshot,
 } from "@/lib/types";
-import { formatBytes, formatPercent, formatUptime } from "./dashboard-format";
+import { formatBytes, formatUptime } from "./dashboard-format";
 import {
   formatCpuTopology,
   formatGpuGb,
@@ -122,7 +122,7 @@ export function LinuxDashboardView({
           </div>
 
           {summary ? (
-            <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1.1fr)_minmax(0,0.74fr)_minmax(0,1fr)_minmax(0,0.82fr)]">
+            <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.82fr)]">
               <MetricCard
                 label="CPU"
                 value={summary.cpu}
@@ -140,11 +140,6 @@ export function LinuxDashboardView({
                 label="VRAM"
                 value={summary.vram}
                 detail={summary.vramDetail}
-              />
-              <MetricCard
-                label="GPUs"
-                value={summary.gpus}
-                detail={summary.gpuUtil}
               />
               <MetricCard
                 label="System Power"
@@ -281,13 +276,6 @@ function buildSummary(
     (sum, gpu) => sum + gpu.memory_total_bytes,
     0,
   );
-  const avgGpuUtil =
-    data.gpus.length > 0
-      ? data.gpus.reduce(
-          (sum, gpu) => sum + (gpu.utilization_percent ?? 0),
-          0,
-        ) / data.gpus.length
-      : null;
   const totalPower = sumFinite([
     data.cpu.power_draw_watts,
     ...data.gpus.map((gpu) => gpu.power_draw_watts),
@@ -310,8 +298,6 @@ function buildSummary(
     memoryDetail: `${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`,
     vram: `${formatGpuGb(totalVramUsed)}/${formatGpuGb(totalVram)}`,
     vramDetail: currentModelLabel(statusData),
-    gpus: String(data.gpus.length),
-    gpuUtil: `util ${formatPercent(avgGpuUtil)}`,
     power: formatGpuPower(totalPower, undefined),
     powerDetail: `${cpuPowerLabel} + ${gpuPowerLabel}`,
     uptime: formatUptime(data.host.uptime_seconds),
