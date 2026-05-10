@@ -10,20 +10,28 @@ import type {
 } from "@/lib/types";
 import { formatBytes, formatPercent, formatUptime } from "./dashboard-format";
 import {
+  DashboardSparkline,
   formatCpuTopology,
   formatGpuGb,
   formatGpuPower,
   GpuTelemetry,
   SystemOverview,
 } from "./dashboard-charts";
-import type { DashboardHistoryPoint } from "./dashboard-history";
+import {
+  getCpuUsageSamples,
+  getGpuMemoryUsageSamples,
+  getSystemPowerSamples,
+  type DashboardHistoryPoint,
+  type DashboardUsageSample,
+} from "./dashboard-history";
 import {
   AlertStrip,
   ContainersTable,
-  DiskRow,
+  BackendsTable,
+  DisksTable,
   Section,
   Sensors,
-  ServiceGrid,
+  ServicesTable,
 } from "./dashboard-system-sections";
 
 type LinuxDashboardViewProps = {
@@ -60,6 +68,7 @@ export function LinuxDashboardView({
     return "ok";
   }, [data, visibleAlerts]);
   const summary = data ? buildSummary(data, history, statusData) : null;
+  const metricSparklines = data ? buildMetricSparklines(history) : null;
 
   if (loading && !data) {
     return (
@@ -72,7 +81,7 @@ export function LinuxDashboardView({
 
   return (
     <div className="min-h-full bg-(--bg) text-(--fg)">
-      <div className="mx-auto max-w-6xl px-4 py-4 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:px-6 lg:py-6">
+      <div className="mx-auto max-w-[1600px] px-3 py-3 pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:px-4 lg:px-5">
         <header>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
@@ -89,7 +98,7 @@ export function LinuxDashboardView({
                   </span>
                 ) : null}
               </div>
-              <h1 className="mt-1 truncate text-[18px] font-semibold leading-tight tracking-[-0.01em] text-(--fg)">
+              <h1 className="mt-1 truncate text-[22px] font-semibold leading-tight text-(--fg)">
                 {data?.host.hostname ?? "Linux host"}
               </h1>
             </div>
@@ -114,23 +123,41 @@ export function LinuxDashboardView({
             </div>
           </div>
 
-          {summary ? (
-            <dl className="mt-5 grid w-full grid-cols-2 border-b border-(--border)/45 pb-5 sm:grid-cols-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,0.85fr)_minmax(0,0.9fr)_minmax(0,0.9fr)]">
-              <MetricColumn label="CPU" value={summary.cpu} unit="%" detail={summary.cpuDetail} />
-              <MetricColumn
+          {summary && metricSparklines ? (
+            <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,0.95fr)_minmax(0,0.75fr)_minmax(0,0.95fr)_minmax(0,0.8fr)]">
+              <MetricCard
+                label="CPU"
+                value={summary.cpu}
+                unit="%"
+                detail={summary.cpuDetail}
+                sparkline={<DashboardSparkline samples={metricSparklines.cpu} />}
+              />
+              <MetricCard
                 label="Memory"
                 value={summary.memory}
                 unit="%"
                 detail={summary.memoryDetail}
+                sparkline={<DashboardSparkline samples={metricSparklines.memory} />}
               />
-              <MetricColumn label="VRAM" value={summary.vram} detail={summary.vramDetail} />
-              <CompactMetric label="GPUs" value={summary.gpus} detail={summary.gpuUtil} />
-              <CompactMetric
+              <MetricCard
+                label="VRAM"
+                value={summary.vram}
+                detail={summary.vramDetail}
+                sparkline={<DashboardSparkline samples={metricSparklines.vram} />}
+              />
+              <MetricCard
+                label="GPUs"
+                value={summary.gpus}
+                detail={summary.gpuUtil}
+                sparkline={<DashboardSparkline samples={metricSparklines.gpuUtil} dotted />}
+              />
+              <MetricCard
                 label="System Power"
                 value={summary.power}
                 detail={summary.powerDetail}
+                sparkline={<DashboardSparkline samples={metricSparklines.power} />}
               />
-              <CompactMetric label="Uptime" value={summary.uptime} detail={summary.collectedAt} />
+              <MetricCard label="Uptime" value={summary.uptime} detail={summary.collectedAt} />
             </dl>
           ) : null}
         </header>
@@ -142,31 +169,32 @@ export function LinuxDashboardView({
         ) : null}
 
         {data ? (
-          <main className="mt-5 space-y-5">
+          <main className="mt-3 space-y-2.5">
             {visibleAlerts.length > 0 ? <AlertStrip alerts={visibleAlerts} /> : null}
 
             <SystemOverview data={data} history={history} status={topStatus} />
-            <GpuTelemetry data={data} history={history} />
+            <GpuTelemetry data={data} />
 
-            <Section title="Disks" meta={`${data.disks.length} mounts`}>
-              <div>
-                {data.disks.map((disk) => (
-                  <DiskRow key={disk.path} disk={disk} />
-                ))}
-              </div>
-            </Section>
-
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,0.78fr)_minmax(0,0.86fr)_minmax(0,1.15fr)]">
+              <Section title="Disks" meta={`${data.disks.length} mounts`}>
+                <DisksTable disks={data.disks} />
+              </Section>
               <Section title="Services" meta="local ports">
-                <ServiceGrid
-                  services={data.services}
+                <ServicesTable services={data.services} />
+              </Section>
+
+              <Section title="Backends" meta="runtime">
+                <BackendsTable
                   runtimeSummary={statusData.runtimeSummary}
                   knownBackendIds={knownBackendIds(statusData)}
                   activeBackend={statusData.currentProcess?.backend}
                 />
               </Section>
 
-              <Section title="Sensors" meta="hwmon">
+              <Section
+                title="Sensors / Thermals"
+                meta={`${data.thermals.length + data.fans.length} sensors`}
+              >
                 <Sensors data={data} />
               </Section>
             </div>
@@ -181,55 +209,37 @@ export function LinuxDashboardView({
   );
 }
 
-function MetricColumn({
+function MetricCard({
   label,
   value,
   unit,
   detail,
+  sparkline,
 }: {
   label: string;
   value: string | null;
   unit?: string;
   detail?: string;
+  sparkline?: React.ReactNode;
 }) {
   return (
-    <div className="min-w-0 border-r border-(--border)/35 px-3 py-1.5 first:pl-0 last:border-r-0">
-      <dt className="font-mono text-[10px] uppercase tracking-[0.22em] text-(--dim)/75">{label}</dt>
-      <dd className="mt-2.5 flex min-w-0 items-baseline gap-1.5 font-mono tabular-nums">
-        <span className="truncate text-[22px] font-light leading-none text-(--fg)/92 sm:text-[28px]">
+    <div className="min-w-0 rounded-[4px] border border-(--border)/70 bg-(--surface)/35 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+      <dt className="font-mono text-[10px] uppercase tracking-[0.2em] text-(--dim)/80">{label}</dt>
+      <dd className="mt-2 flex min-w-0 items-baseline gap-1.5 font-mono tabular-nums">
+        <span className="min-w-0 truncate text-[24px] font-light leading-none text-(--fg)/95">
           {value ?? "n/a"}
         </span>
-        {unit ? <span className="text-[11px] text-(--dim)/70">{unit}</span> : null}
+        {unit ? <span className="shrink-0 text-[11px] text-(--dim)/70">{unit}</span> : null}
       </dd>
-      {detail ? (
-        <div className="mt-1.5 truncate font-mono text-[10.5px] text-(--dim)/65" title={detail}>
-          {detail}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function CompactMetric({
-  label,
-  value,
-  detail,
-}: {
-  label: string;
-  value: string | null;
-  detail?: string;
-}) {
-  return (
-    <div className="min-w-0 border-r border-(--border)/35 px-3 py-1.5 last:border-r-0">
-      <dt className="font-mono text-[10px] uppercase tracking-[0.22em] text-(--dim)/75">{label}</dt>
-      <dd className="mt-2.5 truncate font-mono text-[17px] tabular-nums text-(--fg)/88">
-        {value ?? "n/a"}
-      </dd>
-      {detail ? (
-        <div className="mt-1.5 truncate font-mono text-[10.5px] text-(--dim)/65" title={detail}>
-          {detail}
-        </div>
-      ) : null}
+      <div className="mt-2 flex min-w-0 items-center gap-3">
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-(--dim)/70"
+          title={detail}
+        >
+          {detail ?? "\u00a0"}
+        </span>
+        {sparkline ? <div className="w-14 min-w-0 shrink-0">{sparkline}</div> : null}
+      </div>
     </div>
   );
 }
@@ -286,6 +296,30 @@ function buildSummary(
       second: "2-digit",
     }),
   };
+}
+
+function buildMetricSparklines(
+  history: DashboardHistoryPoint[],
+): Record<"cpu" | "memory" | "vram" | "gpuUtil" | "power", DashboardUsageSample[]> {
+  const cpu = getCpuUsageSamples(history);
+  const memory = history.map((point) => ({
+    time: point.time,
+    value: point.memory_used_percent,
+  }));
+  const vram = getGpuMemoryUsageSamples(history);
+  const gpuUtil = history.map((point) => {
+    const values = point.gpus
+      .map((gpu) => gpu.utilization_percent)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return {
+      time: point.time,
+      value:
+        values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+    };
+  });
+  const power = getSystemPowerSamples(history);
+
+  return { cpu, memory, vram, gpuUtil, power };
 }
 
 function currentModelLabel(statusData: DashboardLayoutProps): string {

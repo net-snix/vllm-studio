@@ -5,6 +5,8 @@ export type DashboardHistoryGpu = {
   index: number;
   name: string;
   utilization_percent: number | null;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
   memory_used_percent: number | null;
   temperature_c: number | null;
   power_draw_watts: number | null;
@@ -15,6 +17,7 @@ export type DashboardHistoryPoint = {
   time: number;
   cpu_usage_percent: number | null;
   cpu_load_percent: number | null;
+  cpu_power_draw_watts: number | null;
   memory_used_percent: number;
   gpus: DashboardHistoryGpu[];
 };
@@ -41,6 +44,8 @@ const isHistoryGpu = (value: unknown): value is DashboardHistoryGpu => {
     isFiniteNumber(gpu.index) &&
     typeof gpu.name === "string" &&
     isNullableFiniteNumber(gpu.utilization_percent) &&
+    isFiniteNumber(gpu.memory_total_bytes) &&
+    isFiniteNumber(gpu.memory_used_bytes) &&
     isNullableFiniteNumber(gpu.memory_used_percent) &&
     isNullableFiniteNumber(gpu.temperature_c) &&
     isNullableFiniteNumber(gpu.power_draw_watts)
@@ -55,6 +60,7 @@ const isHistoryPoint = (value: unknown): value is DashboardHistoryPoint => {
     isFiniteNumber(point.time) &&
     isNullableFiniteNumber(point.cpu_usage_percent) &&
     isNullableFiniteNumber(point.cpu_load_percent) &&
+    isNullableFiniteNumber(point.cpu_power_draw_watts) &&
     isFiniteNumber(point.memory_used_percent) &&
     Array.isArray(point.gpus) &&
     point.gpus.every(isHistoryGpu)
@@ -74,12 +80,15 @@ export const snapshotToHistoryPoint = (
   time: Date.parse(snapshot.collected_at),
   cpu_usage_percent: finiteOrNull(snapshot.cpu.usage_percent),
   cpu_load_percent: finiteOrNull(snapshot.cpu.load_percent_1m),
+  cpu_power_draw_watts: finiteOrNull(snapshot.cpu.power_draw_watts),
   memory_used_percent: snapshot.memory.used_percent,
   gpus: snapshot.gpus.map((gpu) => ({
     key: dashboardGpuKey(gpu),
     index: gpu.index,
     name: gpu.name,
     utilization_percent: finiteOrNull(gpu.utilization_percent),
+    memory_total_bytes: gpu.memory_total_bytes,
+    memory_used_bytes: gpu.memory_used_bytes,
     memory_used_percent: finiteOrNull(gpu.memory_used_percent),
     temperature_c: finiteOrNull(gpu.temperature_c),
     power_draw_watts: finiteOrNull(gpu.power_draw_watts),
@@ -161,3 +170,35 @@ export const getGpuUsageSamples = (
     };
   });
 };
+
+export const getGpuMemoryUsageSamples = (
+  history: DashboardHistoryPoint[],
+): DashboardUsageSample[] =>
+  history.map((point) => {
+    const totalBytes = point.gpus.reduce((sum, gpu) => sum + gpu.memory_total_bytes, 0);
+    const usedBytes = point.gpus.reduce((sum, gpu) => sum + gpu.memory_used_bytes, 0);
+    return {
+      time: point.time,
+      value: totalBytes > 0 ? (usedBytes / totalBytes) * 100 : null,
+    };
+  });
+
+export const getSystemPowerSamples = (history: DashboardHistoryPoint[]): DashboardUsageSample[] =>
+  history.map((point) => {
+    const gpuPower = point.gpus.reduce(
+      (sum, gpu) =>
+        typeof gpu.power_draw_watts === "number" && Number.isFinite(gpu.power_draw_watts)
+          ? sum + gpu.power_draw_watts
+          : sum,
+      0,
+    );
+    const cpuPower =
+      typeof point.cpu_power_draw_watts === "number" && Number.isFinite(point.cpu_power_draw_watts)
+        ? point.cpu_power_draw_watts
+        : 0;
+    const totalPower = gpuPower + cpuPower;
+    return {
+      time: point.time,
+      value: totalPower > 0 ? totalPower : null,
+    };
+  });
