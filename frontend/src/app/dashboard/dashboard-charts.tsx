@@ -375,7 +375,7 @@ function GpuUsageGraph({
           {formatPercent(gpu.utilization_percent)}
         </div>
       </div>
-      <div className="h-14">
+      <div className="h-[4.2rem]">
         <UsageLineChart
           samples={samples}
           stroke="var(--hl1)"
@@ -416,7 +416,9 @@ function TrendPanel({
           {value}
         </div>
       </div>
-      <div className={size === "large" ? "h-20" : "h-16"}>{children}</div>
+      <div className={size === "large" ? "h-24" : "h-[4.8rem]"}>
+        {children}
+      </div>
     </div>
   );
 }
