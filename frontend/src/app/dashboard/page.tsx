@@ -14,9 +14,7 @@ import { LinuxDashboardView } from "./dashboard-view";
 
 const STREAM_RECONNECT_MS = 2_000;
 
-const isLinuxDashboardSnapshot = (
-  value: unknown,
-): value is LinuxDashboardSnapshot => {
+const isLinuxDashboardSnapshot = (value: unknown): value is LinuxDashboardSnapshot => {
   if (!value || typeof value !== "object") return false;
   const snapshot = value as Record<string, unknown>;
   return (
@@ -51,20 +49,23 @@ export default function LinuxDashboardPage() {
     });
   }, []);
 
-  const load = useCallback(async (mode: "initial" | "refresh" = "refresh") => {
-    try {
-      if (mode === "initial") setLoading(true);
-      setRefreshing(true);
-      setError(null);
-      const next = await api.getLinuxDashboard({ timeout: 12_000, retries: 0 });
-      applySnapshot(next);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [applySnapshot]);
+  const load = useCallback(
+    async (mode: "initial" | "refresh" = "refresh") => {
+      try {
+        if (mode === "initial") setLoading(true);
+        setRefreshing(true);
+        setError(null);
+        const next = await api.getLinuxDashboard({ timeout: 12_000, retries: 0 });
+        applySnapshot(next);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [applySnapshot],
+  );
 
   useEffect(() => {
     if (autoRefresh) return;
@@ -94,9 +95,7 @@ export default function LinuxDashboardPage() {
           }
           if (event.event === "linux-dashboard-error") {
             const message = event.data["message"];
-            setError(
-              typeof message === "string" ? message : "Dashboard stream failed",
-            );
+            setError(typeof message === "string" ? message : "Dashboard stream failed");
           }
         }
       } catch (err) {
@@ -107,10 +106,7 @@ export default function LinuxDashboardPage() {
       } finally {
         setRefreshing(false);
         if (!abort.signal.aborted) {
-          reconnectId = window.setTimeout(
-            () => void connect(),
-            STREAM_RECONNECT_MS,
-          );
+          reconnectId = window.setTimeout(() => void connect(), STREAM_RECONNECT_MS);
         }
       }
     };
@@ -134,6 +130,9 @@ export default function LinuxDashboardPage() {
       autoRefresh={autoRefresh}
       onAutoRefreshChange={setAutoRefresh}
       onRefresh={() => void load()}
+      onRestart={async () => {
+        await api.restartHost();
+      }}
       onShutdown={async () => {
         await api.shutdownHost();
       }}

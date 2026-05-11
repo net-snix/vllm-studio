@@ -6,16 +6,14 @@ import {
   LinuxDashboardTelemetry,
   type LinuxDashboardTelemetryEvent,
 } from "./linux-dashboard-telemetry";
-import { scheduleHostShutdown } from "./host-shutdown";
+import { scheduleHostRestart, scheduleHostShutdown } from "./host-shutdown";
 
 const telemetryByContext = new WeakMap<AppContext, LinuxDashboardTelemetry>();
 
 const getTelemetry = (context: AppContext): LinuxDashboardTelemetry => {
   const existing = telemetryByContext.get(context);
   if (existing) return existing;
-  const telemetry = new LinuxDashboardTelemetry(() =>
-    collectLinuxDashboardSnapshot(context),
-  );
+  const telemetry = new LinuxDashboardTelemetry(() => collectLinuxDashboardSnapshot(context));
   telemetryByContext.set(context, telemetry);
   return telemetry;
 };
@@ -54,7 +52,7 @@ export const registerLinuxDashboardRoutes = (app: Hono, context: AppContext): vo
         for await (const event of telemetry.subscribe(signal)) {
           yield telemetryEventToSse(event);
         }
-      })(),
+      })()
     );
     return new Response(stream, {
       headers: buildSseHeaders(),
@@ -70,6 +68,19 @@ export const registerLinuxDashboardRoutes = (app: Hono, context: AppContext): vo
     return ctx.json({
       success: true,
       message: "Shutdown scheduled",
+      command: result.command,
+    });
+  });
+
+  app.post("/linux-dashboard/restart", (ctx) => {
+    const result = scheduleHostRestart();
+    if (!result.success) {
+      return ctx.json({ success: false, error: result.error }, { status: 500 });
+    }
+    context.logger.warn("Host restart requested from dashboard");
+    return ctx.json({
+      success: true,
+      message: "Restart scheduled",
       command: result.command,
     });
   });
