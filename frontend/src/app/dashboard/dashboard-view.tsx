@@ -290,7 +290,7 @@ function knownBackendIds(statusData: DashboardLayoutProps): string[] {
 function statusDotClass(status: LinuxDashboardHealth): string {
   if (status === "critical") return "bg-(--err)";
   if (status === "warning") return "bg-(--hl3)";
-  if (status === "ok") return "bg-(--fg)";
+  if (status === "ok") return "bg-(--hl2)";
   return "bg-(--dim)/55";
 }
 

@@ -392,7 +392,7 @@ function backendRows(
         value: backend.version ?? "version unknown",
         extra: running ? "active" : installed ? "installed" : "missing",
         dotClass: running
-          ? "bg-(--fg)"
+          ? "bg-(--hl2)"
           : installed
             ? "bg-(--hl2)"
             : "bg-(--dim)",
@@ -405,7 +405,7 @@ function backendRows(
         label: id,
         value: "from recipes",
         extra: running ? "active" : "configured",
-        dotClass: running ? "bg-(--fg)" : "bg-(--dim)",
+        dotClass: running ? "bg-(--hl2)" : "bg-(--dim)",
       };
     }),
   ];
@@ -414,7 +414,7 @@ function backendRows(
 function healthDotClass(status: LinuxDashboardHealth): string {
   if (status === "critical") return "bg-(--err)";
   if (status === "warning") return "bg-(--hl3)";
-  if (status === "ok") return "bg-(--fg)";
+  if (status === "ok") return "bg-(--hl2)";
   return "bg-(--dim)/55";
 }
 
