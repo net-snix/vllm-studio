@@ -110,6 +110,22 @@ describe("dashboard history", () => {
     expect(deduped).toBe(history);
   });
 
+  it("keeps only the newest five minutes of dashboard history", () => {
+    const history = [
+      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+      makeSnapshot("2026-04-29T10:04:59.000Z", 15, [25]),
+      makeSnapshot("2026-04-29T10:05:01.000Z", 20, [30]),
+    ].reduce(
+      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+      [] as ReturnType<typeof appendDashboardHistory>,
+    );
+
+    expect(history.map((point) => point.collected_at)).toEqual([
+      "2026-04-29T10:04:59.000Z",
+      "2026-04-29T10:05:01.000Z",
+    ]);
+  });
+
   it("returns a separate utilization series for each GPU", () => {
     const history = [
       makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),

@@ -15,7 +15,7 @@ const CHART_WIDTH = 360;
 const CHART_HEIGHT = 96;
 const CHART_PAD = 6;
 const CHART_WINDOW_MS = 30 * 60 * 1000;
-const COMPACT_CHART_WINDOW_MS = 10 * 60 * 1000;
+const COMPACT_CHART_WINDOW_MS = 5 * 60 * 1000;
 
 type ChartPoint = {
   x: number;
@@ -277,7 +277,7 @@ export function SystemOverview({
   }));
 
   return (
-    <Section title="Host telemetry" meta="last 10 minutes">
+    <Section title="Host telemetry" meta="last 5 minutes">
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)]">
         <TrendPanel
           title="CPU usage"

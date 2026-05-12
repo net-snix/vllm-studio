@@ -22,7 +22,7 @@ export type DashboardHistoryPoint = {
   gpus: DashboardHistoryGpu[];
 };
 
-const DASHBOARD_HISTORY_WINDOW_MS = 10 * 60 * 1000;
+const DASHBOARD_HISTORY_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_HISTORY_LIMIT = 900;
 const DASHBOARD_HISTORY_STORAGE_KEY = "vllm-studio-dashboard-history";
 
