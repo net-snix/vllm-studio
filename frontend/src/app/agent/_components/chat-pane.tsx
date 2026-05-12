@@ -2,15 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, ReactNode } from "react";
-import {
-  AlertTriangle,
-  FileText,
-  Loader2,
-  PencilLine,
-  Search,
-  TerminalSquare,
-  Wrench,
-} from "lucide-react";
+import { Loader2 } from "lucide-react";
 import {
   AttachIcon,
   ChevronDownIcon,
@@ -21,8 +13,33 @@ import {
   SendIcon,
   StopIcon,
 } from "@/components/icons";
-import { safeJson } from "@/lib/agent/safe-json";
-import { AssistantMarkdown } from "./assistant-markdown";
+import {
+  activateComposerPlugin,
+  activeComposerPlugins,
+  byQuery,
+  detectComposerMention,
+  consumeComposerMention,
+  selectedContextPrompt,
+  type ComposerMention,
+  type ComposerPluginRef,
+  type ComposerSkillRef,
+} from "@/lib/agent/composer-context";
+import { asRecord, newId, visibleQueuedMessages, formatTokenCount } from "@/lib/agent/session";
+import { useSessionEngine } from "@/lib/agent/sessions/engine";
+import { useTools } from "@/lib/agent/tools/context";
+import type {
+  AgentTurnSsePayload,
+  AssistantBlock,
+  ChatMessage,
+  ChatPaneHandle,
+  EventBlock,
+  QueuedMessage,
+  SessionTab,
+  TextBlock,
+  ThinkingBlock,
+  TokenStats,
+  ToolBlock,
+} from "@/lib/agent/session";
 import {
   attachmentDedupKey,
   attachmentPrompt,
@@ -33,90 +50,24 @@ import {
   isImageAttachment,
   type ChatAttachment,
 } from "./chat-attachments";
+import { Timeline } from "./timeline/timeline";
 
-// Imperative handle exposed by ChatPane so the workspace can replay a past
-// pi session into the focused pane without going through useEffect-driven
-// prop plumbing. The workspace calls this directly from event/click handlers
-// so the control flow is auditable in one place.
-export type ChatPaneHandle = {
-  loadAndReplay: (piSessionId: string) => Promise<void>;
+// Re-export the session module's public surface so existing imports from
+// "./chat-pane" keep working during the incremental migration.
+export type {
+  AgentTurnSsePayload,
+  AssistantBlock,
+  ChatMessage,
+  ChatPaneHandle,
+  EventBlock,
+  QueuedMessage,
+  SessionTab,
+  TextBlock,
+  ThinkingBlock,
+  TokenStats,
+  ToolBlock,
 };
-
-export type ToolBlock = {
-  kind: "tool";
-  id: string;
-  name: string;
-  status: "running" | "done" | "error";
-  // Streaming raw text of the tool-call arguments (assembled from toolcall_delta
-  // events, then replaced by the canonical JSON at toolcall_end). For file-write
-  // tools, this lets us live-render the file content as the model generates it.
-  argsText?: string;
-  // Parsed arguments JSON, set at toolcall_end if `argsText` is valid JSON.
-  args?: Record<string, unknown>;
-  // Tool execution output (separate from args so we can render both).
-  resultText?: string;
-  // Back-compat single-text field used by legacy renderers / replays.
-  text: string;
-};
-export type TextBlock = { kind: "text"; id: string; text: string };
-export type ThinkingBlock = { kind: "thinking"; id: string; text: string };
-export type AssistantBlock = TextBlock | ThinkingBlock | ToolBlock;
-
-export type ChatMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-  blocks?: AssistantBlock[];
-  timestamp?: string;
-};
-
-export type TokenStats = {
-  read: number;
-  write: number;
-  current: number;
-};
-
-export type QueuedMessage = {
-  id: string;
-  // "steer" interrupts the current turn between tool runs and the next LLM
-  // call; "follow_up" waits until the agent completely finishes.
-  mode: "steer" | "follow_up";
-  text: string;
-};
-
-export function drainQueueAfterAgentEnd(queue: QueuedMessage[]): {
-  next: QueuedMessage | null;
-  remaining: QueuedMessage[];
-} {
-  const followUps = queue.filter((item) => item.mode === "follow_up");
-  const [next, ...remaining] = followUps;
-  return { next: next ?? null, remaining };
-}
-
-export type SessionTab = {
-  // Stable id local to this pane, used as a React key for tabs.
-  id: string;
-  // In-memory PiRpcSession key. One per tab so tabs can run independent pi
-  // processes instead of sharing a pane-level runtime.
-  runtimeSessionId: string;
-  // Pi session UUID (null = unstarted, will be assigned by pi when the first
-  // turn runs).
-  piSessionId: string | null;
-  projectId?: string;
-  cwd?: string;
-  modelId?: string;
-  // Display title — derived from the first user message of the session, or a
-  // placeholder while empty.
-  title: string;
-  messages: ChatMessage[];
-  status: string;
-  error: string;
-  input: string;
-  tokenStats?: TokenStats;
-  // Outgoing pending messages (steer + follow_up). Drawn as chips above the
-  // input. Steers fire immediately; follow-ups wait for `agent_end`.
-  queue?: QueuedMessage[];
-};
+export { visibleQueuedMessages };
 
 type Props = {
   paneId: string;
@@ -158,486 +109,6 @@ type Props = {
   onRegisterHandle?: (handle: ChatPaneHandle | null) => void;
 };
 
-function randomIdSegment(length: number): string {
-  const cryptoApi = globalThis.crypto;
-  if (cryptoApi?.randomUUID) {
-    return cryptoApi.randomUUID().replace(/-/g, "").slice(0, length);
-  }
-  const bytes = new Uint8Array(Math.ceil(length / 2));
-  if (cryptoApi?.getRandomValues) {
-    cryptoApi.getRandomValues(bytes);
-  }
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, length);
-}
-
-function newId(prefix: string) {
-  return `${prefix}-${Date.now().toString(36)}-${randomIdSegment(8)}`;
-}
-
-function nowLabel() {
-  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(
-    new Date(),
-  );
-}
-
-function extractToolText(value: unknown): string {
-  if (!value || typeof value !== "object") return "";
-  const result = value as { content?: Array<{ type?: string; text?: string }> };
-  if (!Array.isArray(result.content)) return "";
-  return result.content
-    .map((item) => (item && item.type === "text" && typeof item.text === "string" ? item.text : ""))
-    .filter(Boolean)
-    .join("\n");
-}
-
-function numberFromRecord(record: Record<string, unknown>, keys: string[]): number {
-  for (const key of keys) {
-    const value = record[key];
-    const parsed =
-      typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return 0;
-}
-
-function piSessionIdFromEvent(event: Record<string, unknown>): string | null {
-  if (event.type !== "session") return null;
-  for (const key of ["id", "sessionId", "session_id"]) {
-    const value = event[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function usageFromEvent(event: Record<string, unknown>): TokenStats | null {
-  if (event.type !== "message" && event.type !== "message_end") return null;
-  const message = asRecord(event.message);
-  if (!message || message.role !== "assistant") return null;
-  const usage =
-    message.usage && typeof message.usage === "object" && !Array.isArray(message.usage)
-      ? (message.usage as Record<string, unknown>)
-      : null;
-  if (!usage) return null;
-  const read = numberFromRecord(usage, ["input", "prompt_tokens", "input_tokens"]);
-  const write = numberFromRecord(usage, ["output", "completion_tokens", "output_tokens"]);
-  const total = numberFromRecord(usage, ["totalTokens", "total_tokens", "total"]);
-  const current = total || read + write;
-  if (read <= 0 && write <= 0 && current <= 0) return null;
-  return { read, write, current };
-}
-
-function formatTokenCount(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
-  return String(Math.max(0, Math.round(tokens)));
-}
-
-type StreamingToolCallSnapshot = {
-  id: string;
-  name: string;
-  args?: Record<string, unknown>;
-};
-
-function contentPartAt(
-  messageLike: unknown,
-  contentIndex: unknown,
-): Record<string, unknown> | null {
-  const message = asRecord(messageLike);
-  const content = Array.isArray(message?.content) ? message.content : null;
-  if (!content) return null;
-  if (typeof contentIndex === "number") return asRecord(content[contentIndex]);
-  for (let idx = content.length - 1; idx >= 0; idx -= 1) {
-    const part = asRecord(content[idx]);
-    if (part?.type === "toolCall") return part;
-  }
-  return null;
-}
-
-function toolCallSnapshotFromUpdate(
-  assistantMessageEvent: Record<string, unknown> | undefined,
-  message?: unknown,
-): StreamingToolCallSnapshot | null {
-  if (!assistantMessageEvent) return null;
-  const explicit = asRecord(assistantMessageEvent.toolCall);
-  const part =
-    explicit ??
-    contentPartAt(assistantMessageEvent.partial, assistantMessageEvent.contentIndex) ??
-    contentPartAt(message, assistantMessageEvent.contentIndex);
-  const idValue = part?.id ?? assistantMessageEvent.toolCallId;
-  const id = typeof idValue === "string" && idValue.trim() ? idValue.trim() : "";
-  if (!id) return null;
-  const nameValue = part?.name ?? assistantMessageEvent.toolName;
-  const name = typeof nameValue === "string" && nameValue.trim() ? nameValue.trim() : "tool";
-  const args = asRecord(part?.arguments) ?? undefined;
-  return { id, name, args };
-}
-
-function toolCallDeltaFromUpdate(
-  assistantMessageEvent: Record<string, unknown> | undefined,
-): string {
-  const value = assistantMessageEvent?.delta ?? assistantMessageEvent?.argumentsDelta;
-  return typeof value === "string" ? value : "";
-}
-
-function stringifyToolArgs(args: Record<string, unknown> | undefined): string | undefined {
-  return args && Object.keys(args).length > 0 ? JSON.stringify(args, null, 2) : undefined;
-}
-
-export function sessionTitleFromPrompt(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, 48) || "New session";
-}
-
-function messageText(
-  content: string | Array<Record<string, unknown>> | undefined,
-  separator = "\n",
-): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (part?.type === "text" && typeof part.text === "string") return part.text;
-      return "";
-    })
-    .filter(Boolean)
-    .join(separator);
-}
-
-function blocksFromMessageContent(content: string | Array<Record<string, unknown>> | undefined) {
-  if (typeof content === "string") {
-    return content ? [{ kind: "text" as const, id: newId("text"), text: content }] : [];
-  }
-  if (!Array.isArray(content)) return [];
-  const blocks: AssistantBlock[] = [];
-  for (const part of content) {
-    if (part?.type === "text" && typeof part.text === "string") {
-      blocks.push({ kind: "text", id: newId("text"), text: part.text });
-    } else if (part?.type === "thinking" && typeof part.thinking === "string") {
-      blocks.push({ kind: "thinking", id: newId("thinking"), text: part.thinking });
-    } else if (part?.type === "toolCall") {
-      const argsText = JSON.stringify(part.arguments ?? {}, null, 2);
-      const args =
-        part.arguments && typeof part.arguments === "object"
-          ? (part.arguments as Record<string, unknown>)
-          : undefined;
-      blocks.push({
-        kind: "tool",
-        id: typeof part.id === "string" ? part.id : newId("tool"),
-        name: typeof part.name === "string" ? part.name : "tool",
-        status: "running",
-        argsText,
-        args,
-        text: argsText,
-      });
-    }
-  }
-  return blocks;
-}
-
-export function replaySessionEvents(events: Record<string, unknown>[]) {
-  const replayed: ChatMessage[] = [];
-  let pendingAssistantId: string | null = null;
-  let title: string | null = null;
-
-  const ensureAssistant = () => {
-    if (pendingAssistantId) return pendingAssistantId;
-    const id = newId("assistant");
-    replayed.push({ id, role: "assistant", text: "", blocks: [], timestamp: nowLabel() });
-    pendingAssistantId = id;
-    return id;
-  };
-  const localPatch = (assistantId: string, patch: (msg: ChatMessage) => ChatMessage) => {
-    const idx = replayed.findIndex((m) => m.id === assistantId);
-    if (idx !== -1) replayed[idx] = patch(replayed[idx]);
-  };
-  const assistantWithTool = (toolCallId: string) => {
-    for (let idx = replayed.length - 1; idx >= 0; idx -= 1) {
-      const message = replayed[idx];
-      if (
-        message.role === "assistant" &&
-        (message.blocks ?? []).some((block) => block.kind === "tool" && block.id === toolCallId)
-      ) {
-        return message.id;
-      }
-    }
-    return null;
-  };
-
-  for (const event of events) {
-    const type = event.type;
-    if (type === "message" || type === "message_end") {
-      const msg = event.message as
-        | {
-            role?: string;
-            content?: string | Array<Record<string, unknown>>;
-            toolCallId?: string;
-            toolName?: string;
-            isError?: boolean;
-          }
-        | undefined;
-      if (msg?.role === "user") {
-        pendingAssistantId = null;
-        const text = messageText(msg.content);
-        if (text) {
-          if (!title) title = sessionTitleFromPrompt(text);
-          replayed.push({ id: newId("user"), role: "user", text, timestamp: nowLabel() });
-        }
-        continue;
-      }
-      if (msg?.role === "assistant") {
-        pendingAssistantId = null;
-        const blocks = blocksFromMessageContent(msg.content);
-        replayed.push({
-          id: newId("assistant"),
-          role: "assistant",
-          text: blocks
-            .filter((block): block is TextBlock => block.kind === "text")
-            .map((block) => block.text)
-            .join("\n"),
-          blocks,
-          timestamp: nowLabel(),
-        });
-        continue;
-      }
-      if (msg?.role === "toolResult") {
-        const id = msg.toolCallId || String(event.toolCallId || "");
-        if (id) {
-          const resultText = messageText(msg.content);
-          const assistantId = assistantWithTool(id) ?? ensureAssistant();
-          localPatch(assistantId, (message) => ({
-            ...message,
-            blocks: upsertTool(
-              message.blocks ?? [],
-              id,
-              (existing) => ({
-                ...existing,
-                status: msg.isError ? "error" : "done",
-                text: resultText || existing.text,
-              }),
-              () => ({
-                kind: "tool",
-                id,
-                name: msg.toolName || "tool",
-                status: msg.isError ? "error" : "done",
-                text: resultText,
-              }),
-            ),
-          }));
-        }
-        continue;
-      }
-    }
-
-    const eventType = event.type;
-    if (
-      eventType !== "message_update" &&
-      eventType !== "tool_execution_start" &&
-      eventType !== "tool_execution_update" &&
-      eventType !== "tool_execution_end"
-    ) {
-      continue;
-    }
-
-    const assistantId = ensureAssistant();
-    if (eventType === "message_update") {
-      const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
-      const updateType = ame?.type;
-      if (updateType === "text_delta" && typeof ame?.delta === "string") {
-        const delta = ame.delta;
-        localPatch(assistantId, (msg) => ({
-          ...msg,
-          blocks: appendDelta(msg.blocks ?? [], "text", delta),
-        }));
-      } else if (updateType === "thinking_delta" && typeof ame?.delta === "string") {
-        const delta = ame.delta;
-        localPatch(assistantId, (msg) => ({
-          ...msg,
-          blocks: appendDelta(msg.blocks ?? [], "thinking", delta),
-        }));
-      } else if (updateType === "toolcall_start") {
-        const snapshot = toolCallSnapshotFromUpdate(ame, event.message);
-        if (!snapshot) continue;
-        localPatch(assistantId, (msg) => ({
-          ...msg,
-          blocks: upsertTool(
-            msg.blocks ?? [],
-            snapshot.id,
-            (existing) => ({
-              ...existing,
-              name: snapshot.name,
-              args: snapshot.args ?? existing.args,
-            }),
-            () => ({
-              kind: "tool",
-              id: snapshot.id,
-              name: snapshot.name,
-              status: "running",
-              text: "",
-              argsText: stringifyToolArgs(snapshot.args) ?? "",
-              args: snapshot.args,
-            }),
-          ),
-        }));
-      } else if (updateType === "toolcall_delta") {
-        const snapshot = toolCallSnapshotFromUpdate(ame, event.message);
-        const delta = toolCallDeltaFromUpdate(ame);
-        if (!snapshot || (!delta && !snapshot.args)) continue;
-        localPatch(assistantId, (msg) => ({
-          ...msg,
-          blocks: upsertTool(
-            msg.blocks ?? [],
-            snapshot.id,
-            (existing) => ({
-              ...existing,
-              name: snapshot.name || existing.name,
-              args: snapshot.args ?? existing.args,
-              argsText: delta
-                ? (existing.argsText ?? "") + delta
-                : existing.argsText || stringifyToolArgs(snapshot.args),
-            }),
-            () => ({
-              kind: "tool",
-              id: snapshot.id,
-              name: snapshot.name,
-              status: "running",
-              text: "",
-              argsText: delta || stringifyToolArgs(snapshot.args) || "",
-              args: snapshot.args,
-            }),
-          ),
-        }));
-      } else if (updateType === "toolcall_end") {
-        const toolCall = ame?.toolCall as
-          | { id?: string; name?: string; arguments?: unknown }
-          | undefined;
-        if (toolCall) {
-          const id = toolCall.id || newId("tool");
-          const name = toolCall.name || "tool";
-          const argsText = JSON.stringify(toolCall.arguments ?? {}, null, 2);
-          const argsObj =
-            toolCall.arguments && typeof toolCall.arguments === "object"
-              ? (toolCall.arguments as Record<string, unknown>)
-              : undefined;
-          localPatch(assistantId, (msg) => ({
-            ...msg,
-            blocks: upsertTool(
-              msg.blocks ?? [],
-              id,
-              (existing) => ({
-                ...existing,
-                name,
-                argsText,
-                args: argsObj ?? existing.args,
-                text: existing.text || argsText,
-              }),
-              () => ({
-                kind: "tool",
-                id,
-                name,
-                status: "running",
-                argsText,
-                args: argsObj,
-                text: argsText,
-              }),
-            ),
-          }));
-        }
-      }
-    } else if (eventType === "tool_execution_start") {
-      const id = String(event.toolCallId || newId("tool"));
-      const name = String(event.toolName || "tool");
-      localPatch(assistantId, (msg) => ({
-        ...msg,
-        blocks: upsertTool(
-          msg.blocks ?? [],
-          id,
-          (existing) => existing,
-          () => ({ kind: "tool", id, name, status: "running", text: "" }),
-        ),
-      }));
-    } else if (eventType === "tool_execution_update" || eventType === "tool_execution_end") {
-      const id = String(event.toolCallId || "");
-      if (id) {
-        const resultText = extractToolText(event.partialResult || event.result);
-        localPatch(assistantId, (msg) => ({
-          ...msg,
-          blocks: upsertTool(
-            msg.blocks ?? [],
-            id,
-            (existing) => ({
-              ...existing,
-              status:
-                eventType === "tool_execution_end"
-                  ? ((event.isError ? "error" : "done") as ToolBlock["status"])
-                  : existing.status,
-              resultText: resultText || existing.resultText,
-              text: existing.argsText || existing.text || resultText,
-            }),
-            () => ({
-              kind: "tool",
-              id,
-              name: "tool",
-              status:
-                eventType === "tool_execution_end"
-                  ? ((event.isError ? "error" : "done") as ToolBlock["status"])
-                  : "running",
-              resultText,
-              text: resultText,
-            }),
-          ),
-        }));
-      }
-    }
-  }
-
-  return { messages: replayed, title };
-}
-
-function appendDelta(
-  blocks: AssistantBlock[],
-  kind: "text" | "thinking",
-  delta: string,
-): AssistantBlock[] {
-  const last = blocks[blocks.length - 1];
-  if (last && last.kind === kind) {
-    return [...blocks.slice(0, -1), { ...last, text: last.text + delta }];
-  }
-  return [...blocks, { kind, id: newId(kind), text: delta }];
-}
-
-function upsertTool(
-  blocks: AssistantBlock[],
-  toolCallId: string,
-  patch: (tool: ToolBlock) => ToolBlock,
-  fallback: () => ToolBlock,
-): AssistantBlock[] {
-  const idx = blocks.findIndex((b) => b.kind === "tool" && b.id === toolCallId);
-  if (idx === -1) return [...blocks, fallback()];
-  const next = blocks.slice();
-  next[idx] = patch(next[idx] as ToolBlock);
-  return next;
-}
-
-export function makeFreshTab(): SessionTab {
-  return {
-    id: newId("tab"),
-    runtimeSessionId: newId("rt"),
-    piSessionId: null,
-    title: "New session",
-    messages: [],
-    status: "idle",
-    error: "",
-    input: "",
-  };
-}
-
 export function ChatPane({
   paneId,
   runtimeSessionId,
@@ -671,18 +142,33 @@ export function ChatPane({
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [readingAttachments, setReadingAttachments] = useState(false);
   const [composerDragActive, setComposerDragActive] = useState(false);
-  const tabsRef = useRef(tabs);
+  const [queueExpanded, setQueueExpanded] = useState(false);
+  const [mention, setMention] = useState<ComposerMention | null>(null);
+  const [compacting, setCompacting] = useState(false);
 
-  useEffect(() => {
-    tabsRef.current = tabs;
-  }, [tabs]);
-
+  const tools = useTools();
+  const pluginRows = tools.pluginCatalogue;
+  const skillRows = tools.skillCatalogue;
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [tabs, activeTabId],
   );
   const running = activeTab?.status === "running" || activeTab?.status === "starting";
+  const activeSelection = tools.selectionFor(activeTab?.id);
+  const selectedPlugins = activeSelection.plugins;
+  const selectedSkills = activeSelection.skills;
+  const computerUseLoaded = selectedPlugins.some((plugin) =>
+    [plugin.id, plugin.name, plugin.path].some((value) =>
+      value?.toLowerCase().includes("computer-use"),
+    ),
+  );
   const showEmptyPrompt = activeTab && activeTab.messages.length === 0 && !running;
+  const mentionRows = useMemo(() => {
+    if (!mention) return [];
+    return mention.kind === "plugin"
+      ? byQuery(pluginRows, mention.query, 8)
+      : byQuery(skillRows, mention.query, 8);
+  }, [mention, pluginRows, skillRows]);
 
   const updateTab = useCallback(
     (tabId: string, patch: (tab: SessionTab) => SessionTab) => {
@@ -693,6 +179,79 @@ export function ChatPane({
     [onTabsChange],
   );
 
+  const selectMentionRow = useCallback(
+    async (row: ComposerPluginRef | ComposerSkillRef) => {
+      if (!activeTab || !mention) return;
+      const selectedMention = mention;
+      const input = consumeComposerMention(activeTab.input, selectedMention);
+      let selectedRow = row;
+      if ("path" in row && row.path) {
+        const endpoint =
+          selectedMention.kind === "skill"
+            ? `/api/agent/skills/load?path=${encodeURIComponent(row.path)}`
+            : `/api/agent/plugins/load?path=${encodeURIComponent(row.path)}`;
+        const loaded = await fetch(endpoint, { cache: "no-store" })
+          .then((res) =>
+            res.ok
+              ? (res.json() as Promise<{
+                  skill?: ComposerSkillRef;
+                  plugin?: ComposerPluginRef;
+                }>)
+              : null,
+          )
+          .catch(() => null);
+        selectedRow = loaded?.skill
+          ? { ...row, ...loaded.skill, id: row.id }
+          : loaded?.plugin
+            ? { ...row, ...loaded.plugin, id: row.id }
+            : row;
+      }
+      // Stash the new input on the session, then mutate the per-session tool
+      // selection through the tools subsystem (single owner of plugins/skills).
+      updateTab(activeTab.id, (tab) => ({ ...tab, input }));
+      const current = tools.selectionFor(activeTab.id);
+      if (selectedMention.kind === "plugin") {
+        if (!current.plugins.some((plugin) => plugin.id === selectedRow.id)) {
+          tools.setSelection(activeTab.id, {
+            plugins: [...current.plugins, activateComposerPlugin(selectedRow as ComposerPluginRef)],
+            skills: current.skills,
+          });
+        }
+      } else if (!current.skills.some((skill) => skill.id === selectedRow.id)) {
+        tools.setSelection(activeTab.id, {
+          plugins: current.plugins,
+          skills: [...current.skills, selectedRow as ComposerSkillRef],
+        });
+      }
+      if (
+        selectedMention.kind === "plugin" &&
+        row.name.toLowerCase().includes("browser-use") &&
+        !browserToolEnabled
+      ) {
+        onToggleBrowserTool();
+      }
+      setMention(null);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
+    [activeTab, browserToolEnabled, mention, onToggleBrowserTool, tools, updateTab],
+  );
+
+  const removeLoadedContext = useCallback(
+    (kind: "plugin" | "skill", id: string) => {
+      if (!activeTab) return;
+      const current = tools.selectionFor(activeTab.id);
+      tools.setSelection(activeTab.id, {
+        plugins:
+          kind === "plugin"
+            ? current.plugins.filter((plugin) => plugin.id !== id)
+            : current.plugins,
+        skills:
+          kind === "skill" ? current.skills.filter((skill) => skill.id !== id) : current.skills,
+      });
+    },
+    [activeTab, tools],
+  );
+
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -701,260 +260,25 @@ export function ChatPane({
     }
   }, [activeTab?.messages, activeTab?.status]);
 
-  const patchAssistant = useCallback(
-    (tabId: string, assistantId: string, patch: (msg: ChatMessage) => ChatMessage) => {
-      updateTab(tabId, (tab) => ({
-        ...tab,
-        messages: tab.messages.map((m) => (m.id === assistantId ? patch(m) : m)),
-      }));
-    },
+  const updateSession = useCallback(
+    (sessionId: string, patch: (session: SessionTab) => SessionTab) => updateTab(sessionId, patch),
     [updateTab],
   );
+  const engine = useSessionEngine({
+    tabs,
+    activeTabId,
+    runtimeSessionId,
+    modelId,
+    cwd,
+    browserToolEnabled,
+    onPiSessionIdChange,
+    updateSession,
+    selectionFor: tools.selectionFor,
+  });
 
-  const applyPiEvent = useCallback(
-    (tabId: string, assistantId: string, event: Record<string, unknown>) => {
-      const eventType = event.type;
-      const usage = usageFromEvent(event);
-      if (usage) {
-        updateTab(tabId, (tab) => ({ ...tab, tokenStats: usage }));
-      }
-
-      if (eventType === "message_update") {
-        const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
-        const updateType = ame?.type;
-        if (updateType === "text_delta" && typeof ame?.delta === "string") {
-          const delta = ame.delta;
-          patchAssistant(tabId, assistantId, (msg) => ({
-            ...msg,
-            blocks: appendDelta(msg.blocks ?? [], "text", delta),
-          }));
-          return;
-        }
-        if (updateType === "thinking_delta" && typeof ame?.delta === "string") {
-          const delta = ame.delta;
-          patchAssistant(tabId, assistantId, (msg) => ({
-            ...msg,
-            blocks: appendDelta(msg.blocks ?? [], "thinking", delta),
-          }));
-          return;
-        }
-        if (updateType === "toolcall_start") {
-          const snapshot = toolCallSnapshotFromUpdate(ame, event.message);
-          if (!snapshot) return;
-          patchAssistant(tabId, assistantId, (msg) => ({
-            ...msg,
-            blocks: upsertTool(
-              msg.blocks ?? [],
-              snapshot.id,
-              (existing) => ({
-                ...existing,
-                name: snapshot.name,
-                args: snapshot.args ?? existing.args,
-              }),
-              () => ({
-                kind: "tool",
-                id: snapshot.id,
-                name: snapshot.name,
-                status: "running",
-                text: "",
-                argsText: stringifyToolArgs(snapshot.args) ?? "",
-                args: snapshot.args,
-              }),
-            ),
-          }));
-          return;
-        }
-        if (updateType === "toolcall_delta") {
-          const snapshot = toolCallSnapshotFromUpdate(ame, event.message);
-          const delta = toolCallDeltaFromUpdate(ame);
-          if (!snapshot || (!delta && !snapshot.args)) return;
-          patchAssistant(tabId, assistantId, (msg) => ({
-            ...msg,
-            blocks: upsertTool(
-              msg.blocks ?? [],
-              snapshot.id,
-              (existing) => ({
-                ...existing,
-                name: snapshot.name || existing.name,
-                args: snapshot.args ?? existing.args,
-                argsText: delta
-                  ? (existing.argsText ?? "") + delta
-                  : existing.argsText || stringifyToolArgs(snapshot.args),
-              }),
-              () => ({
-                kind: "tool",
-                id: snapshot.id,
-                name: snapshot.name,
-                status: "running",
-                text: "",
-                argsText: delta || stringifyToolArgs(snapshot.args) || "",
-                args: snapshot.args,
-              }),
-            ),
-          }));
-          return;
-        }
-        if (updateType === "toolcall_end") {
-          const toolCall = ame?.toolCall as
-            | { id?: string; name?: string; arguments?: unknown }
-            | undefined;
-          if (!toolCall) return;
-          const id = toolCall.id || newId("tool");
-          const name = toolCall.name || "tool";
-          const argsText = JSON.stringify(toolCall.arguments ?? {}, null, 2);
-          const argsObj =
-            toolCall.arguments && typeof toolCall.arguments === "object"
-              ? (toolCall.arguments as Record<string, unknown>)
-              : undefined;
-          patchAssistant(tabId, assistantId, (msg) => ({
-            ...msg,
-            blocks: upsertTool(
-              msg.blocks ?? [],
-              id,
-              (existing) => ({
-                ...existing,
-                name,
-                argsText,
-                args: argsObj ?? existing.args,
-                text: existing.text || argsText,
-              }),
-              () => ({
-                kind: "tool",
-                id,
-                name,
-                status: "running",
-                argsText,
-                args: argsObj,
-                text: argsText,
-              }),
-            ),
-          }));
-          return;
-        }
-      }
-
-      if (eventType === "tool_execution_start") {
-        const id = String(event.toolCallId || newId("tool"));
-        const name = String(event.toolName || "tool");
-        patchAssistant(tabId, assistantId, (msg) => ({
-          ...msg,
-          blocks: upsertTool(
-            msg.blocks ?? [],
-            id,
-            (existing) => existing,
-            () => ({ kind: "tool", id, name, status: "running", text: "" }),
-          ),
-        }));
-        return;
-      }
-
-      if (eventType === "tool_execution_update" || eventType === "tool_execution_end") {
-        const id = String(event.toolCallId || "");
-        if (!id) return;
-        const resultText = extractToolText(event.partialResult || event.result);
-        patchAssistant(tabId, assistantId, (msg) => ({
-          ...msg,
-          blocks: upsertTool(
-            msg.blocks ?? [],
-            id,
-            (existing) => ({
-              ...existing,
-              status:
-                eventType === "tool_execution_end"
-                  ? ((event.isError ? "error" : "done") as ToolBlock["status"])
-                  : existing.status,
-              resultText: resultText || existing.resultText,
-              // Keep `text` for legacy callers; prefer args text if present so
-              // we don't blow away the file content with the tool's stdout.
-              text: existing.argsText || existing.text || resultText,
-            }),
-            () => ({
-              kind: "tool",
-              id,
-              name: "tool",
-              status:
-                eventType === "tool_execution_end"
-                  ? ((event.isError ? "error" : "done") as ToolBlock["status"])
-                  : "running",
-              resultText,
-              text: resultText,
-            }),
-          ),
-        }));
-      }
-    },
-    [patchAssistant],
-  );
-
-  // Send a control-mode message (steer / follow_up) without taking ownership of
-  // the long-running prompt stream.
-  const sendControlMessage = useCallback(
-    async (
-      mode: "steer" | "follow_up",
-      text: string,
-      runtime: string,
-      piSessionId?: string | null,
-    ): Promise<{ ok: boolean; error?: string }> => {
-      if (!text.trim() || !modelId) return { ok: false };
-      try {
-        const response = await fetch("/api/agent/turn", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: runtime,
-            modelId,
-            message: text,
-            cwd: cwd.trim() || undefined,
-            piSessionId,
-            mode,
-            browserToolEnabled,
-          }),
-        });
-        if (!response.ok || !response.body) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error || `Agent request failed: ${response.status}`);
-        }
-        // Drain the short SSE stream so the connection closes cleanly.
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let controlError = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() || "";
-          for (const chunk of chunks) {
-            const line = chunk.split("\n").find((entry) => entry.startsWith("data: "));
-            if (!line) continue;
-            const payload = JSON.parse(line.slice(6)) as
-              | { type: "status"; phase: string }
-              | { type: "error"; error: string };
-            if (payload.type === "error") controlError = payload.error;
-          }
-        }
-        if (controlError) throw new Error(controlError);
-        return { ok: true };
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : "Message failed" };
-      }
-    },
-    [modelId, cwd, browserToolEnabled],
-  );
-
-  const submitPrompt = useCallback(
-    async (rawText: string, targetTabId?: string) => {
-      const selectedTab =
-        (targetTabId ? tabsRef.current.find((tab) => tab.id === targetTabId) : null) ?? activeTab;
-      if (!selectedTab) return;
+  const buildPromptArgs = useCallback(
+    (sessionId: string, rawText: string) => {
       const text = rawText.trim();
-      if ((!text && attachments.length === 0) || !modelId || readingAttachments) return;
-
-      const tabId = selectedTab.id;
-      const userId = newId("user");
-      const assistantId = newId("assistant");
-      const runtime = selectedTab.runtimeSessionId || runtimeSessionId;
       const attachedText = attachmentPrompt(attachments);
       const attachmentSummary =
         attachments.length > 0
@@ -962,183 +286,102 @@ export function ChatPane({
           : "";
       const userText = text || attachmentSummary;
       const displayText = [text, attachmentSummary].filter(Boolean).join("\n\n");
-      const promptText = [text, attachedText].filter(Boolean).join("\n\n");
+      const selection = tools.selectionFor(sessionId);
+      const contextText = selectedContextPrompt(
+        text,
+        activeComposerPlugins(selection.plugins),
+        selection.skills,
+      );
+      const prompt = [contextText, attachedText].filter(Boolean).join("\n\n");
+      return { text, prompt, displayText, userText };
+    },
+    [attachments, tools],
+  );
 
-      // Optimistic update: show the user's turn + a blank assistant message.
-      updateTab(tabId, (tab) => ({
-        ...tab,
-        cwd: tab.cwd || cwd,
-        modelId: tab.modelId || modelId,
-        input: "",
-        error: "",
-        status: "starting",
-        title:
-          tab.messages.filter((m) => m.role === "user").length === 0
-            ? sessionTitleFromPrompt(userText)
-            : tab.title,
-        messages: [
-          ...tab.messages,
-          { id: userId, role: "user", text: displayText, timestamp: nowLabel() },
-          {
-            id: assistantId,
-            role: "assistant",
-            text: "",
-            blocks: [],
-            timestamp: nowLabel(),
-          },
-        ],
-      }));
+  const submitPrompt = useCallback(
+    async (rawText: string, targetTabId?: string) => {
+      // Composer state (attachments / textarea) is single-instance — gate on
+      // whether *anything* is composable. The engine looks up the target
+      // session itself from its internal snapshot.
+      const targetId = targetTabId ?? activeTab?.id;
+      if (!targetId) return;
+      if ((!rawText.trim() && attachments.length === 0) || !modelId || readingAttachments) return;
+      const args = buildPromptArgs(targetId, rawText);
       stickToBottomRef.current = true;
       setAttachments([]);
       setIsMultiline(false);
       if (textareaRef.current) textareaRef.current.style.height = "";
       if (fileInputRef.current) fileInputRef.current.value = "";
-
-      let agentEnded = false;
-      try {
-        const response = await fetch("/api/agent/turn", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: runtime,
-            modelId,
-            message: promptText,
-            cwd: cwd.trim() || undefined,
-            piSessionId:
-              tabsRef.current.find((tab) => tab.id === tabId)?.piSessionId ??
-              selectedTab.piSessionId,
-            browserToolEnabled,
-          }),
-        });
-        if (!response.ok || !response.body) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error || `Agent request failed: ${response.status}`);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() || "";
-          for (const chunk of chunks) {
-            const line = chunk.split("\n").find((entry) => entry.startsWith("data: "));
-            if (!line) continue;
-            const payload = JSON.parse(line.slice(6)) as
-              | { type: "status"; phase: string; piSessionId?: string | null }
-              | { type: "error"; error: string }
-              | { type: "pi"; event: Record<string, unknown> };
-            if (payload.type === "status") {
-              const phase = payload.phase;
-              updateTab(tabId, (tab) => ({
-                ...tab,
-                piSessionId: payload.piSessionId || tab.piSessionId,
-                status: phase === "done" ? "idle" : phase,
-              }));
-              if (payload.piSessionId) onPiSessionIdChange?.(payload.piSessionId);
-            } else if (payload.type === "error") {
-              updateTab(tabId, (tab) => ({ ...tab, error: payload.error, status: "idle" }));
-            } else if (payload.type === "pi") {
-              const piEvent = payload.event;
-              const eventId = piSessionIdFromEvent(piEvent);
-              if (eventId) {
-                updateTab(tabId, (tab) => ({ ...tab, piSessionId: eventId }));
-                onPiSessionIdChange?.(eventId);
-              }
-              if (piEvent.type === "agent_end") {
-                agentEnded = true;
-                const latestPiSessionId =
-                  eventId ??
-                  tabsRef.current.find((tab) => tab.id === tabId)?.piSessionId ??
-                  selectedTab.piSessionId ??
-                  "";
-                onPiSessionIdChange?.(latestPiSessionId);
-              }
-              applyPiEvent(tabId, assistantId, piEvent);
-            }
-          }
-        }
-      } catch (err) {
-        updateTab(tabId, (tab) => ({
-          ...tab,
-          error: err instanceof Error ? err.message : "Agent request failed",
-          status: "idle",
-        }));
-      } finally {
-        updateTab(tabId, (tab) => ({ ...tab, status: "idle" }));
-      }
-
-      // Drain queued messages once the agent finished its run.
-      if (agentEnded) {
-        const queued = (tabsRef.current.find((tab) => tab.id === tabId)?.queue ?? []).slice();
-        const { next, remaining } = drainQueueAfterAgentEnd(queued);
-        if (next) {
-          updateTab(tabId, (tab) => ({ ...tab, queue: remaining }));
-          // Schedule on the next tick so React commits the optimistic
-          // update before we kick off the next prompt.
-          setTimeout(() => void submitPromptRef.current?.(next.text, tabId), 0);
-        } else if (queued.length > 0) {
-          updateTab(tabId, (tab) => ({ ...tab, queue: remaining }));
-        }
-      }
+      await engine.submitPrompt({ ...args, targetSessionId: targetId });
     },
-    [
-      activeTab,
-      attachments,
-      modelId,
-      readingAttachments,
-      runtimeSessionId,
-      cwd,
-      browserToolEnabled,
-      onPiSessionIdChange,
-      applyPiEvent,
-      updateTab,
-    ],
+    [activeTab, attachments.length, buildPromptArgs, engine, modelId, readingAttachments],
   );
 
-  // Stable ref so the queue-drain inside submitPrompt can re-enter without
-  // forming a useCallback cycle.
-  const submitPromptRef = useRef<(text: string, targetTabId?: string) => Promise<void>>(() =>
-    Promise.resolve(),
+  // Compose-then-send orchestration. Steer/follow-up paths route through
+  // engine.sendControl when the runtime accepts in-flight messages; otherwise
+  // we submit a fresh turn via engine.submitPrompt (which our local wrapper
+  // builds args for).
+  const queueAndSendControl = useCallback(
+    async (
+      mode: "steer" | "follow_up",
+      text: string,
+      tab: SessionTab,
+      runtime: string,
+      cwdHint?: string,
+    ) => {
+      const queuedId = newId("queue");
+      updateTab(tab.id, (t) => ({
+        ...t,
+        ...(cwdHint ? { cwd: t.cwd || cwdHint } : {}),
+        input: "",
+        error: "",
+        queue: [
+          ...(t.queue ?? []),
+          { id: queuedId, mode, text, ...(mode === "steer" ? { sent: true } : {}) },
+        ],
+      }));
+      const result = await engine.sendControl(mode, text, runtime, tab.id, tab.piSessionId);
+      updateTab(tab.id, (t) => ({
+        ...t,
+        queue:
+          mode === "steer"
+            ? (t.queue ?? []).filter((item) => item.id !== queuedId)
+            : (t.queue ?? []).map((item) =>
+                item.id === queuedId ? { ...item, sent: result.ok } : item,
+              ),
+        ...(result.ok ? {} : { input: text, error: result.error || "Message failed" }),
+      }));
+    },
+    [engine, updateTab],
   );
-  useEffect(() => {
-    submitPromptRef.current = submitPrompt;
-  }, [submitPrompt]);
 
   const sendMessage = useCallback(
     async (event: FormEvent) => {
       event.preventDefault();
       if (!activeTab) return;
+      // Block double-sends while the previous turn is still spinning up.
+      // Once pi flips to "running" the user can steer; until then, ignore.
+      if (activeTab.status === "starting" || activeTab.status === "loading") return;
       const text = activeTab.input.trim();
       if ((!text && attachments.length === 0) || !modelId || readingAttachments) return;
 
-      // While running, Enter sends a steering message instead of a fresh prompt.
+      const runtime = activeTab.runtimeSessionId || runtimeSessionId;
+      const status = await engine.loadRuntimeStatus(runtime);
+      const accepts = engine.acceptsControl(status, activeTab.piSessionId);
       if (running) {
         if (!text) return;
-        const queuedId = newId("queue");
-        updateTab(activeTab.id, (tab) => ({
-          ...tab,
-          input: "",
-          error: "",
-          queue: [...(tab.queue ?? []), { id: queuedId, mode: "steer", text }],
-        }));
-        const result = await sendControlMessage(
-          "steer",
-          text,
-          activeTab.runtimeSessionId || runtimeSessionId,
-          activeTab.piSessionId,
-        );
-        if (!result.ok) {
-          updateTab(activeTab.id, (tab) => ({
-            ...tab,
-            input: text,
-            error: result.error || "Message failed",
-            queue: (tab.queue ?? []).filter((item) => item.id !== queuedId),
-          }));
+        if (!accepts) {
+          // Stale UI: pi already ended. Drop to idle and submit a normal turn
+          // so the model actually sees the message.
+          updateTab(activeTab.id, (t) => ({ ...t, status: "idle", activeAssistantId: undefined }));
+          await submitPrompt(text, activeTab.id);
+          return;
         }
+        await queueAndSendControl("steer", text, activeTab, runtime);
+        return;
+      }
+      if (accepts) {
+        await queueAndSendControl("steer", text, activeTab, runtime);
         return;
       }
       await submitPrompt(text, activeTab.id);
@@ -1146,38 +389,46 @@ export function ChatPane({
     [
       activeTab,
       attachments.length,
+      engine,
       modelId,
+      queueAndSendControl,
       readingAttachments,
       running,
       runtimeSessionId,
-      sendControlMessage,
       submitPrompt,
       updateTab,
     ],
   );
 
-  // Tab-key behavior: when idle, submit immediately; while a turn is running,
-  // keep the follow-up visibly queued and replay it as a normal prompt after
-  // agent_end. This avoids the "message vanished" state where a chip was added
-  // but no prompt was ever sent.
+  // Tab-key: while idle, submit immediately; while running, pi-follow-up so
+  // pi owns queue ordering and the original runtime stream continues.
   const queueMessage = useCallback(async () => {
     if (!activeTab) return;
     const text = activeTab.input.trim();
     if (!text || !modelId) return;
-    const tabId = activeTab.id;
     if (!running) {
-      await submitPromptRef.current(text, tabId);
+      await submitPrompt(text, activeTab.id);
       return;
     }
-    const queuedId = newId("queue");
-    updateTab(tabId, (tab) => ({
-      ...tab,
-      cwd: tab.cwd || cwd,
-      input: "",
-      error: "",
-      queue: [...(tab.queue ?? []), { id: queuedId, mode: "follow_up", text }],
-    }));
-  }, [activeTab, modelId, running, cwd, updateTab]);
+    const runtime = activeTab.runtimeSessionId || runtimeSessionId;
+    const status = await engine.loadRuntimeStatus(runtime);
+    if (!engine.acceptsControl(status, activeTab.piSessionId)) {
+      updateTab(activeTab.id, (t) => ({ ...t, status: "idle", activeAssistantId: undefined }));
+      await submitPrompt(text, activeTab.id);
+      return;
+    }
+    await queueAndSendControl("follow_up", text, activeTab, runtime, cwd);
+  }, [
+    activeTab,
+    cwd,
+    engine,
+    modelId,
+    queueAndSendControl,
+    running,
+    runtimeSessionId,
+    submitPrompt,
+    updateTab,
+  ]);
 
   const removeQueued = useCallback(
     (queueId: string) => {
@@ -1267,66 +518,21 @@ export function ChatPane({
 
   const abortTurn = useCallback(async () => {
     if (!activeTab) return;
-    const tabId = activeTab.id;
-    await fetch("/api/agent/abort", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: activeTab.runtimeSessionId || runtimeSessionId }),
-    }).catch(() => undefined);
-    updateTab(tabId, (tab) => ({ ...tab, status: "idle" }));
-  }, [activeTab, runtimeSessionId, updateTab]);
+    await engine.abortTurn(activeTab.id);
+  }, [activeTab, engine]);
 
-  // Replay a past pi session into the currently active tab. Looks up the
-  // active tab by id at call time so concurrent updates don't race.
+  // Workspace calls this through the imperative handle when the user clicks a
+  // saved session in the sidebar.
   const loadAndReplay = useCallback(
     async (piSessionId: string) => {
-      if (!cwd) return;
-      const tabId = activeTabId;
-      if (!tabId) return;
-      updateTab(tabId, (tab) => ({ ...tab, status: "loading", error: "" }));
-      try {
-        const response = await fetch(
-          `/api/agent/sessions/${encodeURIComponent(piSessionId)}?cwd=${encodeURIComponent(cwd)}`,
-          { cache: "no-store" },
-        );
-        const payload = await safeJson<{
-          events?: Record<string, unknown>[];
-          error?: string;
-        }>(response);
-        if (!response.ok) throw new Error(payload.error || "Failed to load session");
-
-        const { messages, title } = replaySessionEvents(payload.events ?? []);
-        const tokenStats = [...(payload.events ?? [])]
-          .reverse()
-          .map(usageFromEvent)
-          .find((stats): stats is TokenStats => Boolean(stats));
-
-        updateTab(tabId, (tab) => ({
-          ...tab,
-          messages,
-          piSessionId,
-          cwd: tab.cwd || cwd,
-          modelId: tab.modelId || modelId,
-          title: title ?? tab.title,
-          tokenStats: tokenStats ?? tab.tokenStats,
-          status: "idle",
-          error: "",
-        }));
-      } catch (err) {
-        updateTab(tabId, (tab) => ({
-          ...tab,
-          error: err instanceof Error ? err.message : "Failed to load session",
-          status: "idle",
-        }));
-      }
+      if (!activeTabId) return;
+      await engine.loadAndReplay(piSessionId, activeTabId);
     },
-    [cwd, modelId, activeTabId, updateTab],
+    [activeTabId, engine],
   );
 
-  // Register a stable imperative handle so the workspace can call
-  // loadAndReplay directly from event handlers. This replaces the previous
-  // useEffect that watched an `initialSessionId` prop and chained side
-  // effects on every re-render.
+  // Stable imperative handle so the workspace can drive replay without going
+  // through a useEffect-driven `initialSessionId` prop.
   const handleRef = useRef<ChatPaneHandle>({ loadAndReplay });
   handleRef.current = { loadAndReplay };
   useEffect(() => {
@@ -1337,6 +543,23 @@ export function ChatPane({
     onRegisterHandle(handle);
     return () => onRegisterHandle(null);
   }, [onRegisterHandle]);
+
+  const queue = activeTab?.queue ?? [];
+  const visibleQueueItems = visibleQueuedMessages(queue);
+  const visibleQueue = queueExpanded ? visibleQueueItems : visibleQueueItems.slice(-1);
+  const latestQueued = visibleQueueItems[visibleQueueItems.length - 1] ?? null;
+
+  // Compaction is the engine's job; the local `compacting` flag just disables
+  // the button while the request is in flight.
+  const compactSession = useCallback(async () => {
+    if (!activeTab || running || compacting || !modelId) return;
+    setCompacting(true);
+    try {
+      await engine.compact(activeTab.id);
+    } finally {
+      setCompacting(false);
+    }
+  }, [activeTab, compacting, engine, modelId, running]);
 
   return (
     <section
@@ -1366,91 +589,161 @@ export function ChatPane({
         </div>
       ) : null}
 
-      <div
-        ref={scrollRef}
+      <Timeline
+        scrollRef={scrollRef}
         onScroll={(event) => {
           const element = event.currentTarget;
           const distanceFromBottom =
             element.scrollHeight - element.scrollTop - element.clientHeight;
           stickToBottomRef.current = distanceFromBottom <= 80;
         }}
-        className={`min-h-0 flex-1 overflow-y-auto px-6 py-10 ${showEmptyPrompt ? "flex" : ""}`}
-      >
-        <div
-          className={`mx-auto w-full max-w-[var(--thread-w)] ${showEmptyPrompt ? "flex flex-1" : ""}`}
-        >
-          {showEmptyPrompt ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 -translate-y-12 text-center">
-              <h1 className="text-[26px] font-semibold tracking-[-0.04em] text-(--fg)">
-                A dream is something you do for yourself
-              </h1>
-              <p className="text-[12.5px] text-(--dim)">
-                Ask the agent to edit, inspect, or run something. Tab to queue · paste/drop files.
-              </p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-5">
-              {(activeTab?.messages ?? [])
-                .filter((m) => m.role !== "system")
-                .map((message) => (
-                  <TimelineMessage key={message.id} message={message} />
-                ))}
-              {running ? (
-                <div className="flex items-center gap-2 py-4 text-xs text-(--dim)">
-                  <span className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-(--accent)" />
-                  <span>Pi is {activeTab?.status}…</span>
-                </div>
-              ) : null}
-            </div>
-          )}
-        </div>
-      </div>
+        messages={activeTab?.messages ?? []}
+        running={Boolean(running)}
+        statusLabel={activeTab?.status}
+        emptyPrompt={Boolean(showEmptyPrompt)}
+      />
 
       <form onSubmit={sendMessage} className="shrink-0 bg-(--bg) px-6 pb-2 pt-1">
+        {visibleQueueItems.length > 0 ? (
+          <div className="mx-auto mb-1 w-[85%] max-w-[var(--composer-w)] overflow-hidden rounded-lg bg-(--composer) px-4 py-2 text-[11px] text-(--fg)">
+            <button
+              type="button"
+              onClick={() => setQueueExpanded((value) => !value)}
+              className="flex w-full min-w-0 items-center gap-2 text-left"
+              aria-expanded={queueExpanded}
+              title="Queued follow-ups and steers"
+            >
+              <ChevronDownIcon
+                className={`h-3 w-3 shrink-0 text-(--dim) transition-transform ${
+                  queueExpanded ? "rotate-180" : "-rotate-90"
+                }`}
+              />
+              <span className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-(--dim)">
+                queue {visibleQueueItems.length}
+              </span>
+              <span className="min-w-0 flex-1 truncate">
+                {latestQueued?.text ?? "No queued message"}
+              </span>
+            </button>
+            {queueExpanded ? (
+              <div className="mt-1 space-y-0.5">
+                {visibleQueue.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex min-w-0 items-center gap-2 py-1"
+                    title={`${item.mode === "steer" ? "Steer" : "Queued follow-up"}: ${item.text}`}
+                  >
+                    <span
+                      className={`shrink-0 font-mono text-[10px] uppercase tracking-wide ${
+                        item.mode === "steer" ? "text-(--accent)" : "text-(--dim)"
+                      }`}
+                    >
+                      {item.mode === "steer" ? "steer" : "queue"}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{item.text}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeQueued(item.id)}
+                      className="shrink-0 p-0.5 text-(--dim) hover:text-(--fg)"
+                      aria-label="Remove queued message"
+                      title="Remove queued message"
+                    >
+                      <CloseIcon className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div
           onDragOver={handleComposerDragOver}
           onDragLeave={handleComposerDragLeave}
           onDrop={handleComposerDrop}
-          className={`mx-auto max-w-[var(--composer-w)] overflow-hidden rounded-[var(--composer-radius)] border border-(--border) bg-(--composer) shadow-[var(--composer-shadow)] transition-shadow ${
-            composerDragActive ? "ring-1 ring-(--accent)/60" : ""
+          className={`mx-auto max-w-[var(--composer-w)] overflow-visible rounded-lg bg-(--composer) shadow-none transition-colors ${
+            composerDragActive ? "outline outline-1 outline-(--accent)/50" : ""
           }`}
         >
           {composerDragActive ? (
-            <div className="border-b border-(--accent)/50 bg-(--accent)/10 px-2 py-1.5 text-[11px] text-(--accent)">
+            <div className="px-4 pt-2 text-[11px] text-(--accent)">
               Drop files to attach to the next message.
             </div>
           ) : null}
-          {(activeTab?.queue ?? []).length > 0 ? (
-            <div className="flex flex-wrap gap-1.5 border-b border-(--border)/50 px-2 py-1.5">
-              {(activeTab?.queue ?? []).map((item) => (
-                <span
-                  key={item.id}
-                  className="inline-flex max-w-[260px] items-center gap-1 rounded border border-(--accent)/60 bg-(--accent)/10 px-1.5 py-0.5 text-[11px] text-(--fg)"
-                  title={`Queued (${item.mode}): ${item.text}`}
-                >
-                  <span className="rounded border border-(--accent)/40 px-1 text-[9px] uppercase text-(--accent)">
-                    {item.mode === "steer" ? "steer" : "queue"}
-                  </span>
-                  <span className="truncate">{item.text}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeQueued(item.id)}
-                    className="rounded p-0.5 text-(--dim) hover:bg-(--bg) hover:text-(--fg)"
-                    aria-label="Remove queued message"
-                    title="Remove queued message"
-                  >
-                    <CloseIcon className="h-3 w-3" />
-                  </button>
-                </span>
+          {selectedPlugins.length + selectedSkills.length > 0 ? (
+            <div className="flex flex-wrap gap-x-3 gap-y-1 px-4 pt-2 text-[11px]">
+              {selectedPlugins.map((plugin) => (
+                <LoadedContextTab
+                  key={`plugin-${plugin.id}`}
+                  prefix="@"
+                  label={plugin.displayName ?? plugin.name}
+                  title={plugin.path}
+                  active={plugin.name.toLowerCase().includes("computer-use")}
+                  onRemove={() => removeLoadedContext("plugin", plugin.id)}
+                />
+              ))}
+              {selectedSkills.map((skill) => (
+                <LoadedContextTab
+                  key={`skill-${skill.id}`}
+                  prefix="$"
+                  label={skill.name}
+                  title={skill.path}
+                  active={false}
+                  onRemove={() => removeLoadedContext("skill", skill.id)}
+                />
               ))}
             </div>
           ) : null}
+          {mention ? (
+            <div className="px-4 pt-2">
+              <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-(--dim)">
+                {mention.kind === "plugin" ? "Plugins" : "Skills"}
+              </div>
+              {mentionRows.length ? (
+                <div className="grid gap-1">
+                  {mentionRows.map((row) => (
+                    <button
+                      key={row.id}
+                      type="button"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => void selectMentionRow(row)}
+                      className="flex min-w-0 items-start justify-between gap-3 py-1 text-left text-(--dim) hover:text-(--fg)"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-[12px] text-(--fg)">
+                          {mention.kind === "plugin" ? "@" : "$"}
+                          {mentionRowTitle(row)}
+                          {mentionRowVersion(row) ? (
+                            <span className="ml-1 font-mono text-[10px] text-(--dim)">
+                              {mentionRowVersion(row)}
+                            </span>
+                          ) : null}
+                        </span>
+                        {mentionRowDescription(row) ? (
+                          <span className="block truncate text-[10.5px] text-(--dim)">
+                            {mentionRowDescription(row)}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="truncate font-mono text-[10px] text-(--dim)">
+                        {row.source ?? ""}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="px-2 py-1 text-[11px] text-(--dim)">
+                  No {mention.kind === "plugin" ? "plugins" : "skills"} match{" "}
+                  <span className="font-mono">{mention.query || "…"}</span>.
+                </div>
+              )}
+            </div>
+          ) : null}
           {attachments.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5 border-b border-(--border)/50 px-2 py-1.5">
+            <div className="flex flex-wrap gap-1.5 px-4 pt-2">
               {attachments.map((file) => (
                 <span
                   key={file.id}
-                  className="inline-flex max-w-[220px] items-center gap-1 rounded border border-(--border)/70 bg-(--bg) px-1.5 py-0.5 text-[11px] text-(--dim)"
+                  className="inline-flex max-w-[220px] items-center gap-1 px-1 py-0.5 text-[11px] text-(--dim)"
                   title={`${file.name} · ${file.type} · ${formatFileSize(file.size)}${file.path ? ` · ${file.path}` : ""}`}
                 >
                   {isImageAttachment(file) ? (
@@ -1459,7 +752,7 @@ export function ChatPane({
                     <img
                       src={file.content}
                       alt=""
-                      className="h-7 w-7 shrink-0 rounded border border-(--border)/70 object-cover"
+                      className="h-7 w-7 shrink-0 rounded object-cover"
                     />
                   ) : (
                     <FileIcon className="h-3 w-3 shrink-0" />
@@ -1471,7 +764,7 @@ export function ChatPane({
                     onClick={() =>
                       setAttachments((current) => current.filter((item) => item.id !== file.id))
                     }
-                    className="rounded p-0.5 hover:bg-(--surface) hover:text-(--fg)"
+                    className="p-0.5 hover:text-(--fg)"
                     aria-label={`Remove ${file.name}`}
                     title={`Remove ${file.name}`}
                   >
@@ -1489,10 +782,12 @@ export function ChatPane({
               const value = event.target.value;
               if (!activeTab) return;
               updateTab(activeTab.id, (tab) => ({ ...tab, input: value }));
+              setMention(detectComposerMention(value, event.currentTarget.selectionStart));
               const element = event.currentTarget;
               if (!value) {
                 element.style.height = "";
                 setIsMultiline(false);
+                setMention(null);
                 return;
               }
               element.style.height = "auto";
@@ -1500,6 +795,18 @@ export function ChatPane({
               setIsMultiline(element.scrollHeight > 38);
             }}
             onKeyDown={(event) => {
+              if (mention) {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setMention(null);
+                  return;
+                }
+                if ((event.key === "Enter" || event.key === "Tab") && mentionRows[0]) {
+                  event.preventDefault();
+                  selectMentionRow(mentionRows[0]);
+                  return;
+                }
+              }
               // Enter (no shift) → send. While running, this becomes a steer.
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
@@ -1534,9 +841,9 @@ export function ChatPane({
                     ? `Steer ${modelName} (Enter) · queue with Tab · Esc to pause`
                     : `Ask ${modelName} (Enter) · queue with Tab · paste/drop files`
             }
-            className="min-h-[42px] max-h-[132px] w-full resize-none overflow-y-auto bg-transparent px-4 py-2 text-sm leading-5 text-(--fg) outline-none placeholder:text-(--dim)"
+            className="min-h-[42px] max-h-[132px] w-full resize-none overflow-y-auto bg-transparent px-4 py-2.5 text-sm leading-5 text-(--fg) outline-none placeholder:text-(--dim)"
           />
-          <div className="flex min-h-10 items-center gap-1.5 overflow-hidden border-t border-(--border) bg-(--composer-footer) px-3 py-1.5 text-xs">
+          <div className="flex min-h-10 items-center gap-1.5 bg-transparent px-3 pb-2 pt-1 text-xs">
             <input
               ref={fileInputRef}
               type="file"
@@ -1548,7 +855,7 @@ export function ChatPane({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={readingAttachments || running}
-              className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md text-(--dim) hover:bg-(--bg) hover:text-(--fg) disabled:opacity-30"
+              className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center text-(--dim) hover:text-(--fg) disabled:opacity-30"
               aria-label="Attach files"
               title="Attach files (or paste/drop into composer)"
             >
@@ -1564,64 +871,39 @@ export function ChatPane({
                   : "Browser tool: OFF — click to let the agent navigate, click, fill, and read pages"
               }
               className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md ${
-                browserToolEnabled
-                  ? "bg-(--accent)/10 text-(--accent)"
-                  : "text-(--dim) hover:bg-(--bg) hover:text-(--fg)"
+                browserToolEnabled ? "text-(--accent)" : "text-(--dim) hover:text-(--fg)"
               }`}
             >
-              <GlobeIcon className="h-3.5 w-3.5" />
+              <span className="relative inline-flex">
+                <GlobeIcon className="h-3.5 w-3.5" />
+                {computerUseLoaded ? <ComputerUseActivityDot /> : null}
+              </span>
             </button>
-            <div className="min-w-0 flex-1">
-              {projectSelector ? (
-                projectSelector
-              ) : cwd ? (
-                <span className="block min-w-0 truncate font-mono text-[11px] text-(--dim)">
-                  {cwd}
-                </span>
-              ) : null}
-            </div>
-            {gitBranch ? (
-              <span className="inline-flex min-w-0 shrink items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] text-(--dim)">
-                <GitBranchIcon className="h-3 w-3 shrink-0" />
-                <span className="truncate">{gitBranch}</span>
-              </span>
-            ) : gitSummary && !gitSummary.isRepo ? (
-              <button
-                type="button"
-                onClick={onInitGit}
-                className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md text-(--dim) hover:bg-(--bg) hover:text-(--fg)"
-                aria-label="Initialize git repository"
-                title="Init git"
-              >
-                <GitBranchIcon className="h-3 w-3" />
-              </button>
-            ) : null}
-            {gitSummary?.isRepo ? (
-              <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px]">
-                <span className="text-emerald-400">+{gitSummary.additions}</span>
-                <span className="text-red-400">-{gitSummary.deletions}</span>
-                {gitSummary.statusCount > 0 ? (
-                  <span className="text-(--dim)">· {gitSummary.statusCount} files</span>
-                ) : null}
-              </span>
-            ) : null}
-            {modelSelector}
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              {modelSelector}
               {running ? (
                 <>
-                  {activeTab?.input.trim() ? (
+                  {activeTab?.status === "starting" ? (
+                    <span
+                      className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1.5 px-2 text-[11px] text-(--dim)"
+                      title="Waiting for the model to start"
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Starting…
+                    </span>
+                  ) : activeTab?.input.trim() ? (
                     <>
                       <button
                         type="button"
                         onClick={() => void queueMessage()}
-                        className="inline-flex !h-7 !min-h-7 shrink-0 items-center rounded-md px-2 text-[11px] text-(--dim) hover:bg-(--bg) hover:text-(--fg)"
+                        className="inline-flex !h-7 !min-h-7 shrink-0 items-center px-1.5 text-[11px] text-(--dim) underline-offset-2 hover:text-(--fg) hover:underline"
                         title="Queue (Tab)"
                       >
                         Queue
                       </button>
                       <button
                         type="submit"
-                        className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1 rounded-md bg-(--accent)/10 px-2 text-[11px] text-(--accent) hover:bg-(--accent)/20"
+                        className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1 rounded-md bg-(--accent)/10 px-2 text-[11px] text-(--accent) hover:bg-(--accent)/15 hover:text-(--fg)"
                         title="Steer (Enter): interrupt current turn and send"
                       >
                         <SendIcon className="h-3 w-3" /> Steer
@@ -1631,7 +913,8 @@ export function ChatPane({
                   <button
                     type="button"
                     onClick={() => void abortTurn()}
-                    className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-(--dim) hover:bg-(--bg) hover:text-(--fg)"
+                    disabled={activeTab?.status === "starting"}
+                    className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1 px-2 text-xs text-(--dim) hover:text-(--fg) disabled:opacity-30 disabled:hover:text-(--dim)"
                     title="Pause (Esc)"
                   >
                     <StopIcon className="h-3 w-3" /> Pause
@@ -1643,535 +926,144 @@ export function ChatPane({
                   disabled={
                     (!activeTab?.input.trim() && attachments.length === 0) ||
                     !modelId ||
-                    readingAttachments
+                    readingAttachments ||
+                    activeTab?.status === "starting" ||
+                    activeTab?.status === "loading"
                   }
-                  className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md text-(--fg) hover:bg-(--bg) disabled:opacity-30"
+                  className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center text-(--fg) hover:text-(--accent) disabled:opacity-30"
                   aria-label="Send"
                   title="Send (Enter) · Queue (Tab)"
                 >
-                  <SendIcon className="h-3.5 w-3.5" />
+                  {activeTab?.status === "starting" || activeTab?.status === "loading" ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <SendIcon className="h-3.5 w-3.5" />
+                  )}
                 </button>
               )}
             </div>
           </div>
         </div>
-        <div className="mx-auto mt-0.5 flex max-w-3xl items-center justify-end gap-2 font-mono text-[10px] text-(--dim)">
-          <span>R {formatTokenCount(activeTab?.tokenStats?.read ?? 0)}</span>
-          <span>W {formatTokenCount(activeTab?.tokenStats?.write ?? 0)}</span>
-          <span>
-            {formatTokenCount(activeTab?.tokenStats?.current ?? 0)}/
-            {formatTokenCount(contextWindow)}
-          </span>
+        <div className="mx-auto mt-0.5 flex max-w-[var(--composer-w)] items-center gap-2 overflow-hidden font-mono text-[10px] text-(--dim)">
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => void compactSession()}
+              disabled={running || compacting || !activeTab?.piSessionId || !modelId}
+              className="inline-flex shrink-0 items-center gap-1 text-(--dim) hover:text-(--fg) disabled:pointer-events-none disabled:opacity-30"
+              title="Compact this Pi session context"
+            >
+              {compacting ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+              compact
+            </button>
+            <span className="shrink-0 text-(--border)">·</span>
+            <div className="min-w-0 max-w-[42%] shrink">
+              {projectSelector ? (
+                projectSelector
+              ) : cwd ? (
+                <span className="block min-w-0 truncate text-(--dim)" title={cwd}>
+                  {cwd}
+                </span>
+              ) : null}
+            </div>
+            {gitBranch ? (
+              <span className="inline-flex min-w-0 shrink items-center gap-1 text-(--dim)">
+                <GitBranchIcon className="h-3 w-3 shrink-0" />
+                <span className="truncate">{gitBranch}</span>
+              </span>
+            ) : gitSummary && !gitSummary.isRepo ? (
+              <button
+                type="button"
+                onClick={onInitGit}
+                className="inline-flex shrink-0 items-center gap-1 text-(--dim) hover:text-(--fg)"
+                title="Init git"
+              >
+                <GitBranchIcon className="h-3 w-3" />
+                git
+              </button>
+            ) : null}
+            {gitSummary?.isRepo ? (
+              <span className="inline-flex shrink-0 items-center gap-1">
+                <span className="text-emerald-400">+{gitSummary.additions}</span>
+                <span className="text-red-400">-{gitSummary.deletions}</span>
+                {gitSummary.statusCount > 0 ? (
+                  <span className="text-(--dim)">· {gitSummary.statusCount} files</span>
+                ) : null}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center justify-end gap-2">
+            <span>R {formatTokenCount(activeTab?.tokenStats?.read ?? 0)}</span>
+            <span>W {formatTokenCount(activeTab?.tokenStats?.write ?? 0)}</span>
+            <span>
+              {formatTokenCount(activeTab?.tokenStats?.current ?? 0)}/
+              {formatTokenCount(contextWindow)}
+            </span>
+          </div>
         </div>
       </form>
     </section>
   );
 }
 
-export function SessionTabsBar({
-  paneId,
-  tabs,
-  activeTabId,
-  onActiveTabChange,
-  onTabsChange,
-  onRenameTab,
-}: {
-  paneId: string;
-  tabs: SessionTab[];
-  activeTabId: string;
-  onActiveTabChange: (tabId: string) => void;
-  onTabsChange: (tabs: SessionTab[] | ((tabs: SessionTab[]) => SessionTab[])) => void;
-  onRenameTab: (tabId: string, title: string) => void;
-}) {
-  const closeTab = useCallback(
-    (tabId: string) => {
-      const remaining = tabs.filter((tab) => tab.id !== tabId);
-      if (remaining.length === 0) {
-        const fresh = makeFreshTab();
-        onTabsChange([fresh]);
-        onActiveTabChange(fresh.id);
-        return;
-      }
-      onTabsChange(remaining);
-      if (activeTabId === tabId) onActiveTabChange(remaining[remaining.length - 1].id);
-    },
-    [tabs, activeTabId, onTabsChange, onActiveTabChange],
-  );
-
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-      {tabs.map((tab) => (
-        <TabPill
-          key={tab.id}
-          tab={tab}
-          paneId={paneId}
-          active={tab.id === activeTabId}
-          onSelect={() => onActiveTabChange(tab.id)}
-          onClose={() => closeTab(tab.id)}
-          onRename={(title) => onRenameTab(tab.id, title)}
-        />
-      ))}
-    </div>
-  );
+function mentionRowTitle(row: ComposerPluginRef | ComposerSkillRef): string {
+  return ("displayName" in row && row.displayName) || row.name;
 }
 
-function TabPill({
-  tab,
-  paneId,
+function mentionRowVersion(row: ComposerPluginRef | ComposerSkillRef): string | undefined {
+  return "version" in row ? row.version : undefined;
+}
+
+function mentionRowDescription(row: ComposerPluginRef | ComposerSkillRef): string | undefined {
+  return "shortDescription" in row ? row.shortDescription : undefined;
+}
+
+function LoadedContextTab({
+  prefix,
+  label,
+  title,
   active,
-  onSelect,
-  onClose,
-  onRename,
+  onRemove,
 }: {
-  tab: SessionTab;
-  paneId: string;
-  active: boolean;
-  onSelect: () => void;
-  onClose: () => void;
-  onRename: (title: string) => void;
+  prefix: "@" | "$";
+  label: string;
+  title?: string;
+  active?: boolean;
+  onRemove: () => void;
 }) {
-  const [renaming, setRenaming] = useState(false);
-  const [draft, setDraft] = useState(tab.title);
-
-  const finishRename = useCallback(() => {
-    const next = draft.trim();
-    if (next) onRename(next.slice(0, 80));
-    setRenaming(false);
-  }, [draft, onRename]);
-
   return (
-    <div
-      role="tab"
-      aria-selected={active}
-      draggable
-      onDragStart={(event) => {
-        if (tab.piSessionId) {
-          event.dataTransfer.setData("application/x-vllm-session", tab.piSessionId);
-        }
-        event.dataTransfer.setData(
-          "application/x-vllm-agent-session",
-          JSON.stringify({
-            piSessionId: tab.piSessionId,
-            projectId: tab.projectId,
-            cwd: tab.cwd,
-            paneId,
-            tabId: tab.id,
-            title: tab.title,
-          }),
-        );
-        event.dataTransfer.effectAllowed = "copy";
-      }}
-      onClick={onSelect}
-      onDoubleClick={(event) => {
-        event.stopPropagation();
-        setDraft(tab.title);
-        setRenaming(true);
-      }}
-      title={tab.title}
-      className={`group flex h-7 max-w-[200px] shrink-0 cursor-pointer items-center gap-1 rounded-md border px-2 text-xs ${
-        active
-          ? "border-(--border) bg-(--bg) text-(--fg)"
-          : "border-transparent text-(--dim) hover:bg-(--bg) hover:text-(--fg)"
-      }`}
+    <span
+      className="inline-flex max-w-[240px] items-center gap-1 py-0.5 text-[11px] text-(--fg)"
+      title={title ?? label}
     >
-      {renaming ? (
-        <input
-          value={draft}
-          autoFocus
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={finishRename}
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") finishRename();
-            if (event.key === "Escape") {
-              setDraft(tab.title);
-              setRenaming(false);
-            }
-          }}
-          className="min-w-0 bg-transparent outline-none"
-        />
-      ) : (
-        <span className="truncate">{tab.title}</span>
-      )}
+      <span className="font-mono text-(--accent)">{prefix}</span>
+      {active ? <ComputerUseActivityDot inline /> : null}
+      <span className="truncate">{label}</span>
       <button
         type="button"
-        onClick={(event) => {
-          event.stopPropagation();
-          onClose();
-        }}
-        className="rounded p-0.5 text-(--dim) opacity-0 hover:bg-(--surface) hover:text-(--fg) group-hover:opacity-100"
-        aria-label="Close tab"
-        title="Close tab"
+        onClick={onRemove}
+        className="p-0.5 text-(--dim) hover:text-(--fg)"
+        aria-label={`Unload ${prefix}${label}`}
+        title={`Unload ${prefix}${label}`}
       >
         <CloseIcon className="h-3 w-3" />
       </button>
-    </div>
+    </span>
   );
 }
 
-function TimelineMessage({ message }: { message: ChatMessage }) {
-  const isUser = message.role === "user";
-  if (isUser) {
-    return (
-      <article className="flex justify-end">
-        <div className="max-w-[72%] rounded-xl bg-(--surface) px-3.5 py-2 text-sm leading-6 text-(--fg)">
-          <div className="whitespace-pre-wrap break-words">{message.text}</div>
-        </div>
-      </article>
-    );
-  }
-  const blocks = message.blocks ?? [];
+function ComputerUseActivityDot({ inline = false }: { inline?: boolean }) {
   return (
-    <article className="min-w-0">
-      {blocks.length === 0 ? (
-        <div className="text-sm leading-6 text-(--dim)">…</div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {blocks.map((block) => {
-            if (block.kind === "thinking") {
-              return (
-                <details key={block.id} className="text-xs" open>
-                  <summary className="cursor-pointer list-none text-[11px] italic text-(--dim) hover:text-(--fg)">
-                    Thinking
-                  </summary>
-                  <pre className="mt-2 max-w-full whitespace-pre-wrap break-words border-l-2 border-(--border) pl-3 font-mono text-[11px] leading-5 text-(--dim) [overflow-wrap:anywhere]">
-                    {block.text}
-                  </pre>
-                </details>
-              );
-            }
-            if (block.kind === "text") {
-              return <AssistantMarkdown key={block.id} text={block.text} />;
-            }
-            return <ToolBlockView key={block.id} block={block} />;
-          })}
-        </div>
-      )}
-    </article>
-  );
-}
-
-// ----- Tool block rendering -----
-
-const FILE_WRITE_TOOL_NAMES = new Set([
-  "write_file",
-  "write",
-  "create_file",
-  "edit_file",
-  "edit",
-  "apply_patch",
-  "apply_edit",
-  "replace_file",
-  "str_replace_editor",
-]);
-
-const LANG_BY_EXT: Record<string, string> = {
-  ts: "ts",
-  tsx: "tsx",
-  js: "js",
-  jsx: "jsx",
-  json: "json",
-  md: "md",
-  html: "html",
-  htm: "html",
-  css: "css",
-  scss: "scss",
-  py: "py",
-  rs: "rs",
-  go: "go",
-  sh: "sh",
-  yml: "yaml",
-  yaml: "yaml",
-  toml: "toml",
-  sql: "sql",
-};
-
-function detectLang(filePath: string | null | undefined): string {
-  if (!filePath) return "";
-  const dot = filePath.lastIndexOf(".");
-  if (dot === -1) return "";
-  const ext = filePath.slice(dot + 1).toLowerCase();
-  return LANG_BY_EXT[ext] ?? "";
-}
-
-// Try to extract a streaming-friendly preview of "what file is being written"
-// from the partially-parsed tool args. We accept partial JSON: greedy extract
-// the value of the most likely "content" / "text" / "patch" key.
-function extractPartialField(argsText: string, keys: string[]): string | null {
-  if (!argsText) return null;
-  for (const key of keys) {
-    const needle = `"${key}"`;
-    const idx = argsText.indexOf(needle);
-    if (idx === -1) continue;
-    // Find the colon and the opening quote of the value.
-    const colon = argsText.indexOf(":", idx + needle.length);
-    if (colon === -1) continue;
-    let i = colon + 1;
-    while (i < argsText.length && /\s/.test(argsText[i])) i += 1;
-    if (argsText[i] !== '"') continue;
-    let j = i + 1;
-    let out = "";
-    while (j < argsText.length) {
-      const ch = argsText[j];
-      if (ch === "\\") {
-        const next = argsText[j + 1];
-        if (next === "n") out += "\n";
-        else if (next === "t") out += "\t";
-        else if (next === "r") out += "\r";
-        else if (next === '"') out += '"';
-        else if (next === "\\") out += "\\";
-        else if (next === undefined) break;
-        else out += next;
-        j += 2;
-        continue;
+    <span
+      className={
+        inline
+          ? "relative inline-flex h-2.5 w-2.5 shrink-0 items-center justify-center"
+          : "absolute -right-1.5 -top-1 inline-flex h-2.5 w-2.5 items-center justify-center"
       }
-      if (ch === '"') return out;
-      out += ch;
-      j += 1;
-    }
-    // Unterminated string — return what we have so far for live streaming.
-    return out;
-  }
-  return null;
-}
-
-function extractFromArgs(
-  args: Record<string, unknown> | undefined,
-  argsText: string | undefined,
-  keys: string[],
-): string | null {
-  if (args) {
-    for (const key of keys) {
-      const value = args[key];
-      if (typeof value === "string") return value;
-    }
-  }
-  if (argsText) return extractPartialField(argsText, keys);
-  return null;
-}
-
-function compactToolText(value: string | null | undefined, limit = 88): string | null {
-  if (!value) return null;
-  const oneLine = value.replace(/\s+/g, " ").trim();
-  if (!oneLine) return null;
-  if (oneLine.length <= limit) return oneLine;
-  return `${oneLine.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
-}
-
-function fileBasename(path: string | null | undefined): string | null {
-  if (!path) return null;
-  const clean = path.replace(/\\/g, "/").replace(/\/+$/, "");
-  const slash = clean.lastIndexOf("/");
-  return clean.slice(slash + 1) || clean;
-}
-
-function humanizeToolName(name: string): string {
-  return name
-    .replace(/^functions[._-]/, "")
-    .replace(/^mcp__[a-z0-9_-]+__/i, "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (match) => match.toUpperCase());
-}
-
-function hasAnyNeedle(value: string, needles: string[]): boolean {
-  return needles.some((needle) => value.includes(needle));
-}
-
-function toolArg(
-  block: ToolBlock,
-  keys: string[],
-  fallback?: string | null | undefined,
-): string | null {
-  return extractFromArgs(block.args, block.argsText, keys) ?? fallback ?? null;
-}
-
-function toolMeta(block: ToolBlock, filePath?: string | null) {
-  const name = block.name.toLowerCase();
-  const path = toolArg(block, [
-    "path",
-    "file_path",
-    "filePath",
-    "file",
-    "filename",
-    "target_file",
-    "uri",
-    "ref_id",
-  ]);
-  const query = toolArg(block, ["query", "q", "pattern", "search", "search_query", "needle"]);
-  const command = toolArg(block, ["cmd", "command", "script", "shell", "input"]);
-  const url = toolArg(block, ["url", "href"]);
-  const resolvedPath = filePath ?? path;
-  const basename = fileBasename(resolvedPath);
-
-  if (FILE_WRITE_TOOL_NAMES.has(name) || hasAnyNeedle(name, ["edit", "write", "patch"])) {
-    return {
-      icon: <PencilLine className="h-4 w-4" />,
-      label: basename ? `Edited ${basename}` : humanizeToolName(block.name),
-      detail: resolvedPath && basename !== resolvedPath ? resolvedPath : null,
-    };
-  }
-  if (hasAnyNeedle(name, ["search", "grep", "find", "ripgrep", "rg"])) {
-    return {
-      icon: <Search className="h-4 w-4" />,
-      label: compactToolText(query, 80)
-        ? `Searched for ${compactToolText(query, 80)}`
-        : "Searched files",
-      detail: path && !query ? path : null,
-    };
-  }
-  if (hasAnyNeedle(name, ["read", "open", "cat", "view", "list"])) {
-    return {
-      icon: <FileText className="h-4 w-4" />,
-      label: basename ? `Read ${basename}` : humanizeToolName(block.name),
-      detail: resolvedPath && basename !== resolvedPath ? resolvedPath : null,
-    };
-  }
-  if (hasAnyNeedle(name, ["exec", "command", "shell", "bash", "run", "terminal"])) {
-    return {
-      icon: <TerminalSquare className="h-4 w-4" />,
-      label: "Ran command",
-      detail: compactToolText(command, 110),
-    };
-  }
-  if (hasAnyNeedle(name, ["browser", "web", "open_url", "navigate"])) {
-    return {
-      icon: <GlobeIcon className="h-4 w-4" />,
-      label: "Used browser",
-      detail: compactToolText(url, 110),
-    };
-  }
-  return {
-    icon: <Wrench className="h-4 w-4" />,
-    label: humanizeToolName(block.name),
-    detail: compactToolText(command ?? query ?? path ?? url, 110),
-  };
-}
-
-function ToolStatus({ status }: { status: ToolBlock["status"] }) {
-  if (status === "running") {
-    return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-(--dim)">
-        <Loader2 className="h-3 w-3 animate-spin" />
-        running
-      </span>
-    );
-  }
-  if (status === "error") {
-    return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-(--err)">
-        <AlertTriangle className="h-3 w-3" />
-        error
-      </span>
-    );
-  }
-  return null;
-}
-
-function ToolSummary({
-  block,
-  filePath,
-  children,
-  open = false,
-}: {
-  block: ToolBlock;
-  filePath?: string | null;
-  children?: ReactNode;
-  open?: boolean;
-}) {
-  const meta = toolMeta(block, filePath);
-  return (
-    <details className="group py-0.5" open={open}>
-      <summary className="flex cursor-pointer list-none items-start gap-2 rounded-md py-1 text-(--dim) hover:text-(--fg) [&::-webkit-details-marker]:hidden">
-        <span className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center opacity-80">
-          {meta.icon}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] leading-6">{meta.label}</span>
-          {meta.detail ? (
-            <span className="block truncate font-mono text-[11px] leading-4 opacity-70">
-              {meta.detail}
-            </span>
-          ) : null}
-        </span>
-        <ToolStatus status={block.status} />
-        {children ? (
-          <ChevronDownIcon className="mt-1 h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
-        ) : null}
-      </summary>
-      {children ? <div className="ml-6 mt-1">{children}</div> : null}
-    </details>
-  );
-}
-
-function ToolOutput({ children }: { children: ReactNode }) {
-  return (
-    <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-(--dim) [overflow-wrap:anywhere]">
-      {children}
-    </pre>
-  );
-}
-
-function ToolBlockView({ block }: { block: ToolBlock }) {
-  const isFileWrite = FILE_WRITE_TOOL_NAMES.has(block.name.toLowerCase());
-  const filePath = isFileWrite
-    ? extractFromArgs(block.args, block.argsText, ["path", "file_path", "filePath", "file"])
-    : null;
-  const fileContent = isFileWrite
-    ? extractFromArgs(block.args, block.argsText, ["content", "text", "newText", "new_content"])
-    : null;
-  const patchContent = isFileWrite
-    ? extractFromArgs(block.args, block.argsText, ["patch", "diff", "edits"])
-    : null;
-  const lang = detectLang(filePath);
-  const isHtml = lang === "html";
-  const [showPreview, setShowPreview] = useState(false);
-
-  if (isFileWrite && (fileContent !== null || patchContent !== null)) {
-    const body = fileContent ?? patchContent ?? "";
-    return (
-      <ToolSummary block={block} filePath={filePath} open>
-        <div className="mb-1 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.08em] text-(--dim)">
-          <span>{lang || "source"}</span>
-          {isHtml ? (
-            <button
-              type="button"
-              onClick={() => setShowPreview((value) => !value)}
-              className="rounded-md px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
-            >
-              {showPreview ? "Source" : "Preview"}
-            </button>
-          ) : null}
-        </div>
-        {isHtml && showPreview ? (
-          <iframe
-            sandbox=""
-            srcDoc={body}
-            className="h-72 w-full rounded-md border border-(--border) bg-white"
-            title={filePath ?? "preview"}
-          />
-        ) : (
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-(--border)/70 bg-(--surface)/35 p-2 font-mono text-[11px] leading-5 text-(--fg)">
-            {body}
-          </pre>
-        )}
-        {block.resultText ? (
-          <div className="mt-1 font-mono text-[10px] text-(--dim)">
-            <ToolOutput>{block.resultText}</ToolOutput>
-          </div>
-        ) : null}
-      </ToolSummary>
-    );
-  }
-
-  // Generic fallback (shells, reads, searches, browser tools, etc.).
-  const display =
-    block.resultText || (block.text && block.text !== block.argsText ? block.text : "");
-  return (
-    <ToolSummary
-      block={block}
-      open={block.status === "running" || (Boolean(display) && display.length < 2400)}
+      aria-hidden="true"
     >
-      {display ? <ToolOutput>{display}</ToolOutput> : null}
-    </ToolSummary>
+      <span className="absolute h-2.5 w-2.5 animate-ping rounded-full bg-(--accent)/35" />
+      <span className="relative h-1.5 w-1.5 rounded-full bg-(--accent)" />
+    </span>
   );
 }

@@ -101,7 +101,7 @@ export function SettingsLayout<Id extends SettingsSectionId = SettingsSectionId>
         <section className="min-w-0 pb-10">
           <div className="mb-4 flex min-h-8 items-center justify-between gap-3 border-b border-(--border)/70 pb-3">
             <div className="min-w-0">
-              <div className="text-[11px] uppercase tracking-[0.16em] text-(--dim)">{eyebrow}</div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-(--dim)">{eyebrow}</div>
               <h2 className="mt-1 truncate text-[19px] font-semibold tracking-[-0.015em] text-(--fg)">
                 {activeLabel}
               </h2>
@@ -261,15 +261,11 @@ export function SettingsInput({
       value={value}
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
-      className={`h-8 w-full rounded-md border border-transparent bg-(--bg) px-2.5 text-[12px] text-(--fg) outline-none ring-1 ring-(--border)/70 transition placeholder:text-(--dim)/65 focus:ring-(--hl1)/70 ${className}`}
+      className={`h-8 w-full border-0 border-b border-(--border)/70 bg-transparent px-0.5 text-[12px] text-(--fg) outline-none transition placeholder:text-(--dim)/65 focus:border-(--hl1) ${className}`}
     />
   );
 }
 
 export function EmptySafeNotice({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-md bg-(--bg)/70 px-3 py-2 text-[11px] leading-4 text-(--dim)">
-      {children}
-    </div>
-  );
+  return <div className="py-1 text-[11px] leading-4 text-(--dim)">{children}</div>;
 }

@@ -37,6 +37,24 @@ function groupPassesExploreFilters(group: ModelGroup, search: string): boolean {
   return isRecentlyCreatedOnHf(group.lead);
 }
 
+export function exploreGroupKey(modelId: string): string {
+  const normalized = normalizeModelId(modelId) || modelId.toLowerCase();
+  return normalized.split("/").filter(Boolean).pop() ?? normalized;
+}
+
+export function derivativeScore(model: HuggingFaceModel, search: string): number {
+  const id = model.modelId.toLowerCase();
+  const tags = model.tags.join(" ").toLowerCase();
+  const query = search.trim().toLowerCase();
+  let score = 0;
+  if (query && (id === query || id.endsWith(`/${query}`))) score -= 50;
+  if (/(gguf|awq|gptq|exl2|exl3|mlx|onnx|quant|int4|int8|fp8)/.test(`${id} ${tags}`)) {
+    score += 20;
+  }
+  if (/instruct|chat|base/.test(id)) score -= 2;
+  return score;
+}
+
 export function useExplore() {
   const [models, setModels] = useState<HuggingFaceModel[]>([]);
   const [gpus, setGpus] = useState<GPU[]>([]);
@@ -151,16 +169,14 @@ export function useExplore() {
   const recByKey = useMemo(() => {
     const m = new Map<string, ModelRecommendation>();
     for (const r of recommendations) {
-      const k = normalizeModelId(r.id) || r.id.toLowerCase();
+      const k = exploreGroupKey(r.id);
       m.set(k, r);
     }
     return m;
   }, [recommendations]);
 
   const spotlightRecKeys = useMemo(() => {
-    return new Set(
-      spotlightRecommendations.map((r) => normalizeModelId(r.id) || r.id.toLowerCase()),
-    );
+    return new Set(spotlightRecommendations.map((r) => exploreGroupKey(r.id)));
   }, [spotlightRecommendations]);
 
   const groupedModels = useMemo((): ModelGroup[] => {
@@ -168,7 +184,7 @@ export function useExplore() {
     const seen = new Set<string>();
 
     for (const model of models) {
-      const key = normalizeModelId(model.modelId) || model.modelId.toLowerCase();
+      const key = exploreGroupKey(model.modelId);
       const existing = groups.get(key);
       if (existing) {
         existing.push(model);
@@ -183,6 +199,8 @@ export function useExplore() {
 
     return Array.from(groups.entries()).map(([key, variants]) => {
       const sorted = [...variants].sort((a, b) => {
+        const derivativeDelta = derivativeScore(a, search) - derivativeScore(b, search);
+        if (derivativeDelta !== 0) return derivativeDelta;
         const tm = modelRecencyMs(b) - modelRecencyMs(a);
         if (tm !== 0) return tm;
         if (b.downloads !== a.downloads) return b.downloads - a.downloads;
@@ -195,7 +213,7 @@ export function useExplore() {
       const needGb = resolveGroupNeedGb(key, recByKey, lead);
       return { key, lead, variants: sorted, maxDownloads, maxLikes, lastModifiedMs, needGb };
     });
-  }, [models, recByKey]);
+  }, [models, recByKey, search]);
 
   const sortedGroups = useMemo(() => {
     return [...groupedModels].sort((a, b) => {

@@ -2,8 +2,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Moon, Square, Sun } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
+import { ModelStopConfirm } from "@/components/model-stop-confirm";
+import { useModelLifecycle } from "@/hooks/use-model-lifecycle";
 import type { GPU, Metrics, ProcessInfo, RecipeWithStatus, RuntimePlatformKind } from "@/lib/types";
 import { toGB, toGBFromMB } from "@/lib/formatters";
+import { useAppStore } from "@/store";
 
 interface StatusSectionProps {
   currentProcess: ProcessInfo | null;
@@ -68,28 +73,43 @@ export function StatusSection({
   const vramCapacity = firstPositive(metrics?.vram_capacity_gb, fallbackMemCapacity);
   const powerLimit = firstPositive(metrics?.power_limit_watts, fallbackPowerLimit);
 
-  const genTps = firstPositive(metrics?.session_avg_generation, metrics?.generation_throughput);
-  const prefillTps = firstPositive(metrics?.session_avg_prefill, metrics?.prompt_throughput);
-  const ttftMs = firstPositive(metrics?.avg_ttft_ms);
-  const sessions = metrics?.running_requests ?? 0;
   const peakGenTps = firstPositive(
     metrics?.session_peak_generation_throughput,
     metrics?.session_peak_generation,
     metrics?.peak_generation_tps,
   );
+  const peakPrefillTps = firstPositive(
+    metrics?.session_peak_prompt_throughput,
+    metrics?.session_peak_prefill,
+    metrics?.peak_prefill_tps,
+  );
   const peakTtftMs = firstPositive(metrics?.session_peak_ttft_ms, metrics?.peak_ttft_ms);
+  const genTps = firstPositive(
+    metrics?.generation_throughput,
+    metrics?.session_avg_generation,
+    peakGenTps,
+  );
+  const prefillTps = firstPositive(
+    metrics?.prompt_throughput,
+    metrics?.session_avg_prefill,
+    peakPrefillTps,
+  );
+  const ttftMs = firstPositive(metrics?.avg_ttft_ms, peakTtftMs);
+  const sessions = metrics?.running_requests ?? 0;
   const peakReq = metrics?.session_peak_running_requests ?? 0;
   const samples = useMetricSamples({
     key: modelSampleKey,
-    generation: genTps,
-    prefill: prefillTps,
-    ttft: ttftMs,
+    generation: genTps ?? 0,
+    prefill: prefillTps ?? 0,
+    ttft: ttftMs ?? 0,
     requests: sessions,
     active: isRunning,
   });
 
   const headerActions = (
     <div className="flex items-center gap-1.5">
+      <HeaderThemeToggle />
+      <HeaderStopButton running={isRunning} />
       {recipes && onLaunch && (
         <ModelsDropdown
           recipes={recipes}
@@ -146,30 +166,136 @@ export function StatusSection({
       <dl className="status-metric-strip mt-5 grid w-full grid-cols-[minmax(0,1.05fr)_minmax(0,0.92fr)_minmax(0,1.18fr)_minmax(0,0.58fr)_minmax(0,0.88fr)_minmax(0,0.88fr)] border-b border-(--border)/40 pb-5">
         <MetricColumn
           label="Decode"
-          value={genTps.toFixed(1)}
+          value={metricValue(genTps, 1)}
           unit="tok/s"
-          detail={peakGenTps > 0 ? `peak ${peakGenTps.toFixed(1)}` : undefined}
+          detail={peakMetricDetail(peakGenTps, 1)}
         />
         <MetricColumn
           label="TTFT"
-          value={ttftMs.toFixed(0)}
+          value={metricValue(ttftMs, 0)}
           unit="ms"
-          detail={peakTtftMs > 0 ? `peak ${peakTtftMs.toFixed(0)} ms` : undefined}
+          detail={peakMetricDetail(peakTtftMs, 0, " ms")}
         />
-        <MetricColumn label="Prefill" value={prefillTps.toFixed(1)} unit="t/s" />
+        <MetricColumn
+          label="Prefill"
+          value={metricValue(prefillTps, 1)}
+          unit="t/s"
+          detail={peakMetricDetail(peakPrefillTps, 1)}
+        />
         <CompactMetric label="Req" value={`${sessions}/${peakReq || sessions}`} />
-        <CompactMetric
-          label="VRAM"
-          value={`${totalMemUsed.toFixed(1)}/${vramCapacity.toFixed(0)}G`}
+        <CompactMetric label="VRAM" value={ratioMetric(totalMemUsed, vramCapacity, "G", 1)} />
+        <CompactMetric label="Power" value={ratioMetric(totalPower, powerLimit, "W")} />
+      </dl>
+
+      <dl className="mt-3 grid gap-2 font-mono text-[10.5px] text-(--dim) sm:grid-cols-4">
+        <RuntimeMetric label="total tokens" value={tokenTotalMetric(metrics)} />
+        <RuntimeMetric label="prompt tokens" value={tokenMetric(metrics?.prompt_tokens_total)} />
+        <RuntimeMetric
+          label="completion tokens"
+          value={tokenMetric(metrics?.generation_tokens_total)}
         />
-        <CompactMetric
-          label="Power"
-          value={`${Math.round(totalPower)}/${Math.round(powerLimit)}W`}
-        />
+        <RuntimeMetric label="duration" value={durationMetric(metrics?.latency_avg)} />
       </dl>
 
       <MetricTrends samples={samples} />
     </section>
+  );
+}
+
+function HeaderThemeToggle() {
+  const { themeId, setThemeId } = useAppStore(
+    useShallow((s) => ({ themeId: s.themeId, setThemeId: s.setThemeId })),
+  );
+  const isDark = themeId === "omlx-dark";
+  const Icon = isDark ? Sun : Moon;
+  return (
+    <button
+      type="button"
+      onClick={() => setThemeId(isDark ? "omlx-light" : "omlx-dark")}
+      className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
+      title={isDark ? "Light mode" : "Dark mode"}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      <span className="hidden sm:inline">{isDark ? "Light" : "Dark"}</span>
+    </button>
+  );
+}
+
+function HeaderStopButton({ running }: { running: boolean }) {
+  const { stop } = useModelLifecycle();
+  if (!running) return null;
+  return (
+    <ModelStopConfirm
+      onStop={stop}
+      trigger={({ open, stopping }) => (
+        <button
+          type="button"
+          onClick={open}
+          disabled={stopping}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+          title="Stop model"
+        >
+          <Square className="h-3.5 w-3.5" fill="currentColor" />
+          {stopping ? "Stopping" : "Stop"}
+        </button>
+      )}
+    />
+  );
+}
+
+export function metricValue(value: number | null, digits: number): string | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value.toFixed(digits)
+    : null;
+}
+
+export function ratioMetric(
+  value: number | null,
+  total: number | null,
+  unit: string,
+  valueDigits = 0,
+): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) return null;
+  return `${value.toFixed(valueDigits)}/${total.toFixed(0)}${unit}`;
+}
+
+function peakMetricDetail(value: number | null, digits: number, suffix = ""): string | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? `peak ${value.toFixed(digits)}${suffix}`
+    : undefined;
+}
+
+function tokenMetric(...values: Array<number | undefined>): string {
+  const value = values.find(
+    (item) => typeof item === "number" && Number.isFinite(item) && item >= 0,
+  );
+  return typeof value === "number" ? Math.round(value).toLocaleString() : "unavailable";
+}
+
+function tokenTotalMetric(metrics: Metrics | null): string {
+  const explicit = tokenMetric(metrics?.total_tokens, metrics?.tokens_total);
+  if (explicit !== "unavailable") return explicit;
+  if (
+    typeof metrics?.prompt_tokens_total === "number" &&
+    typeof metrics.generation_tokens_total === "number"
+  ) {
+    return tokenMetric(metrics.prompt_tokens_total + metrics.generation_tokens_total);
+  }
+  return "unavailable";
+}
+
+function durationMetric(value: number | undefined): string {
+  if (!value || value <= 0) return "unavailable";
+  return value > 1000 ? `${(value / 1000).toFixed(2)}s` : `${value.toFixed(0)}ms`;
+}
+
+function RuntimeMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 items-baseline justify-between gap-2 border-t border-(--border)/25 pt-1">
+      <dt className="truncate uppercase tracking-[0.12em]">{label}</dt>
+      <dd className="truncate text-(--fg)">{value}</dd>
+    </div>
   );
 }
 
@@ -362,7 +488,7 @@ function MetricColumn({
   unit: string;
   detail?: string;
 }) {
-  const displayValue = value ?? "0";
+  const displayValue = value ?? "unavailable";
 
   return (
     <div className="min-w-0 overflow-hidden border-r border-(--border)/40 pr-2 pl-3 first:pl-0 sm:pr-4 sm:pl-5 last:border-r-0 [container-type:inline-size]">
@@ -521,11 +647,11 @@ function ActionBtn({
   );
 }
 
-function firstPositive(...values: Array<number | null | undefined>): number {
+export function firstPositive(...values: Array<number | null | undefined>): number | null {
   for (const v of values) {
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
   }
-  return 0;
+  return null;
 }
 
 /* Inline Models dropdown — auto-closes on outside click and selection. */

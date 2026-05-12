@@ -2,13 +2,13 @@
 import type { Hono } from "hono";
 import type { AppContext } from "../../types/context";
 import { delay } from "../../core/async";
-import { badRequest, notFound, serviceUnavailable } from "../../core/errors";
+import { HttpStatus, badRequest, notFound, serviceUnavailable } from "../../core/errors";
 import { parseRecipe } from "../models/recipes/recipe-serializer";
 import { Event } from "../system/event-manager";
 import { CONTROLLER_EVENTS } from "../../contracts/controller-events";
 import { fetchInference } from "../../services/inference/inference-client";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
-import { getVllmConfigHelp } from "./runtimes/vllm-runtime";
+import { getVllmConfigHelp, getVllmRuntimeInfo } from "./runtimes/vllm-runtime";
 import { getLlamacppConfigHelp } from "./runtimes/llamacpp-runtime";
 import { getExllamav3RuntimeInfo, getCudaInfo } from "./runtimes/runtime-info";
 import { getRocmInfo, resolveRocmSmiTool } from "../system/platform/rocm-info";
@@ -148,8 +148,45 @@ export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
     const recipeId = ctx.req.param("recipeId");
     const recipe = context.stores.recipeStore.get(recipeId);
     if (!recipe) throw notFound("Recipe not found");
+    const source =
+      ctx.req.header("x-vllm-source") ??
+      ctx.req.header("x-source") ??
+      ctx.req.header("user-agent") ??
+      null;
+    const launchState = context.launchState.getState();
+    if (launchState.phase !== "idle") {
+      const activeRecipeId = launchState.recipeId ?? "unknown";
+      context.logger.warn("Rejected queued launch request", {
+        active_recipe_id: activeRecipeId,
+        requested_recipe_id: recipeId,
+        source,
+      });
+      throw new HttpStatus(
+        409,
+        activeRecipeId === recipeId
+          ? `Launch already in progress for ${recipeId}`
+          : `Launch already in progress for ${activeRecipeId}; refusing to queue ${recipeId}`
+      );
+    }
+    const current = await context.processManager.findInferenceProcess(
+      context.config.inference_port
+    );
+    if (current && !isRecipeRunning(recipe, current, { allowEitherPathContains: true })) {
+      context.logger.warn("Rejected launch request while another model is running", {
+        running_model: current.served_model_name ?? current.model_path,
+        running_backend: current.backend,
+        requested_recipe_id: recipeId,
+        source,
+      });
+      throw new HttpStatus(
+        409,
+        `Model ${current.served_model_name ?? current.model_path} is already running; evict it before launching ${recipeId}`
+      );
+    }
+    context.logger.info("Accepted launch request", { recipe_id: recipeId, source });
     const controller = new AbortController();
     launchAbortControllers.set(recipeId, controller);
+    context.launchState.markLaunching(recipeId);
     try {
       const result = await context.engineService.setActiveRecipe(recipe, {
         signal: controller.signal,
@@ -162,6 +199,9 @@ export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
     } finally {
       if (launchAbortControllers.get(recipeId) === controller) {
         launchAbortControllers.delete(recipeId);
+      }
+      if (context.launchState.getLaunchingRecipeId() === recipeId) {
+        context.launchState.markIdle();
       }
     }
   });
@@ -314,9 +354,7 @@ export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
   });
 
   app.get("/runtime/vllm", async (ctx) => {
-    const current = await context.engineService.getCurrentProcess();
-    const target = await getDefaultRuntimeTarget(context.config, "vllm", current);
-    return ctx.json(runtimeTargetToBackendInfo(target));
+    return ctx.json(await getVllmRuntimeInfo());
   });
 
   app.get("/runtime/vllm/config", async (ctx) => {
@@ -359,12 +397,16 @@ export const registerEngineRoutes = (app: Hono, context: AppContext): void => {
 
   app.post("/runtime/vllm/upgrade", async (ctx) => {
     const body = await parseRuntimeJobBody(ctx);
+    const current = await context.engineService.getCurrentProcess();
     const job = createEngineJob(context.config, {
       backend: "vllm",
       type: "update",
+      ...(body.targetId ? { targetId: body.targetId } : {}),
+      ...(body.command ? { command: body.command } : {}),
       ...(body.args ? { args: body.args } : {}),
       ...(body.version ? { version: body.version.trim() } : {}),
-      preferBundled: body.preferBundled ?? true,
+      ...(body.preferBundled !== undefined ? { preferBundled: body.preferBundled } : {}),
+      runningProcess: current,
     });
     return ctx.json({ job_id: job.id, job });
   });

@@ -2,6 +2,10 @@
 import { describe, expect, it } from "bun:test";
 import { createToolCallStream } from "../modules/proxy/tool-call-stream";
 import { parseToolCallsFromContent } from "../modules/proxy/tool-call-parser";
+import {
+  normalizeReasoningAndContentInMessage,
+  normalizeToolCallsInMessage,
+} from "../modules/proxy/reasoning-extractor";
 
 const collectStream = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
   const reader = stream.getReader();
@@ -79,6 +83,31 @@ describe("tool-call-core", () => {
     expect(calls.length).toBe(0);
   });
 
+  it("does not extract non-streaming tool calls from reasoning_content", () => {
+    const message: Record<string, unknown> = {
+      content: "visible answer",
+      reasoning_content:
+        '<tool_call><function=calc><arguments>{"x":1}</arguments></tool_call>',
+    };
+
+    expect(normalizeToolCallsInMessage(message)).toBe(false);
+    expect(message["tool_calls"]).toBeUndefined();
+  });
+
+  it("collapses exact duplicated visible content without touching reasoning", () => {
+    const visible =
+      "This is the actual assistant answer with enough text to avoid collapsing short intentional repetition.";
+    const message: Record<string, unknown> = {
+      content: `${visible}\n\n${visible}`,
+      reasoning_content: "normal reasoning",
+    };
+
+    normalizeReasoningAndContentInMessage(message);
+
+    expect(message["content"]).toBe(visible);
+    expect(message["reasoning_content"]).toBe("normal reasoning");
+  });
+
   it("injects tool_calls before [DONE] for streaming XML", async () => {
     const encoder = new TextEncoder();
     const source = new ReadableStream<Uint8Array>({
@@ -97,6 +126,25 @@ describe("tool-call-core", () => {
     expect(output).toContain('"tool_calls"');
     expect(output).toContain('"name":"calc"');
     expect(output).toContain("data: [DONE]");
+  });
+
+  it("calls first-token hook once when visible streaming output starts", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":""}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"!"}}]}\n\n'));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    let calls = 0;
+    const stream = createToolCallStream(source.getReader(), undefined, () => {
+      calls += 1;
+    });
+    await collectStream(stream);
+    expect(calls).toBe(1);
   });
 
   it("moves split <think> blocks to reasoning_content in streaming output", async () => {
@@ -374,11 +422,137 @@ describe("tool-call-core", () => {
     expect(delta.content).toBe(" after");
     expect(delta.reasoning).toBe("secret text");
   });
+
+  it("turns cumulative content snapshots into deltas before forwarding", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'));
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":"Hello world"}}]}\n\n')
+        );
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":"Hello world!"}}]}\n\n')
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const stream = createToolCallStream(source.getReader());
+    const output = await collectStream(stream);
+    const events = parseSseDataLines(output);
+    const delta = collectDeltaText(events);
+
+    expect(delta.content).toBe("Hello world!");
+  });
+
+  it("does not duplicate visible content when reasoning_content streams alongside content", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking","content":"Answer"}}]}\n\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking harder","content":"Answer"}}]}\n\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking harder","content":"Answer done"}}]}\n\n'
+          )
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const stream = createToolCallStream(source.getReader());
+    const output = await collectStream(stream);
+    const events = parseSseDataLines(output);
+    const delta = collectDeltaText(events);
+
+    expect(delta.content).toBe("Answer done");
+    expect(delta.reasoning).toBe("thinking harder");
+  });
+
+  it("deduplicates tiny cumulative snapshots from the first token", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        for (const content of ["H", "He", "Hel", "Hell", "Hello"]) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`)
+          );
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const stream = createToolCallStream(source.getReader());
+    const output = await collectStream(stream);
+    const events = parseSseDataLines(output);
+    const delta = collectDeltaText(events);
+
+    expect(delta.content).toBe("Hello");
+  });
+
+  it("deduplicates a replayed delta sequence that restarts from the beginning", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        for (const content of ["Hello", " world", "Hello", " world", "!"]) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`)
+          );
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const stream = createToolCallStream(source.getReader());
+    const output = await collectStream(stream);
+    const events = parseSseDataLines(output);
+    const delta = collectDeltaText(events);
+
+    expect(delta.content).toBe("Hello world!");
+  });
+
+  it("treats message-shaped streaming chunks as snapshots", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"message":{"content":"First chunk"}}]}\n\n')
+        );
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"message":{"content":"First chunk plus more"}}]}\n\n')
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const stream = createToolCallStream(source.getReader());
+    const output = await collectStream(stream);
+    const events = parseSseDataLines(output);
+    const delta = collectDeltaText(events);
+
+    expect(delta.content).toBe("First chunk plus more");
+  });
 });
 
 describe("normalizeChatMessageContentParts", () => {
   it("collapses OpenAI text content arrays for text-only local backends", async () => {
-    const { normalizeChatMessageContentParts } = await import("../modules/proxy/content-normalizer");
+    const { normalizeChatMessageContentParts } = await import(
+      "../modules/proxy/content-normalizer"
+    );
     const payload: Record<string, unknown> = {
       messages: [
         {
@@ -402,7 +576,9 @@ describe("normalizeChatMessageContentParts", () => {
   });
 
   it("leaves multimodal arrays intact", async () => {
-    const { normalizeChatMessageContentParts } = await import("../modules/proxy/content-normalizer");
+    const { normalizeChatMessageContentParts } = await import(
+      "../modules/proxy/content-normalizer"
+    );
     const content = [
       { type: "text", text: "describe" },
       { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },

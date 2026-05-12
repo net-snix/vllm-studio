@@ -11,7 +11,8 @@ export interface StreamUsage {
 
 export const createToolCallStream = (
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  onUsage?: (usage: StreamUsage) => void
+  onUsage?: (usage: StreamUsage) => void,
+  onFirstToken?: () => void
 ): ReadableStream<Uint8Array> => {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -24,6 +25,10 @@ export const createToolCallStream = (
   let inThink = false;
   let emittedLines = 0;
   let downstreamClosed = false;
+  let firstTokenTracked = false;
+  const contentHistory = new Map<string, { text: string; snapshot: boolean }>();
+  const reasoningHistory = new Map<string, { text: string; snapshot: boolean }>();
+  const replayCursors = new Map<string, number>();
   const tearDownUpstream = async (): Promise<void> => {
     try {
       await reader.cancel();
@@ -85,6 +90,45 @@ export const createToolCallStream = (
     return text
       .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
       .replace(/<?use_mcp[\s_]*tool>[\s\S]*?<\/use_mcp[\s_]*tool>/gi, "");
+  };
+
+  const normalizeTextDelta = (
+    history: Map<string, { text: string; snapshot: boolean }>,
+    key: string,
+    text: string,
+    forceSnapshot = false
+  ): string => {
+    if (!text) return text;
+    const previous = history.get(key) ?? { text: "", snapshot: forceSnapshot };
+    const replayCursor = replayCursors.get(key);
+    if (replayCursor !== undefined) {
+      const expected = previous.text.slice(replayCursor, replayCursor + text.length);
+      if (expected === text) {
+        const nextCursor = replayCursor + text.length;
+        if (nextCursor >= previous.text.length) replayCursors.delete(key);
+        else replayCursors.set(key, nextCursor);
+        return "";
+      }
+      replayCursors.delete(key);
+    }
+    const isCumulative =
+      previous.text.length > 0 &&
+      text.length >= previous.text.length &&
+      text.startsWith(previous.text);
+    const shouldSlice = forceSnapshot || previous.snapshot || isCumulative;
+
+    if (shouldSlice) {
+      history.set(key, { text, snapshot: true });
+      return isCumulative ? text.slice(previous.text.length) : text;
+    }
+
+    if (previous.text.length > text.length && previous.text.startsWith(text)) {
+      replayCursors.set(key, text.length);
+      return "";
+    }
+
+    history.set(key, { text: previous.text + text, snapshot: false });
+    return text;
   };
 
   const rewriteThinkDelta = (
@@ -219,27 +263,10 @@ export const createToolCallStream = (
     }
   };
 
-  const absorbDeltaContent = (data: Record<string, unknown>): void => {
-    const choices = data["choices"];
-    if (!Array.isArray(choices)) return;
-    for (const choice of choices) {
-      const choiceRecord = choice as Record<string, unknown>;
-      const delta = (choiceRecord["delta"] ?? choiceRecord["message"]) as
-        | Record<string, unknown>
-        | undefined;
-      if (!delta) continue;
-      const toolCalls = delta["tool_calls"];
-      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
-        toolCallsFound = true;
-      }
-      const content = typeof delta["content"] === "string" ? String(delta["content"]) : "";
-      const reasoning =
-        typeof delta["reasoning_content"] === "string" ? String(delta["reasoning_content"]) : "";
-      if (content) {
-        visibleContentBuffer += content;
-      }
-      void reasoning;
-    }
+  const trackFirstToken = (): void => {
+    if (firstTokenTracked) return;
+    firstTokenTracked = true;
+    onFirstToken?.();
   };
 
   const maybeInjectToolCalls = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
@@ -304,24 +331,41 @@ export const createToolCallStream = (
         }
 
         parseUsage(parsed);
-        absorbDeltaContent(parsed);
-
         const choices = parsed["choices"];
         if (Array.isArray(choices)) {
-          for (const choice of choices) {
+          for (const [choiceIndex, choice] of choices.entries()) {
             const choiceRecord = choice as Record<string, unknown>;
-            const delta = (choiceRecord["delta"] ?? choiceRecord["message"]) as
+            const hasDelta = choiceRecord["delta"] && typeof choiceRecord["delta"] === "object";
+            const delta = (hasDelta ? choiceRecord["delta"] : choiceRecord["message"]) as
               | Record<string, unknown>
               | undefined;
             if (!delta) continue;
-            const content = typeof delta["content"] === "string" ? String(delta["content"]) : "";
+            const toolCalls = delta["tool_calls"];
+            if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+              toolCallsFound = true;
+              trackFirstToken();
+            }
+            const rawContent = typeof delta["content"] === "string" ? String(delta["content"]) : "";
+            const content = normalizeTextDelta(
+              contentHistory,
+              `${choiceIndex}:content`,
+              rawContent,
+              !hasDelta
+            );
             const reasoningRaw =
               typeof delta["reasoning_content"] === "string"
-                ? String(delta["reasoning_content"])
+                ? normalizeTextDelta(
+                    reasoningHistory,
+                    `${choiceIndex}:reasoning`,
+                    String(delta["reasoning_content"]),
+                    !hasDelta
+                  )
                 : "";
+            if (content || reasoningRaw) trackFirstToken();
             let reasoning = "";
             let reasoningFromContent = "";
             if (content) {
+              visibleContentBuffer += content;
               const rewritten = rewriteThinkDelta(content, false);
               const cleanedContent = stripToolXmlDelta(rewritten.content);
               if (cleanedContent) {
@@ -330,6 +374,8 @@ export const createToolCallStream = (
                 delete delta["content"];
               }
               reasoningFromContent = rewritten.reasoningAppend;
+            } else if (rawContent && "content" in delta) {
+              delete delta["content"];
             }
 
             if (reasoningRaw) {

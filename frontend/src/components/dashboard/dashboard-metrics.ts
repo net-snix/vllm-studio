@@ -28,6 +28,48 @@ function metricIds(metrics: Metrics): Set<string> {
   return identitySet([metrics.model_id, metrics.served_model_name, metrics.model_path]);
 }
 
+function hasRuntimeCounters(metrics: Metrics): boolean {
+  return [
+    metrics.avg_ttft_ms,
+    metrics.generation_throughput,
+    metrics.prompt_throughput,
+    metrics.generation_tokens_total,
+    metrics.prompt_tokens_total,
+    metrics.total_tokens,
+    metrics.tokens_total,
+    metrics.running_requests,
+  ].some((value) => typeof value === "number" && value > 0);
+}
+
+function idsOverlap(metricsIds: Set<string>, processIds: Set<string>): boolean {
+  for (const metricId of metricsIds) {
+    for (const processId of processIds) {
+      if (
+        metricId === processId ||
+        (metricId.length >= 6 && processId.includes(metricId)) ||
+        (processId.length >= 6 && metricId.includes(processId))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function metricsWithProcessIdentity(
+  metrics: Metrics | null,
+  process: ProcessInfo | null,
+): Metrics | null {
+  if (!metrics || !process) return metrics;
+  if (metricIds(metrics).size > 0) return metrics;
+  return {
+    ...metrics,
+    model_id: process.served_model_name ?? basename(process.model_path),
+    model_path: process.model_path,
+    served_model_name: process.served_model_name ?? null,
+  };
+}
+
 export function metricsBelongToProcess(
   metrics: Metrics | null,
   process: ProcessInfo | null,
@@ -37,8 +79,8 @@ export function metricsBelongToProcess(
   const ids = processMetricIds(process);
   if (ids.size === 0) return false;
   const idsFromMetrics = metricIds(metrics);
-  if (idsFromMetrics.size === 0) return false;
-  return [...idsFromMetrics].some((id) => ids.has(id));
+  if (idsFromMetrics.size === 0) return hasRuntimeCounters(metrics);
+  return idsOverlap(idsFromMetrics, ids);
 }
 
 export function scopedMetrics(

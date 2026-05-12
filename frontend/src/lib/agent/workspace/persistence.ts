@@ -1,0 +1,152 @@
+import { collectLeaves } from "@/app/agent/_components/pane-layout";
+import type { ActiveAgentSessionSnapshot } from "@/lib/agent/active-sessions";
+import type { Session, SessionId, SessionsMap } from "@/lib/agent/sessions/types";
+import type { ToolSelection } from "@/lib/agent/tools/types";
+import type { PaneId, PaneState, WorkspaceLayout, WorkspaceState } from "./types";
+
+// `SessionTab` was the old name for the per-pane session record. Now sessions
+// live in a flat map and panes hold ids; this alias keeps the persisted shape
+// declaration readable for future-archaeologists.
+type SessionTab = Session;
+import {
+  PANE_LAYOUT_KEY,
+  PANE_STATE_KEY,
+  persistActiveAgentSessions,
+  restorePersistedPaneState,
+  tabForPersistence,
+  type WorkspaceStorage,
+} from "./store";
+import { makeFreshTab, newRuntimeId } from "@/lib/agent/session/helpers";
+
+const SESSIONS_COLLAPSED_KEY = "vllm-studio.agent.sessionsCollapsed";
+const SESSIONS_COLLAPSED_CLEANED_KEY = "vllm-studio.agent.sessionsCollapsedCleaned";
+
+function readStorage(storage: WorkspaceStorage, key: string): string | null {
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function setStorage(storage: WorkspaceStorage, key: string, value: string): void {
+  try {
+    storage.setItem(key, value);
+  } catch {
+    // Ignore quota/private-mode failures; workspace state remains in memory.
+  }
+}
+
+function removeStorage(storage: WorkspaceStorage, key: string): void {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Ignore storage failures; migrations are best-effort.
+  }
+}
+
+function restoreLegacyLayout(rawLayout: string): {
+  layout: WorkspaceLayout;
+  panesById: Map<PaneId, PaneState>;
+  sessions: SessionsMap;
+  focusedPaneId: PaneId;
+} | null {
+  try {
+    const layout = JSON.parse(rawLayout) as WorkspaceLayout;
+    if (!layout || typeof layout !== "object") return null;
+    const leaves = collectLeaves(layout);
+    if (leaves.length === 0) return null;
+    const panesById = new Map<PaneId, PaneState>();
+    const sessions = new Map<SessionId, Session>();
+    for (const paneId of leaves) {
+      const session = makeFreshTab();
+      sessions.set(session.id, session);
+      panesById.set(paneId, {
+        sessionIds: [session.id],
+        activeSessionId: session.id,
+        runtimeSessionId: newRuntimeId(),
+      });
+    }
+    return { layout, panesById, sessions, focusedPaneId: leaves[0] };
+  } catch {
+    return null;
+  }
+}
+
+function migrateStorage(storage: WorkspaceStorage): void {
+  if (!readStorage(storage, SESSIONS_COLLAPSED_CLEANED_KEY)) {
+    removeStorage(storage, SESSIONS_COLLAPSED_KEY);
+    setStorage(storage, SESSIONS_COLLAPSED_CLEANED_KEY, "1");
+  }
+  // Tool storage migrations are owned by lib/agent/tools/persistence.ts
+  // (`migrateToolStorage`) — ToolsProvider runs them on mount.
+}
+
+export type LoadedFromStorage = {
+  workspace: Partial<WorkspaceState>;
+  /** Per-session tool selections recovered from the persisted shape. */
+  selections: Map<SessionId, ToolSelection>;
+};
+
+export function loadInitialFromStorage(storage: WorkspaceStorage): LoadedFromStorage {
+  migrateStorage(storage);
+
+  const rawState = readStorage(storage, PANE_STATE_KEY);
+  const restoredState = rawState ? restorePersistedPaneState(rawState) : null;
+  if (restoredState) {
+    const { selections, ...workspace } = restoredState;
+    return { workspace, selections };
+  }
+
+  const rawLayout = readStorage(storage, PANE_LAYOUT_KEY);
+  const restoredLayout = rawLayout ? restoreLegacyLayout(rawLayout) : null;
+  return { workspace: restoredLayout ?? {}, selections: new Map() };
+}
+
+export function writePaneState(
+  storage: WorkspaceStorage,
+  state: WorkspaceState,
+  selectionFor: (sessionId: SessionId) => ToolSelection | null = () => null,
+): void {
+  // Denormalize on write — the persisted shape embeds session content (and
+  // tool selection) inside each pane (back-compat with the old PaneState.tabs
+  // format). The runtime model keeps sessions in a flat map and selections in
+  // the tools subsystem.
+  const panes: Record<
+    string,
+    {
+      activeTabId: string;
+      runtimeSessionId: string;
+      tabs: ReturnType<typeof tabForPersistence>[];
+    }
+  > = {};
+  for (const [paneId, pane] of state.panesById.entries()) {
+    const tabs: ReturnType<typeof tabForPersistence>[] = [];
+    for (const id of pane.sessionIds) {
+      const session = state.sessions.get(id);
+      if (session) tabs.push(tabForPersistence(session, selectionFor(id) ?? undefined));
+    }
+    panes[paneId] = {
+      activeTabId: pane.activeSessionId,
+      runtimeSessionId: pane.runtimeSessionId,
+      tabs,
+    };
+  }
+  setStorage(
+    storage,
+    PANE_STATE_KEY,
+    JSON.stringify({ version: 1, layout: state.layout, focusedPaneId: state.focusedPaneId, panes }),
+  );
+  setStorage(storage, PANE_LAYOUT_KEY, JSON.stringify(state.layout));
+}
+
+export function writeActiveSessions(
+  storage: WorkspaceStorage,
+  sessions: ActiveAgentSessionSnapshot[],
+): void {
+  try {
+    persistActiveAgentSessions(sessions, storage);
+  } catch {
+    // Ignore quota/private-mode failures; the broadcast still updates listeners.
+  }
+}
