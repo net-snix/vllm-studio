@@ -193,7 +193,7 @@ function UsageLineChart({
 
 export function DashboardSparkline({
   samples,
-  stroke = "var(--hl1)",
+  stroke = "var(--fg)",
   dotted = false,
   scale = "active",
 }: {
@@ -286,7 +286,7 @@ export function SystemOverview({
         >
           <UsageLineChart
             samples={cpuSamples}
-            stroke="var(--hl1)"
+            stroke="var(--fg)"
             windowMs={COMPACT_CHART_WINDOW_MS}
           />
         </TrendPanel>
@@ -299,7 +299,7 @@ export function SystemOverview({
         >
           <UsageLineChart
             samples={memorySamples}
-            stroke="var(--hl1)"
+            stroke="var(--fg)"
             windowMs={COMPACT_CHART_WINDOW_MS}
           />
         </TrendPanel>
@@ -375,7 +375,7 @@ function GpuUsageGraph({
       <div className="h-24">
         <UsageLineChart
           samples={samples}
-          stroke="var(--hl1)"
+          stroke="var(--fg)"
           windowMs={COMPACT_CHART_WINDOW_MS}
         />
       </div>

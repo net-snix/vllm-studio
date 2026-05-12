@@ -39,7 +39,7 @@ export function Meter({
       ? "bg-(--err)"
       : status === "warning"
         ? "bg-(--hl3)"
-        : "bg-(--hl1)";
+        : "bg-(--fg)";
   return (
     <div
       className={`${slim ? "h-[2px]" : "h-[3px]"} overflow-hidden bg-(--dim)/15`}
@@ -62,7 +62,7 @@ export function Section({
     <section className="overflow-hidden rounded-[4px] border border-(--border)/70 bg-(--surface)/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
       <div className="flex min-h-8 items-center justify-between gap-3 border-b border-(--border)/50 px-3 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="h-4 w-[2px] shrink-0 bg-(--hl1)" />
+          <span className="h-4 w-[2px] shrink-0 bg-(--fg)" />
           <h2 className="truncate font-mono text-[10px] font-medium uppercase tracking-[0.22em] text-(--fg)/85">
             {title}
           </h2>
@@ -392,7 +392,7 @@ function backendRows(
         value: backend.version ?? "version unknown",
         extra: running ? "active" : installed ? "installed" : "missing",
         dotClass: running
-          ? "bg-(--hl1)"
+          ? "bg-(--fg)"
           : installed
             ? "bg-(--hl2)"
             : "bg-(--dim)",
@@ -405,7 +405,7 @@ function backendRows(
         label: id,
         value: "from recipes",
         extra: running ? "active" : "configured",
-        dotClass: running ? "bg-(--hl1)" : "bg-(--dim)",
+        dotClass: running ? "bg-(--fg)" : "bg-(--dim)",
       };
     }),
   ];
@@ -414,7 +414,7 @@ function backendRows(
 function healthDotClass(status: LinuxDashboardHealth): string {
   if (status === "critical") return "bg-(--err)";
   if (status === "warning") return "bg-(--hl3)";
-  if (status === "ok") return "bg-(--hl1)";
+  if (status === "ok") return "bg-(--fg)";
   return "bg-(--dim)/55";
 }
 

@@ -100,7 +100,7 @@ export function LinuxDashboardView({
                   type="checkbox"
                   checked={autoRefresh}
                   onChange={(event) => onAutoRefreshChange(event.target.checked)}
-                  className="h-3 w-3 border-(--border) bg-transparent"
+                  className="h-3 w-3 border-(--border) bg-transparent accent-(--fg)"
                 />
                 Auto
               </label>
