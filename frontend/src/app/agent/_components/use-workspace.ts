@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { safeJson } from "@/lib/agent/safe-json";
 import { clampComputerWidth } from "@/lib/agent/tools/persistence";
 import { loadInitialFromStorage } from "@/lib/agent/workspace/persistence";
-import { createInitialState, reducer } from "@/lib/agent/workspace/store";
+import {
+  createInitialState,
+  loadPersistedActiveAgentSessions,
+  reducer,
+} from "@/lib/agent/workspace/store";
 import { makeFreshTab, newPaneId, newRuntimeId } from "@/lib/agent/session/helpers";
 import {
   runWorkspaceEffect,
@@ -25,9 +28,9 @@ import { useProjects } from "@/lib/agent/projects/context";
 import { useTools } from "@/lib/agent/tools/context";
 import type { Project } from "@/lib/agent/projects/types";
 import { paneSessions } from "@/lib/agent/sessions/selectors";
+import { runBrowserPanelCommand, type BrowserCommandResult } from "@/lib/agent/browser/command";
 import type { ChatPaneHandle, SessionTab } from "./chat-pane";
 import type { AgentBrowserHandle } from "./agent-browser";
-import { runBrowserPanelCommand, type BrowserCommandResult } from "./agent-browser-panel";
 import type { SessionDropPayload } from "./pane-grid";
 
 type BrowserCommand = { id: string; verb: string; payload: Record<string, unknown> };
@@ -375,6 +378,23 @@ export function useWorkspace(): UseWorkspaceResult {
     const { workspace, selections } = loadInitialFromStorage(window.localStorage);
     dispatch({ type: "hydrate", state: workspace });
     if (selections.size > 0) toolsRef.current.hydrateSelections(selections);
+
+    // The PROJECTS_LOADED_EVENT is a once-per-process-lifetime broadcast
+    // from ProjectsProvider. On re-mount (navigating back to the agent page
+    // after visiting another route) the event won't fire again, so we check
+    // synchronously whether projects are already loaded and hydrate active
+    // session snapshots directly. Without this, `hydrateActiveSessions` is
+    // never dispatched, `hydrated` stays false, replays are never queued, and
+    // the conversation shows stale localStorage data with no resync.
+    if (projectsRef.current.loaded) {
+      const snapshots = loadPersistedActiveAgentSessions();
+      dispatch({
+        type: "hydrateActiveSessions",
+        snapshots,
+        projects: projectsRef.current.projects,
+      });
+    }
+
     const unsub = subscribeWorkspaceWindowEvents(window, dispatch, (id) =>
       projectsRef.current.findById(id),
     );
