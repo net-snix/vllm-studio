@@ -3,6 +3,7 @@ import {
   parseCpuEnergyHelperOutput,
   parseCpuInfoIdentity,
   parseCpuPowerSampleTtl,
+  readCpuEnergyHelperSample,
 } from "./linux-dashboard-collector";
 import { parseDiskTargets } from "./linux-dashboard-disks";
 
@@ -73,6 +74,38 @@ describe("linux dashboard CPU power helper", () => {
 
   it("rejects invalid helper output", () => {
     expect(parseCpuEnergyHelperOutput("not-energy")).toBeNull();
+  });
+
+  it("reads the helper directly before falling back to sudo", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const sample = readCpuEnergyHelperSample((command, args) => {
+      calls.push({ command, args });
+      return { status: 0, stdout: "123456 999999", stderr: "" };
+    }, process.execPath);
+
+    expect(sample).toEqual({
+      energyMicrojoules: 123456,
+      maxEnergyRangeMicrojoules: 999999,
+    });
+    expect(calls).toEqual([{ command: process.execPath, args: [] }]);
+  });
+
+  it("falls back to sudo only when direct helper execution fails", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const sample = readCpuEnergyHelperSample((command, args) => {
+      calls.push({ command, args });
+      if (calls.length === 1) return { status: 1, stdout: "", stderr: "permission denied" };
+      return { status: 0, stdout: "654321 999999", stderr: "" };
+    }, process.execPath);
+
+    expect(sample).toEqual({
+      energyMicrojoules: 654321,
+      maxEnergyRangeMicrojoules: 999999,
+    });
+    expect(calls).toEqual([
+      { command: process.execPath, args: [] },
+      { command: "sudo", args: ["-n", process.execPath] },
+    ]);
   });
 });
 

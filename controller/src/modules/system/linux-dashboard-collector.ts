@@ -184,11 +184,17 @@ const readCpuEnergySample = (): CpuEnergySample | null => {
   };
 };
 
-const readCpuEnergyHelperSample = (): CpuEnergySample | null => {
-  if (!existsSync(CPU_ENERGY_HELPER)) return null;
-  const result = runCommand("sudo", ["-n", CPU_ENERGY_HELPER], 1_000);
-  if (result.status !== 0) return null;
-  return parseCpuEnergyHelperOutput(result.stdout);
+export const readCpuEnergyHelperSample = (
+  commandRunner: typeof runCommand = runCommand,
+  helperPath: string = CPU_ENERGY_HELPER,
+): CpuEnergySample | null => {
+  if (!existsSync(helperPath)) return null;
+  const directResult = commandRunner(helperPath, [], 1_000);
+  if (directResult.status === 0) return parseCpuEnergyHelperOutput(directResult.stdout);
+
+  const sudoResult = commandRunner("sudo", ["-n", helperPath], 1_000);
+  if (sudoResult.status !== 0) return null;
+  return parseCpuEnergyHelperOutput(sudoResult.stdout);
 };
 
 export const parseCpuEnergyHelperOutput = (output: string): CpuEnergySample | null => {
