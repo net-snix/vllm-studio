@@ -46,7 +46,16 @@ const roundOne = (value: number): number => Math.round(value * 10) / 10;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const SLOW_SNAPSHOT_TTL_MS = 30_000;
-const CPU_POWER_SAMPLE_TTL_MS = 5_000;
+const DEFAULT_CPU_POWER_SAMPLE_TTL_MS = 60_000;
+export const parseCpuPowerSampleTtl = (value: string | undefined, fallback: number): number => {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+const CPU_POWER_SAMPLE_TTL_MS = parseCpuPowerSampleTtl(
+  process.env["VLLM_STUDIO_CPU_POWER_SAMPLE_TTL_MS"],
+  DEFAULT_CPU_POWER_SAMPLE_TTL_MS
+);
 const CPU_ENERGY_HELPER =
   process.env["VLLM_STUDIO_CPU_ENERGY_HELPER"] ?? "/usr/local/libexec/vllm-studio/read-cpu-energy";
 
@@ -207,11 +216,13 @@ const calculateCpuPowerWatts = (
   return roundOne(delta / elapsedMs / 1000);
 };
 
-let cpuEnergyCache: {
-  sample: CpuEnergySample;
+type CpuEnergyCache = {
+  sample: CpuEnergySample | null;
   collectedAt: number;
   powerDrawWatts: number | null;
-} | null = null;
+};
+
+let cpuEnergyCache: CpuEnergyCache | null = null;
 
 const collectCpuPowerWatts = (): number | null => {
   const now = Date.now();
@@ -221,11 +232,11 @@ const collectCpuPowerWatts = (): number | null => {
 
   const sample = readCpuEnergySample();
   if (!sample) {
-    cpuEnergyCache = null;
+    cpuEnergyCache = { sample: null, collectedAt: now, powerDrawWatts: null };
     return null;
   }
 
-  const powerDrawWatts = cpuEnergyCache
+  const powerDrawWatts = cpuEnergyCache?.sample
     ? calculateCpuPowerWatts(cpuEnergyCache.sample, sample, now - cpuEnergyCache.collectedAt)
     : null;
   cpuEnergyCache = { sample, collectedAt: now, powerDrawWatts };

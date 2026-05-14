@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { parseCpuEnergyHelperOutput, parseCpuInfoIdentity } from "./linux-dashboard-collector";
+import {
+  parseCpuEnergyHelperOutput,
+  parseCpuInfoIdentity,
+  parseCpuPowerSampleTtl,
+} from "./linux-dashboard-collector";
 import { parseDiskTargets } from "./linux-dashboard-disks";
 
 const cpuEntry = (processor: number, physicalId: number, coreId: number): string => `
@@ -53,6 +57,13 @@ describe("linux dashboard CPU identity", () => {
 });
 
 describe("linux dashboard CPU power helper", () => {
+  it("accepts only positive integer cache TTL overrides", () => {
+    expect(parseCpuPowerSampleTtl("60000", 5000)).toBe(60000);
+    expect(parseCpuPowerSampleTtl("0", 5000)).toBe(5000);
+    expect(parseCpuPowerSampleTtl("1.5", 5000)).toBe(5000);
+    expect(parseCpuPowerSampleTtl("nope", 5000)).toBe(5000);
+  });
+
   it("parses privileged powercap energy samples", () => {
     expect(parseCpuEnergyHelperOutput("123456 999999")).toEqual({
       energyMicrojoules: 123456,
