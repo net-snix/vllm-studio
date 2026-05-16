@@ -74,7 +74,7 @@ export const createProcessManager = (
         continue;
       }
       let modelPath = extractFlag(proc.args, "--model") || extractFlag(proc.args, "--model-path");
-      if (!modelPath && (backend === "llamacpp" || backend === "exllamav3")) {
+      if (!modelPath && (backend === "llamacpp" || backend === "exllamav3" || backend === "ds4")) {
         modelPath = extractFlag(proc.args, "-m");
       }
       let servedModelName =

@@ -1,5 +1,4 @@
 import path from "node:path";
-import "@vitest/coverage-v8";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({

@@ -3,6 +3,7 @@ export type Backend =
   | "mlx"
   | "sglang"
   | "llamacpp"
+  | "ds4"
   | "transformers"
   | "tabbyapi"
   | "exllamav3";
@@ -44,9 +45,8 @@ export interface RecipeBase {
  * Recipe payload accepted by the controller for create/update.
  * Only `id`, `name`, and `model_path` are required; all other fields may be omitted and will be defaulted server-side.
  */
-export type RecipePayload =
-  & Pick<RecipeBase, "id" | "name" | "model_path">
-  & Partial<Omit<RecipeBase, "id" | "name" | "model_path">>;
+export type RecipePayload = Pick<RecipeBase, "id" | "name" | "model_path"> &
+  Partial<Omit<RecipeBase, "id" | "name" | "model_path">>;
 
 // ── Downloads ────────────────────────────────────────────────────────────────
 

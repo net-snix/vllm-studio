@@ -6,6 +6,7 @@ import type { Config } from "../../../config/env";
 import { asRecipeId } from "../../../types/brand";
 import type { Recipe } from "../../models/types";
 import { buildBackendCommand } from "./backend-builder";
+import { detectBackend } from "./process-utilities";
 
 const baseRecipe: Recipe = {
   id: asRecipeId("r1"),
@@ -85,6 +86,55 @@ describe("backend builder command overrides", () => {
       "/models/custom model",
       "--enable-metrics",
     ]);
+  });
+
+  it("builds DS4 server commands from explicit ds4 binary paths", () => {
+    const executable = fakeExecutable("ds4-server");
+    const command = buildBackendCommand(
+      {
+        ...baseRecipe,
+        backend: "ds4",
+        model_path: "/models/deepseek.gguf",
+        max_model_len: 32768,
+        extra_args: { ds4_bin: executable, tokens: 2048, "kv-disk-dir": "/tmp/ds4-kv" },
+      },
+      {} as Config
+    );
+
+    expect(command).toEqual([
+      executable,
+      "--cuda",
+      "-m",
+      "/models/deepseek.gguf",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000",
+      "--ctx",
+      "32768",
+      "--tokens",
+      "2048",
+      "--kv-disk-dir",
+      "/tmp/ds4-kv",
+    ]);
+  });
+
+  it("rejects non DS4 binaries for DS4 recipes", () => {
+    expect(() =>
+      buildBackendCommand(
+        {
+          ...baseRecipe,
+          backend: "ds4",
+          extra_args: { ds4_bin: "/bin/sh" },
+        },
+        {} as Config
+      )
+    ).toThrow("Invalid ds4_bin");
+  });
+
+  it("does not classify shell diagnostics mentioning DS4 as DS4", () => {
+    expect(detectBackend(["bash", "-c", "pgrep -af ds4-server || true"])).toBeNull();
+    expect(detectBackend(["/home/espen/Code/ds4/ds4-server", "--port", "8000"])).toBe("ds4");
   });
 
   it("rejects shell interpreters for exllamav3 commands", () => {

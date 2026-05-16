@@ -148,6 +148,9 @@ const splitCommand = (command: string): string[] => { const matches = command.ma
  const isAllowedLlamaServerBinary = (value: string): boolean => {
   const name = executableBaseName(value); return name === "llama-server" || name === "llama-server.exe";
 };
+const isAllowedDs4Binary = (value: string): boolean => {
+  const name = executableBaseName(value); return name === "ds4-server" || name === "ds4-server.exe";
+};
 const rejectPathTraversal = (value: string, label: string): void => { if (value.split(/[\\/]+/).includes("..")) {
     throw new Error(`Invalid ${label}: path traversal is not allowed`); }
 };
@@ -186,6 +189,38 @@ const appendRuntimeCoreArguments = (command: string[], recipe: Recipe): string[]
     commandWithDefaults.push("--model", recipe.model_path); }
  return appendExtraArguments(commandWithDefaults, recipe.extra_args);
 };
+const resolveDs4Binary = (recipe: Recipe): string => { const override = getExtraArgument(recipe.extra_args, "ds4_bin") ?? getExtraArgument(recipe.extra_args, "ds4-bin");
+  if (typeof override === "string" && override.trim()) { rejectPathTraversal(override, "ds4_bin");
+    if (!isAllowedDs4Binary(override)) { throw new Error("Invalid ds4_bin: only ds4-server executables are allowed");
+    } const resolved = resolveBinary(override);
+    if (resolved) { return resolved;
+    } throw new Error(`Invalid ds4_bin: executable "${override}" was not found`);
+  } return resolveBinary("ds4-server") ?? "ds4-server";
+};
+const appendDs4Arguments = (command: string[], extraArguments: Record<string, unknown>): string[] => {
+  const internalKeys = new Set(["venv_path", "env_vars", "visible_devices", "cuda_visible_devices", "hip_visible_devices", "rocr_visible_devices", "description", "tags", "status", "ds4_bin", "ds4-bin", "ds4_backend", "ds4-backend", "backend_mode", "backend-mode", "max_tokens", "max-tokens", "max_output_tokens", "max-output-tokens", "launch_command", "custom_command"]);
+  const filtered = Object.fromEntries(Object.entries(extraArguments).filter(([key]) => {
+    const kebab = key.replace(/_/g, "-").toLowerCase();
+    const snake = key.replace(/-/g, "_").toLowerCase();
+    return !internalKeys.has(kebab) && !internalKeys.has(snake);
+  }));
+  return appendExtraArguments(command, filtered);
+};
+/** * Build a DS4 launch command.
+ * @param recipe - Recipe data.
+ * @returns CLI command array. */
+export const buildDs4Command = (recipe: Recipe): string[] => { const command = [resolveDs4Binary(recipe)];
+  const backendMode = getExtraArgument(recipe.extra_args, "ds4_backend") ?? getExtraArgument(recipe.extra_args, "ds4-backend") ?? getExtraArgument(recipe.extra_args, "backend_mode") ?? getExtraArgument(recipe.extra_args, "backend-mode") ?? "cuda";
+  if (typeof backendMode === "string" && ["cuda", "cpu", "metal"].includes(backendMode)) { command.push(`--${backendMode}`);
+  }
+  command.push("-m", recipe.model_path, "--host", recipe.host, "--port", String(recipe.port));
+  if (recipe.max_model_len > 0) { command.push("--ctx", String(recipe.max_model_len));
+  }
+  const tokenLimit = getExtraArgument(recipe.extra_args, "tokens") ?? getExtraArgument(recipe.extra_args, "max_tokens") ?? getExtraArgument(recipe.extra_args, "max-tokens") ?? getExtraArgument(recipe.extra_args, "max_output_tokens") ?? getExtraArgument(recipe.extra_args, "max-output-tokens");
+  if (tokenLimit !== undefined && tokenLimit !== null && tokenLimit !== "") { command.push("--tokens", String(tokenLimit));
+  }
+  return appendDs4Arguments(command, recipe.extra_args);
+};
 /** * Build launch command by backend.
  * @param recipe - Recipe data. * @param config - Runtime config.
  * @param config
@@ -193,7 +228,8 @@ const appendRuntimeCoreArguments = (command: string[], recipe: Recipe): string[]
 export const buildBackendCommand = (recipe: Recipe, config: Config): string[] => { const launchCommand = getLaunchCommandOverride(recipe);
   if (launchCommand) { return launchCommand;
   }
-  if (recipe.backend === "sglang") { return buildSglangCommand(recipe, config);
+  if (recipe.backend === "ds4") { return buildDs4Command(recipe);
+  } if (recipe.backend === "sglang") { return buildSglangCommand(recipe, config);
   } if (recipe.backend === "llamacpp") {
     return buildLlamacppCommand(recipe, config); }
   if (recipe.backend === "exllamav3") { const command = buildExllamav3Command(recipe, config);

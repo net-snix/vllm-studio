@@ -76,10 +76,37 @@ describe("recipe device visibility normalization", () => {
       model_path: "/models/test",
       backend: "sglang",
       extra_args: {
-        launch_command: "python -m sglang.launch_server --model-path /models/custom --grammar-backend xgrammar",
+        launch_command:
+          "python -m sglang.launch_server --model-path /models/custom --grammar-backend xgrammar",
       },
     });
 
-    expect(command).toBe("python -m sglang.launch_server --model-path /models/custom --grammar-backend xgrammar");
+    expect(command).toBe(
+      "python -m sglang.launch_server --model-path /models/custom --grammar-backend xgrammar",
+    );
+  });
+
+  it("hides DS4 internal fields from command previews", () => {
+    const command = generateCommand({
+      id: "deepseek-v4-flash-ds4",
+      name: "DeepSeek V4 Flash DS4",
+      model_path: "/models/deepseek-v4-flash.gguf",
+      backend: "ds4",
+      max_model_len: 100000,
+      served_model_name: "deepseek-v4-flash",
+      extra_args: {
+        ds4_bin: "/home/espen/Code/ds4/ds4-server",
+        tokens: 384000,
+        "kv-disk-dir": "/tmp/ds4-kv",
+      },
+    });
+
+    expect(command).toContain("ds4-server --cuda");
+    expect(command).toContain("-m /models/deepseek-v4-flash.gguf");
+    expect(command).toContain("--ctx 100000");
+    expect(command).toContain("--tokens 384000");
+    expect(command).toContain("--kv-disk-dir /tmp/ds4-kv");
+    expect(command).not.toContain("--served-model-name");
+    expect(command).not.toContain("--ds4-bin");
   });
 });
