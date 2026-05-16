@@ -35,7 +35,8 @@ const processFor = (activeRecipe: Recipe, port: number): ProcessInfo => ({
 
 const createCoordinator = (
   initialRecipe: Recipe | null = null,
-  healthStatus: number = 200
+  healthStatus: number = 200,
+  responseStatusByPath: Record<string, number> = {}
 ): {
   coordinator: EngineCoordinator;
   recipes: [Recipe, Recipe];
@@ -46,7 +47,10 @@ const createCoordinator = (
 } => {
   const server = Bun.serve({
     port: 0,
-    fetch: () => new Response("ok", { status: healthStatus }),
+    fetch: (request) => {
+      const path = new URL(request.url).pathname;
+      return new Response("ok", { status: responseStatusByPath[path] ?? healthStatus });
+    },
   });
   servers.push(server);
 
@@ -148,6 +152,20 @@ describe("EngineCoordinator.setActiveRecipe", () => {
     expect(launched).toEqual([recipes[0]]);
     expect(killed).toHaveLength(0);
     expect(coordinator.getCurrentRecipe()).toBe(recipes[0]);
+    expect(events.map((event) => event.stage)).toEqual(["launching", "waiting", "ready"]);
+  });
+
+  it("uses the OpenAI models endpoint as the DS4 readiness check", async () => {
+    const { coordinator, recipes, launched, killed, events } = createCoordinator(null, 503, {
+      "/v1/models": 200,
+    });
+    const target = { ...recipes[0], backend: "ds4" as const };
+
+    await expect(coordinator.setActiveRecipe(target)).resolves.toEqual({ ok: true });
+
+    expect(launched).toEqual([target]);
+    expect(killed).toHaveLength(0);
+    expect(coordinator.getCurrentRecipe()).toBe(target);
     expect(events.map((event) => event.stage)).toEqual(["launching", "waiting", "ready"]);
   });
 

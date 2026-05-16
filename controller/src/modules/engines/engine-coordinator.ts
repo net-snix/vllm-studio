@@ -121,7 +121,7 @@ interface CoordinatorDeps { config: Config;
           const snippet = index >= 0 ? lines.slice(Math.max(0, index - 1), index + 3).join("\n") : pattern; return { ready: false, message: `Fatal error: ${snippet.slice(0, 300)}` };
         } }
  try {
-        const { fetchLocal } = await import("../../http/local-fetch"); const response = await fetchLocal(this.deps.config.inference_port, "/health", {
+        const { fetchLocal } = await import("../../http/local-fetch"); const response = await fetchLocal(this.deps.config.inference_port, this.readinessPathFor(options.recipe), {
           timeoutMs: 5000, });
         if (response.status === 200) { return { ready: true };
         } } catch {
@@ -132,6 +132,10 @@ interface CoordinatorDeps { config: Config;
  return {
       ready: false, message: `Model ${options.recipe.id} failed to become ready (timeout)`,
     }; }
+
+  private readinessPathFor(recipe: Recipe): string {
+    return recipe.backend === "ds4" ? "/v1/models" : "/health";
+  }
  /**
    * * @param current
    * @param current
