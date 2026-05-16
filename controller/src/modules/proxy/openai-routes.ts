@@ -5,8 +5,7 @@ import { HttpStatus, notFound, serviceUnavailable } from "../../core/errors";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import { buildSseHeaders } from "../../http/sse";
 import type { AppContext } from "../../types/context";
-import type { ProcessInfo, Recipe } from "../models/types";
-import type { LaunchState } from "../engines/process/launch-state";
+import type { Recipe } from "../models/types";
 import { buildInferenceUrl } from "../../services/inference/inference-client";
 import {
   DEFAULT_CHAT_PROVIDER,
@@ -23,11 +22,15 @@ import {
   recordNonStreamingInferenceUsage,
   recordStreamingInferenceUsage,
 } from "./inference-accounting";
-import {
-  DEFAULT_OPENAI_MODEL_ACTIVATION_POLICY,
-  PROXY_SESSION_HEADER_NAMES,
-} from "./configs";
-import type { OpenAIModelActivationPolicy, OpenAIUsage } from "./types";
+import { PROXY_SESSION_HEADER_NAMES } from "./configs";
+import type { OpenAIUsage } from "./types";
+
+const NON_RUNNING_MODEL_WARN_INTERVAL_MS = 10 * 60_000;
+
+interface NonRunningModelWarningState {
+  lastWarnAt: number;
+  suppressed: number;
+}
 
 export const ensureStreamingUsageIncluded = (payload: Record<string, unknown>): boolean => {
   if (!Boolean(payload["stream"])) return false;
@@ -43,19 +46,6 @@ export const ensureStreamingUsageIncluded = (payload: Record<string, unknown>): 
     include_usage: true,
   };
   return true;
-};
-
-export const getLaunchInProgressMessage = (
-  launchState: LaunchState,
-  requestedRecipeId: string
-): string | null => {
-  const snapshot = launchState.getState();
-  if (snapshot.phase === "idle") return null;
-  const activeRecipeId = snapshot.recipeId ?? "unknown";
-  if (activeRecipeId === requestedRecipeId) {
-    return `Model ${requestedRecipeId} is still launching; refusing to start a duplicate activation`;
-  }
-  return `Model ${activeRecipeId} is still launching; refusing to auto-launch ${requestedRecipeId}`;
 };
 
 const exposeReasoningAsContentWhenEmpty = (
@@ -84,6 +74,39 @@ const exposeReasoningAsContentWhenEmpty = (
 };
 
 export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
+  const nonRunningModelWarnings = new Map<string, NonRunningModelWarningState>();
+
+  const warnNonRunningModel = (details: {
+    requestedModel: string | null;
+    requestedRecipeId: string;
+    activeModel: string | null;
+    source: string | null;
+  }): void => {
+    const key = [
+      details.requestedRecipeId,
+      details.requestedModel ?? "",
+      details.activeModel ?? "",
+      details.source ?? "",
+    ].join("\u0000");
+    const now = Date.now();
+    const state = nonRunningModelWarnings.get(key) ?? { lastWarnAt: 0, suppressed: 0 };
+    if (now - state.lastWarnAt < NON_RUNNING_MODEL_WARN_INTERVAL_MS) {
+      state.suppressed += 1;
+      nonRunningModelWarnings.set(key, state);
+      return;
+    }
+
+    const suppressed = state.suppressed;
+    nonRunningModelWarnings.set(key, { lastWarnAt: now, suppressed: 0 });
+    context.logger.warn("Rejected chat request for non-running model", {
+      requested_model: details.requestedModel,
+      requested_recipe_id: details.requestedRecipeId,
+      active_model: details.activeModel,
+      source: details.source,
+      ...(suppressed > 0 ? { suppressed_requests: suppressed } : {}),
+    });
+  };
+
   const extractSessionId = (
     parsedBody: Record<string, unknown>,
     header: (name: string) => string | undefined
@@ -139,44 +162,6 @@ export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
       }
     }
     return null;
-  };
-
-  const ensureRecipeIsActive = async (
-    recipe: Recipe,
-    current: ProcessInfo | null,
-    policy: OpenAIModelActivationPolicy
-  ): Promise<void> => {
-    const launchInProgress = getLaunchInProgressMessage(context.launchState, recipe.id);
-    if (launchInProgress) {
-      throw serviceUnavailable(launchInProgress);
-    }
-
-    if (current && !isRecipeRunning(recipe, current, { allowEitherPathContains: true })) {
-      if (policy === "switch_on_request") {
-        const switchResult = await context.engineService.ensureActive(recipe, {
-          force_evict: false,
-        });
-        if (switchResult.error) {
-          throw serviceUnavailable(switchResult.error);
-        }
-      }
-      return;
-    }
-
-    const shouldTrackAutoLaunch = !current && context.launchState.getState().phase === "idle";
-    if (shouldTrackAutoLaunch) context.launchState.markLaunching(recipe.id);
-    try {
-      const switchResult = await context.engineService.ensureActive(recipe, {
-        force_evict: false,
-      });
-      if (switchResult.error) {
-        throw serviceUnavailable(switchResult.error);
-      }
-    } finally {
-      if (shouldTrackAutoLaunch && context.launchState.getLaunchingRecipeId() === recipe.id) {
-        context.launchState.markIdle();
-      }
-    }
   };
 
   app.post("/v1/chat/completions", async (ctx) => {
@@ -264,36 +249,31 @@ export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
       throw notFound(`Model not managed: ${requestedModel}`);
     }
 
+    // Chat proxy never launches or switches models. The frontend's explicit
+    // /engines/* and /recipes/:id/launch endpoints are the only authorized
+    // path to control which model is running. If the requested model isn't
+    // running, reject with 503 so the caller can ask the frontend to launch
+    // it instead of silently thrashing the GPU.
     if (matchedRecipe) {
       const current = await context.processManager.findInferenceProcess(
         context.config.inference_port
       );
-      const policy =
-        context.config.openai_model_activation_policy ?? DEFAULT_OPENAI_MODEL_ACTIVATION_POLICY;
-      context.logger.info("OpenAI model activation check", {
-        requested_model: requestedModel,
-        recipe_id: matchedRecipe.id,
-        policy,
-        current_model: current?.served_model_name ?? current?.model_path ?? null,
-        source: sourceHeader,
-      });
-      const isMismatchedActive = Boolean(
-        current && !isRecipeRunning(matchedRecipe, current, { allowEitherPathContains: true })
-      );
-
-      if (isMismatchedActive && policy === "load_if_idle") {
-        const activeModel = current?.served_model_name ?? current?.model_path ?? "unknown";
-        context.logger.warn("Rejected mismatched OpenAI model request", {
-          requested_model: requestedModel,
-          requested_recipe_id: matchedRecipe.id,
-          active_model: activeModel,
+      const matches =
+        current &&
+        isRecipeRunning(matchedRecipe, current, { allowEitherPathContains: true });
+      if (!matches) {
+        const activeModel = current?.served_model_name ?? current?.model_path ?? null;
+        warnNonRunningModel({
+          requestedModel,
+          requestedRecipeId: matchedRecipe.id,
+          activeModel,
           source: sourceHeader,
         });
         throw serviceUnavailable(
-          `Model ${activeModel} is already running; refusing request for ${requestedModel}`
+          activeModel
+            ? `Model ${activeModel} is running; ${requestedModel} is not. Launch it from the frontend before sending requests.`
+            : `No model is running. Launch ${requestedModel} from the frontend before sending requests.`
         );
-      } else {
-        await ensureRecipeIsActive(matchedRecipe, current, policy);
       }
     }
 

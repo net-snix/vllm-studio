@@ -1,11 +1,7 @@
 // CRITICAL
 import { describe, expect, it } from "bun:test";
-import { createLaunchState } from "../engines/process/launch-state";
 import { normalizeToolRequest } from "./content-normalizer";
-import {
-  ensureStreamingUsageIncluded,
-  getLaunchInProgressMessage,
-} from "./openai-routes";
+import { ensureStreamingUsageIncluded } from "./openai-routes";
 
 describe("openai route request normalization", () => {
   it("omits empty tools arrays for vLLM-compatible requests", () => {
@@ -130,21 +126,4 @@ describe("openai route request normalization", () => {
     ).toBe(true);
   });
 
-  it("blocks auto-activation while another launch is in progress", () => {
-    const launchState = createLaunchState();
-    launchState.markLaunching("trinity-large-thinking-nvfp4");
-
-    expect(getLaunchInProgressMessage(launchState, "mimo-v2.5")).toBe(
-      "Model trinity-large-thinking-nvfp4 is still launching; refusing to auto-launch mimo-v2.5"
-    );
-  });
-
-  it("blocks duplicate auto-activation for the same launching recipe", () => {
-    const launchState = createLaunchState();
-    launchState.markLaunching("trinity-large-thinking-nvfp4");
-
-    expect(getLaunchInProgressMessage(launchState, "trinity-large-thinking-nvfp4")).toBe(
-      "Model trinity-large-thinking-nvfp4 is still launching; refusing to start a duplicate activation"
-    );
-  });
 });
