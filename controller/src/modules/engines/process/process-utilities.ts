@@ -42,18 +42,21 @@ export const detectBackend = (args: string[]): Backend | null => {
     return null;
   }
   const joined = args.join(" ");
-  if (joined.includes("vllm.entrypoints.openai.api_server")) {
+  const executableName = args[0]?.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? "";
+  const basename = (value: string): string =>
+    value.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? "";
+
+  if (executableName === "ds4-server" || executableName === "ds4-server.exe") {
+    return "ds4";
+  }
+  if (args.some((arg) => arg.includes("vllm.entrypoints.openai.api_server"))) {
     return "vllm";
   }
-  if (joined.includes("vllm") && joined.includes("serve")) {
+  if (args.some((arg, index) => basename(arg) === "vllm" && args[index + 1] === "serve")) {
     return "vllm";
   }
   if (joined.includes("sglang.launch_server")) {
     return "sglang";
-  }
-  const executableName = args[0]?.split(/[\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? "";
-  if (executableName === "ds4-server" || executableName === "ds4-server.exe") {
-    return "ds4";
   }
   const joinedLower = joined.toLowerCase();
   if (joinedLower.includes("exllama") || joinedLower.includes("exllamav3")) {

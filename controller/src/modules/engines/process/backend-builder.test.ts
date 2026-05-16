@@ -134,6 +134,13 @@ describe("backend builder command overrides", () => {
 
   it("does not classify shell diagnostics mentioning DS4 as DS4", () => {
     expect(detectBackend(["bash", "-c", "pgrep -af ds4-server || true"])).toBeNull();
+    expect(
+      detectBackend([
+        "ssh",
+        "espenpro6000",
+        "cd /home/espen/Code/vllm-studio && curl /launch/x && ps -C ds4-server",
+      ])
+    ).toBeNull();
     expect(detectBackend(["/home/espen/Code/ds4/ds4-server", "--port", "8000"])).toBe("ds4");
   });
 
