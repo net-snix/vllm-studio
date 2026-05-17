@@ -42,6 +42,8 @@ export interface ProcessInfo {
   model_path: string | null;
   port: number;
   served_model_name: string | null;
+  executable_path?: string | null;
+  runtime_env?: Record<string, string> | null;
 }
 
 export interface LaunchResult {

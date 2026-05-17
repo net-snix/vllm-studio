@@ -51,6 +51,24 @@ export const createProcessManager = (
   logger: Logger,
   eventManager?: EventManager
 ): ProcessManager => {
+  const readRuntimeEnvironment = (pid: number): Record<string, string> | null => {
+    try {
+      const content = readFileSync(`/proc/${pid}/environ`, "utf-8");
+      const entries = content.split("\0").filter(Boolean);
+      const environment: Record<string, string> = {};
+      for (const entry of entries) {
+        const separator = entry.indexOf("=");
+        if (separator <= 0) continue;
+        const key = entry.slice(0, separator);
+        if (!key.startsWith("DS4_") && key !== "CUDA_VISIBLE_DEVICES") continue;
+        environment[key] = entry.slice(separator + 1);
+      }
+      return environment;
+    } catch {
+      return null;
+    }
+  };
+
   /**
    * Locate the inference process by port.
    * @param port - Port to match.
@@ -114,6 +132,8 @@ export const createProcessManager = (
                 model_path: "tabbyapi:unknown",
                 port,
                 served_model_name: servedModelName ?? "GLM-4.7",
+                executable_path: proc.args[0] ?? null,
+                runtime_env: readRuntimeEnvironment(proc.pid),
               };
             }
           }
@@ -132,6 +152,8 @@ export const createProcessManager = (
           model_path: "tabbyapi:unknown",
           port,
           served_model_name: servedModelName ?? "GLM-4.7",
+          executable_path: proc.args[0] ?? null,
+          runtime_env: readRuntimeEnvironment(proc.pid),
         };
       }
 
@@ -141,6 +163,8 @@ export const createProcessManager = (
         model_path: modelPath ?? null,
         port,
         served_model_name: servedModelName ?? null,
+        executable_path: proc.args[0] ?? null,
+        runtime_env: readRuntimeEnvironment(proc.pid),
       };
     }
     return null;
