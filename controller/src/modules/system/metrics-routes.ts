@@ -5,6 +5,7 @@ import type { AppContext } from "../../types/context";
 import { getGpuInfo } from "./platform/gpu";
 import { fetchInference } from "../../services/inference/inference-client";
 import { fetchLocal } from "../../http/local-fetch";
+import { getProcessModelId, scrapeDs4Throughput } from "./log-throughput";
 
 type UsageAggregate = {
   totals?: {
@@ -87,8 +88,9 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
     };
   }
 
-  const modelId = current.served_model_name ?? current.model_path?.split("/").pop() ?? "unknown";
+  const modelId = getProcessModelId(context, current);
   const isSglang = current.backend === "sglang";
+  const ds4Sample = current.backend === "ds4" ? scrapeDs4Throughput(context, current) : null;
   const prometheus =
     current.backend === "vllm" || current.backend === "sglang"
       ? await scrapePrometheusMetrics(context.config.inference_port)
@@ -147,19 +149,28 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
       positiveOrUndefined(usageTotals?.completion_tokens),
     total_tokens: positiveOrUndefined(usageTotals?.total_tokens),
     total_requests: positiveOrUndefined(usageTotals?.total_requests),
-    prompt_throughput: firstMetric(
-      prometheus,
-      isSglang
-        ? ["sglang:prompt_throughput", "sglang:prefill_throughput"]
-        : ["vllm:prompt_throughput", "vllm:prefill_throughput"]
-    ),
-    generation_throughput: firstMetric(
-      prometheus,
-      isSglang
-        ? ["sglang:gen_throughput", "sglang:generation_throughput"]
-        : ["vllm:gen_throughput", "vllm:generation_throughput"]
-    ),
-    avg_ttft_ms: avgTtftMs > 0 ? Math.round(avgTtftMs * 10) / 10 : usageAggregate?.ttft?.avg_ms,
+    prompt_throughput:
+      ds4Sample?.promptTps ??
+      firstMetric(
+        prometheus,
+        isSglang
+          ? ["sglang:prompt_throughput", "sglang:prefill_throughput"]
+          : ["vllm:prompt_throughput", "vllm:prefill_throughput"]
+      ),
+    generation_throughput:
+      ds4Sample?.generationTps ??
+      firstMetric(
+        prometheus,
+        isSglang
+          ? ["sglang:gen_throughput", "sglang:generation_throughput"]
+          : ["vllm:gen_throughput", "vllm:generation_throughput"]
+      ),
+    avg_ttft_ms:
+      ds4Sample && ds4Sample.ttftMs > 0
+        ? Math.round(ds4Sample.ttftMs * 10) / 10
+        : avgTtftMs > 0
+          ? Math.round(avgTtftMs * 10) / 10
+          : usageAggregate?.ttft?.avg_ms,
     latency_avg: positiveOrUndefined(usageAggregate?.latency?.avg_ms),
     peak_prefill_tps: peakData?.["prefill_tps"] ?? null,
     peak_generation_tps: peakData?.["generation_tps"] ?? null,
