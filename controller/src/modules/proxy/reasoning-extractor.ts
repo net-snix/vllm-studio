@@ -1,10 +1,12 @@
-import { parseToolCallsFromContent } from "./tool-call-parser";
+import {
+  parseToolCallsFromContent,
+  stripControlTagNoise,
+  stripToolCallProtocolBlocks,
+} from "./tool-call-parser";
 
 const stripToolCallXmlBlocks = (text: string): string => {
   if (!text) return "";
-  let cleaned = text;
-  cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "");
-  cleaned = cleaned.replace(/<?use_mcp[\s_]*tool>[\s\S]*?<\/use_mcp[\s_]*tool>/gi, "");
+  let cleaned = stripToolCallProtocolBlocks(stripControlTagNoise(text));
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
   return cleaned.trim();
 };

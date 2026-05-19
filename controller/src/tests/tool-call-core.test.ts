@@ -60,6 +60,15 @@ describe("tool-call-core", () => {
     expect(calls[0]?.function.arguments).toContain('"Paris"');
   });
 
+  it("parses DSML tool calls from DeepSeek output", () => {
+    const content = `<｜DSML｜tool_calls><｜DSML｜invoke name="bash"><｜DSML｜parameter name="command" string="true">cd /home/espen/Code/vllm-studio && find . -maxdepth 2</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`;
+    const calls = parseToolCallsFromContent(content);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.function.name).toBe("bash");
+    expect(calls[0]?.function.arguments).toContain('"command"');
+    expect(calls[0]?.function.arguments).toContain("find . -maxdepth 2");
+  });
+
   it("parses JSON fallback tool calls with nested braces in arguments", () => {
     const content = `{"name":"write_file","arguments":{"path":"app.ts","content":"const x = {a: {b: 1}}"}}`;
     const calls = parseToolCallsFromContent(content);
@@ -101,6 +110,23 @@ describe("tool-call-core", () => {
     expect(message["reasoning_content"]).toBe("normal reasoning");
   });
 
+  it("strips DSML tool blocks and monitor scrub noise from visible message fields", () => {
+    const message: Record<string, unknown> = {
+      content:
+        'Before <｜DSML｜tool_calls><｜DSML｜invoke name="bash"><｜DSML｜parameter name="command" string="true">pwd</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls> after',
+      reasoning_content: "<monitor><scrub><monitor><scrub>",
+    };
+
+    expect(normalizeToolCallsInMessage(message)).toBe(true);
+    normalizeReasoningAndContentInMessage(message);
+
+    expect(message["content"]).toBe("Before  after");
+    expect(message["reasoning_content"]).toBeUndefined();
+    expect(JSON.stringify(message)).not.toContain("DSML");
+    expect(JSON.stringify(message)).not.toContain("monitor");
+    expect(JSON.stringify(message)).not.toContain("scrub");
+  });
+
   it("injects tool_calls before [DONE] for streaming XML", async () => {
     const encoder = new TextEncoder();
     const source = new ReadableStream<Uint8Array>({
@@ -115,6 +141,25 @@ describe("tool-call-core", () => {
     expect(output).toContain('"tool_calls"');
     expect(output).toContain('"name":"calc"');
     expect(output).toContain("data: [DONE]");
+  });
+
+  it("injects tool_calls and hides complete streaming DSML blocks", async () => {
+    const encoder = new TextEncoder();
+    const dsml =
+      '<｜DSML｜tool_calls><｜DSML｜invoke name="bash"><｜DSML｜parameter name="command" string="true">pwd</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>';
+    const source = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: dsml } }] })}\n\n`));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const stream = createToolCallStream(source.getReader());
+    const output = await collectStream(stream);
+    expect(output).toContain('"tool_calls"');
+    expect(output).toContain('"name":"bash"');
+    expect(output).not.toContain("DSML");
+    expect(output).not.toContain("pwd</");
   });
 
   it("calls first-token hook once when visible streaming output starts", async () => {

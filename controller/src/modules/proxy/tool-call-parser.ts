@@ -32,6 +32,13 @@ const coerceArguments = (value: unknown): string => {
   }
 };
 
+const readAttribute = (attributes: string, name: string): string => {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, "i");
+  const match = attributes.match(pattern);
+  return String(match?.[2] ?? match?.[3] ?? match?.[4] ?? "").trim();
+};
+
 const parseParameterBlocks = (block: string): Record<string, unknown> | null => {
   const args: Record<string, unknown> = {};
   const parameterPattern = /<parameter(?:\s+name=|=)([^>\s]+)>([\s\S]*?)<\/parameter>/gi;
@@ -50,6 +57,66 @@ const parseParameterBlocks = (block: string): Record<string, unknown> | null => 
     args[name] = parsed ?? rawValue;
   }
   return found ? args : null;
+};
+
+const parseValue = (raw: string): unknown => {
+  const value = raw.trim();
+  if (!value) return "";
+  if (value.startsWith("{") || value.startsWith("[")) {
+    return safeJsonParse(value) ?? value;
+  }
+  return value;
+};
+
+const parseDsmlParameters = (block: string): Record<string, unknown> => {
+  const args: Record<string, unknown> = {};
+  const parameterPattern =
+    /<\s*[｜|]\s*DSML\s*[｜|]\s*parameter\b([^>]*)>([\s\S]*?)(?:<\s*[｜|]\s*\/\s*DSML\s*[｜|]\s*parameter\s*>|<\s*\/\s*[｜|]\s*DSML\s*[｜|]\s*parameter\s*>)/gi;
+  for (const match of block.matchAll(parameterPattern)) {
+    const attributes = String(match[1] ?? "");
+    const name = readAttribute(attributes, "name");
+    if (!name) continue;
+    args[name] = parseValue(String(match[2] ?? ""));
+  }
+  return args;
+};
+
+const parseDsmlToolCalls = (content: string): ToolCall[] => {
+  const toolCalls: ToolCall[] = [];
+  const invokePattern =
+    /<\s*[｜|]\s*DSML\s*[｜|]\s*invoke\b([^>]*)>([\s\S]*?)(?:<\s*[｜|]\s*\/\s*DSML\s*[｜|]\s*invoke\s*>|<\s*\/\s*[｜|]\s*DSML\s*[｜|]\s*invoke\s*>)/gi;
+  for (const match of content.matchAll(invokePattern)) {
+    const name = readAttribute(String(match[1] ?? ""), "name");
+    if (!name) continue;
+    const block = String(match[2] ?? "");
+    const args = parseDsmlParameters(block);
+    toolCalls.push(buildToolCall(name, args, toolCalls.length));
+  }
+  return toolCalls;
+};
+
+export const stripToolCallProtocolBlocks = (text: string): string => {
+  if (!text) return "";
+  return text
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<?use_mcp[\s_]*tool>[\s\S]*?<\/use_mcp[\s_]*tool>/gi, "")
+    .replace(
+      /<\s*[｜|]\s*DSML\s*[｜|]\s*tool_calls\b[^>]*>[\s\S]*?(?:<\s*[｜|]\s*\/\s*DSML\s*[｜|]\s*tool_calls\s*>|<\s*\/\s*[｜|]\s*DSML\s*[｜|]\s*tool_calls\s*>|$)/gi,
+      ""
+    )
+    .replace(
+      /<\s*[｜|]\s*DSML\s*[｜|]\s*invoke\b[^>]*>[\s\S]*?(?:<\s*[｜|]\s*\/\s*DSML\s*[｜|]\s*invoke\s*>|<\s*\/\s*[｜|]\s*DSML\s*[｜|]\s*invoke\s*>|$)/gi,
+      ""
+    )
+    .replace(/<\s*\/\s*[｜|]\s*DSML\s*[｜|][^>]*>/gi, "")
+    .replace(/<\s*[｜|]\s*\/?\s*DSML\s*[｜|][^>]*>/gi, "");
+};
+
+export const stripControlTagNoise = (text: string): string => {
+  if (!text) return "";
+  return text
+    .replace(/(?:\s*<\/?(?:monitor|scrub)>\s*){2,}/gi, " ")
+    .replace(/<\/?(?:monitor|scrub)>/gi, "");
 };
 
 const extractBalancedValue = (input: string, start: number): string | null => {
@@ -131,7 +198,7 @@ const buildToolCall = (name: string, args: unknown, index: number): ToolCall => 
 
 export const parseToolCallsFromContent = (content: string): ToolCall[] => {
   if (!content) return [];
-  const toolCalls: ToolCall[] = [];
+  const toolCalls: ToolCall[] = parseDsmlToolCalls(content);
 
   const toolCallPattern = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
   for (const match of content.matchAll(toolCallPattern)) {
