@@ -26,8 +26,20 @@ import {
 } from "./upgrade-config";
 
 const SYSTEM_RUNTIME_CACHE_TTL_MS = 30_000;
+const EXLLAMAV3_RUNTIME_CACHE_TTL_MS = 10 * 60_000;
+const LLAMACPP_RUNTIME_CACHE_TTL_MS = 10 * 60_000;
 let systemRuntimeCache: { expiresAt: number; value: SystemRuntimeInfo } | null = null;
 let systemRuntimeInFlight: Promise<SystemRuntimeInfo> | null = null;
+let exllamav3RuntimeCache: {
+  binary: string | null;
+  expiresAt: number;
+  value: RuntimeBackendInfo;
+} | null = null;
+let llamacppRuntimeCache: {
+  binary: string | null;
+  expiresAt: number;
+  value: RuntimeBackendInfo;
+} | null = null;
 
 export const getSystemRuntimeInfo = async (
   config: Config,
@@ -217,16 +229,31 @@ export const getExllamav3RuntimeInfo = (config: Config): RuntimeBackendInfo => {
   const binary = resolveExllamav3Binary(config);
   if (!binary)
     return { installed: false, version: null, binary_path: null, upgrade_command_available: false };
-  const versionResult = runCommand(binary, ["--version"]);
+  const now = Date.now();
+  if (
+    exllamav3RuntimeCache &&
+    exllamav3RuntimeCache.binary === binary &&
+    exllamav3RuntimeCache.expiresAt > now
+  ) {
+    return exllamav3RuntimeCache.value;
+  }
+
+  const versionResult = runCommand(binary, ["--version"], 2_000);
   let version = parseLlamaVersion(versionResult.stdout) ?? parseLlamaVersion(versionResult.stderr);
   let installed = versionResult.status === 0;
   if (!installed) {
-    const helpResult = runCommand(binary, ["--help"]);
+    const helpResult = runCommand(binary, ["--help"], 2_000);
     installed = helpResult.status === 0;
     version =
       version ?? parseLlamaVersion(helpResult.stdout) ?? parseLlamaVersion(helpResult.stderr);
   }
-  return { installed, version, binary_path: binary, upgrade_command_available: false };
+  const value = { installed, version, binary_path: binary, upgrade_command_available: false };
+  exllamav3RuntimeCache = {
+    binary,
+    expiresAt: Date.now() + EXLLAMAV3_RUNTIME_CACHE_TTL_MS,
+    value,
+  };
+  return value;
 };
 
 export const getLlamacppRuntimeInfo = (config: Config): RuntimeBackendInfo => {
@@ -234,32 +261,60 @@ export const getLlamacppRuntimeInfo = (config: Config): RuntimeBackendInfo => {
   const resolved =
     resolveBinary(configured) ?? (existsSync(configured) ? resolve(configured) : null);
   const binary = resolved ?? configured;
-  const versionResult = runCommand(binary, ["--version"]);
+  const now = Date.now();
+  if (
+    llamacppRuntimeCache &&
+    llamacppRuntimeCache.binary === binary &&
+    llamacppRuntimeCache.expiresAt > now
+  ) {
+    return llamacppRuntimeCache.value;
+  }
+
+  const versionResult = runCommand(binary, ["--version"], 2_000);
   if (versionResult.status !== 0) {
-    const helpResult = runCommand(binary, ["--help"]);
-    if (helpResult.status !== 0)
-      return {
+    const helpResult = runCommand(binary, ["--help"], 2_000);
+    if (helpResult.status !== 0) {
+      const value = {
         installed: false,
         version: null,
         binary_path: resolved,
         upgrade_command_available: isUpgradeCommandConfigured(LLAMACPP_UPGRADE_ENV),
       };
+      llamacppRuntimeCache = {
+        binary,
+        expiresAt: Date.now() + LLAMACPP_RUNTIME_CACHE_TTL_MS,
+        value,
+      };
+      return value;
+    }
     const version = parseLlamaVersion(helpResult.stdout) ?? parseLlamaVersion(helpResult.stderr);
-    return {
+    const value = {
       installed: Boolean(version),
       version,
       binary_path: resolved,
       upgrade_command_available: isUpgradeCommandConfigured(LLAMACPP_UPGRADE_ENV),
     };
+    llamacppRuntimeCache = {
+      binary,
+      expiresAt: Date.now() + LLAMACPP_RUNTIME_CACHE_TTL_MS,
+      value,
+    };
+    return value;
   }
   const version =
     parseLlamaVersion(versionResult.stdout) ?? parseLlamaVersion(versionResult.stderr);
-  return {
+  const value = {
     installed: Boolean(version),
     version,
     binary_path: resolved,
     upgrade_command_available: isUpgradeCommandConfigured(LLAMACPP_UPGRADE_ENV),
   };
+  llamacppRuntimeCache = {
+    binary,
+    expiresAt: Date.now() + LLAMACPP_RUNTIME_CACHE_TTL_MS,
+    value,
+  };
+  return value;
 };
 
 const extractCudaVersion = (output: string): string | null => {

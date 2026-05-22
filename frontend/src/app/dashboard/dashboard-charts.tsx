@@ -1,21 +1,18 @@
-import type {
-  LinuxDashboardGpu,
-  LinuxDashboardHealth,
-  LinuxDashboardSnapshot,
-} from "@/lib/types";
+import type { LinuxDashboardGpu, LinuxDashboardHealth, LinuxDashboardSnapshot } from "@/lib/types";
 import { formatBytes, formatPercent, formatTemp } from "./dashboard-format";
-import type {
-  DashboardHistoryPoint,
-  DashboardUsageSample,
+import {
+  getCpuUsageSamples,
+  getGpuUsageSamples,
+  type DashboardHistoryPoint,
+  type DashboardUsageSample,
 } from "./dashboard-history";
-import { getCpuUsageSamples, getGpuUsageSamples } from "./dashboard-history";
 import { Meter, Section } from "./dashboard-system-sections";
 
 const CHART_WIDTH = 360;
 const CHART_HEIGHT = 96;
 const CHART_PAD = 6;
 const CHART_WINDOW_MS = 30 * 60 * 1000;
-const COMPACT_CHART_WINDOW_MS = 5 * 60 * 1000;
+const COMPACT_CHART_WINDOW_MS = 60 * 1000;
 
 type ChartPoint = {
   x: number;
@@ -24,9 +21,7 @@ type ChartPoint = {
 
 type ChartScale = "percent" | "active";
 
-const latestNumber = (
-  values: Array<number | null | undefined>,
-): number | null => {
+const latestNumber = (values: Array<number | null | undefined>): number | null => {
   for (let index = values.length - 1; index >= 0; index -= 1) {
     const value = values[index];
     if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -52,17 +47,11 @@ const samplesInWindow = (
   return samples.filter((sample) => sample.time >= start && sample.time <= end);
 };
 
-const chartScaleMax = (
-  samples: DashboardUsageSample[],
-  scale: ChartScale,
-): number => {
+const chartScaleMax = (samples: DashboardUsageSample[], scale: ChartScale): number => {
   if (scale === "percent") return 100;
   const values = samples
     .map((sample) => sample.value)
-    .filter(
-      (value): value is number =>
-        typeof value === "number" && Number.isFinite(value),
-    );
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   const peak = values.length > 0 ? Math.max(...values) : 0;
   if (peak <= 10) return 10;
   if (peak <= 25) return 25;
@@ -79,18 +68,16 @@ const toChartPoints = (
   scaleMax: number,
   windowMs: number,
 ): ChartPoint[] => {
-  const visibleSamples = samples.flatMap(
-    (sample): Array<{ time: number; value: number }> => {
-      if (
-        typeof sample.value !== "number" ||
-        !Number.isFinite(sample.value) ||
-        !Number.isFinite(sample.time)
-      ) {
-        return [];
-      }
-      return [{ time: sample.time, value: sample.value }];
-    },
-  );
+  const visibleSamples = samples.flatMap((sample): Array<{ time: number; value: number }> => {
+    if (
+      typeof sample.value !== "number" ||
+      !Number.isFinite(sample.value) ||
+      !Number.isFinite(sample.time)
+    ) {
+      return [];
+    }
+    return [{ time: sample.time, value: sample.value }];
+  });
   const first = visibleSamples[0];
   const last = visibleSamples.at(-1);
   if (!first || !last) return [];
@@ -101,9 +88,7 @@ const toChartPoints = (
 
   return visibleSamples.flatMap((sample): ChartPoint[] => {
     const value = sample.value;
-    const x =
-      CHART_PAD +
-      ((sample.time - start) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
+    const x = CHART_PAD + ((sample.time - start) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
     const y =
       CHART_PAD +
       ((scaleMax - Math.min(scaleMax, Math.max(0, value))) / scaleMax) *
@@ -115,10 +100,7 @@ const toChartPoints = (
 const buildLinePath = (points: ChartPoint[]): string => {
   if (points.length < 2) return "";
   const [first, ...rest] = points;
-  return rest.reduce(
-    (path, point) => `${path} L ${point.x} ${point.y}`,
-    `M ${first.x} ${first.y}`,
-  );
+  return rest.reduce((path, point) => `${path} L ${point.x} ${point.y}`, `M ${first.x} ${first.y}`);
 };
 
 function UsageLineChart({
@@ -149,9 +131,7 @@ function UsageLineChart({
     >
       {[25, 50, 75].map((mark) => {
         const value = (mark / 100) * scaleMax;
-        const y =
-          CHART_PAD +
-          ((scaleMax - value) / scaleMax) * (CHART_HEIGHT - CHART_PAD * 2);
+        const y = CHART_PAD + ((scaleMax - value) / scaleMax) * (CHART_HEIGHT - CHART_PAD * 2);
         return (
           <line
             key={mark}
@@ -178,12 +158,7 @@ function UsageLineChart({
           vectorEffect="non-scaling-stroke"
         />
       ) : (
-        <text
-          x="50%"
-          y="50%"
-          textAnchor="middle"
-          className="fill-(--dim) text-[10px]"
-        >
+        <text x="50%" y="50%" textAnchor="middle" className="fill-(--dim) text-[10px]">
           collecting samples
         </text>
       )}
@@ -204,11 +179,7 @@ export function DashboardSparkline({
 }) {
   const visibleSamples = samplesInWindow(samples, COMPACT_CHART_WINDOW_MS);
   const scaleMax = chartScaleMax(visibleSamples, scale);
-  const points = toChartPoints(
-    visibleSamples,
-    scaleMax,
-    COMPACT_CHART_WINDOW_MS,
-  );
+  const points = toChartPoints(visibleSamples, scaleMax, COMPACT_CHART_WINDOW_MS);
   const linePath = buildLinePath(points);
 
   return (
@@ -277,13 +248,9 @@ export function SystemOverview({
   }));
 
   return (
-    <Section title="Host telemetry" meta="last 5 minutes">
+    <Section title="Host telemetry" meta="last 60 seconds">
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)]">
-        <TrendPanel
-          title="CPU usage"
-          value={formatPercent(cpuCurrent)}
-          size="large"
-        >
+        <TrendPanel title="CPU usage" value={formatPercent(cpuCurrent)} size="large">
           <UsageLineChart
             samples={cpuSamples}
             stroke="var(--fg)"
@@ -315,15 +282,10 @@ export function GpuTelemetry({
   data: LinuxDashboardSnapshot;
   history: DashboardHistoryPoint[];
 }) {
-  const sortedGpus = [...data.gpus].sort(
-    (a, b) => b.memory_total_bytes - a.memory_total_bytes,
-  );
+  const sortedGpus = [...data.gpus].sort((a, b) => b.memory_total_bytes - a.memory_total_bytes);
 
   return (
-    <Section
-      title="GPUs"
-      meta={`${sortedGpus.length} ${sortedGpus.length === 1 ? "gpu" : "gpus"}`}
-    >
+    <Section title="GPUs" meta={`${sortedGpus.length} ${sortedGpus.length === 1 ? "gpu" : "gpus"}`}>
       {sortedGpus.length > 0 ? (
         <div className="space-y-2.5">
           <div className="grid gap-2.5 lg:grid-cols-2">
@@ -339,9 +301,7 @@ export function GpuTelemetry({
           <GpuListTable gpus={sortedGpus} />
         </div>
       ) : (
-        <div className="font-mono text-[11px] text-(--dim)/65">
-          No GPU telemetry available.
-        </div>
+        <div className="font-mono text-[11px] text-(--dim)/65">No GPU telemetry available.</div>
       )}
     </Section>
   );
@@ -360,12 +320,8 @@ function GpuUsageGraph({
     <div className="min-w-0 border border-(--border)/45 bg-transparent px-3 py-2 font-mono">
       <div className="mb-1.5 flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <div
-            className="truncate text-[10.5px] text-(--fg)/82"
-            title={gpu.name}
-          >
-            G{gpu.index}{" "}
-            <span className="text-(--dim)/60">{gpu.name}</span>
+          <div className="truncate text-[10.5px] text-(--fg)/82" title={gpu.name}>
+            G{gpu.index} <span className="text-(--dim)/60">{gpu.name}</span>
           </div>
         </div>
         <div className="shrink-0 text-[12px] tabular-nums text-(--fg)/85">
@@ -373,11 +329,7 @@ function GpuUsageGraph({
         </div>
       </div>
       <div className="h-24">
-        <UsageLineChart
-          samples={samples}
-          stroke="var(--fg)"
-          windowMs={COMPACT_CHART_WINDOW_MS}
-        />
+        <UsageLineChart samples={samples} stroke="var(--fg)" windowMs={COMPACT_CHART_WINDOW_MS} />
       </div>
     </div>
   );
@@ -404,18 +356,12 @@ function TrendPanel({
             {title}
           </div>
           {detail ? (
-            <div className="mt-1 truncate font-mono text-[11px] text-(--dim)/55">
-              {detail}
-            </div>
+            <div className="mt-1 truncate font-mono text-[11px] text-(--dim)/55">{detail}</div>
           ) : null}
         </div>
-        <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">
-          {value}
-        </div>
+        <div className="font-mono text-[12px] tabular-nums text-(--fg)/82">{value}</div>
       </div>
-      <div className={size === "large" ? "h-24" : "h-[4.8rem]"}>
-        {children}
-      </div>
+      <div className={size === "large" ? "h-24" : "h-[4.8rem]"}>{children}</div>
     </div>
   );
 }
@@ -454,10 +400,7 @@ function GpuListTable({ gpus }: { gpus: LinuxDashboardGpu[] }) {
         </thead>
         <tbody>
           {gpus.map((gpu) => (
-            <GpuMemoryRow
-              key={`${gpu.index}-${gpu.uuid ?? gpu.name}`}
-              gpu={gpu}
-            />
+            <GpuMemoryRow key={`${gpu.index}-${gpu.uuid ?? gpu.name}`} gpu={gpu} />
           ))}
         </tbody>
       </table>
@@ -483,9 +426,7 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
           </div>
           <span className="whitespace-nowrap text-right tabular-nums text-(--fg)/78">
             {formatGpuGb(gpu.memory_used_bytes)}
-            <span className="text-(--dim)/55">
-              /{formatGpuGb(gpu.memory_total_bytes)}
-            </span>
+            <span className="text-(--dim)/55">/{formatGpuGb(gpu.memory_total_bytes)}</span>
           </span>
         </div>
       </td>
@@ -499,9 +440,7 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
         <UnavailableValue
           value={formatTemp(gpu.memory_temperature_c)}
           unavailableReason={
-            gpu.memory_temperature_c === null
-              ? gpu.memory_temperature_unavailable_reason
-              : null
+            gpu.memory_temperature_c === null ? gpu.memory_temperature_unavailable_reason : null
           }
         />
       </td>
@@ -509,10 +448,7 @@ function GpuMemoryRow({ gpu }: { gpu: LinuxDashboardGpu }) {
         {formatPercent(gpu.fan_percent)}
       </td>
       <td className="whitespace-nowrap py-[5px] pl-4 text-right tabular-nums text-(--fg)/78">
-        <GpuPowerValue
-          drawWatts={gpu.power_draw_watts}
-          limitWatts={gpu.power_limit_watts}
-        />
+        <GpuPowerValue drawWatts={gpu.power_draw_watts} limitWatts={gpu.power_limit_watts} />
       </td>
     </tr>
   );
@@ -529,11 +465,7 @@ function GpuPowerValue({
     typeof drawWatts === "number" && Number.isFinite(drawWatts)
       ? `${Math.round(drawWatts)}`
       : "n/a";
-  if (
-    typeof limitWatts !== "number" ||
-    !Number.isFinite(limitWatts) ||
-    limitWatts <= 0
-  ) {
+  if (typeof limitWatts !== "number" || !Number.isFinite(limitWatts) || limitWatts <= 0) {
     return <>{draw === "n/a" ? draw : `${draw}W`}</>;
   }
 
@@ -577,14 +509,8 @@ export function formatGpuPower(
   limitWatts: number | null | undefined,
 ): string {
   const current =
-    typeof drawWatts === "number" && Number.isFinite(drawWatts)
-      ? Math.round(drawWatts)
-      : null;
-  if (
-    typeof limitWatts !== "number" ||
-    !Number.isFinite(limitWatts) ||
-    limitWatts <= 0
-  ) {
+    typeof drawWatts === "number" && Number.isFinite(drawWatts) ? Math.round(drawWatts) : null;
+  if (typeof limitWatts !== "number" || !Number.isFinite(limitWatts) || limitWatts <= 0) {
     return current == null ? "n/a" : `${current}W`;
   }
   const limit = Math.round(limitWatts);

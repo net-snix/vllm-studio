@@ -11,6 +11,7 @@ import type {
 import { formatBytes, formatUptime } from "./dashboard-format";
 import { formatGpuGb, formatGpuPower, GpuTelemetry, SystemOverview } from "./dashboard-charts";
 import { type DashboardHistoryPoint } from "./dashboard-history";
+import { DashboardModelRuntime } from "./dashboard-model-runtime";
 import {
   AlertStrip,
   ContainersTable,
@@ -73,6 +74,8 @@ export function LinuxDashboardView({
   return (
     <div className="min-h-full bg-(--bg) text-(--fg)">
       <div className="mx-auto max-w-[1600px] px-3 py-3 pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:px-4 lg:px-5">
+        <DashboardModelRuntime statusData={statusData} />
+
         <header>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
