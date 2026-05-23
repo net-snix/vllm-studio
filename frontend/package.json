@@ -39,7 +39,11 @@
     "precommit": "lint-staged --config .lintstagedrc.json && npm run typecheck"
   },
   "dependencies": {
+    "@lydell/node-pty": "^1.2.0-beta.12",
     "@mariozechner/pi-coding-agent": "^0.70.6",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.13.0-beta.220",
+    "@xterm/xterm": "^6.1.0-beta.220",
     "electron-updater": "^6.6.2",
     "highlight.js": "11.11.1",
     "lucide-react": "^0.561.0",
@@ -48,7 +52,6 @@
     "react-dom": "19.2.1",
     "react-markdown": "^10.1.0",
     "react-virtuoso": "^4.18.1",
-    "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "typebox": "^1.1.34",
     "zustand": "^4.5.4"

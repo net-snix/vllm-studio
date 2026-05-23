@@ -33,7 +33,7 @@ const eslintConfig = defineConfig([
           selector:
             "CallExpression[callee.name='useEffect'], CallExpression[callee.property.name='useEffect']",
           message:
-            "useEffect is banned. Centralise side effects through workspace reducers/effects or move them out of render. If absolutely required, justify and add an eslint-disable comment with a reason.",
+            "useEffect is BANNED. All side effects must live in a dedicated `src/hooks/agent/use-*-effects.ts` hook (the only sanctioned escape hatch). No exceptions — no eslint-disable, no legacy carve-outs.",
         },
       ],
       "@typescript-eslint/naming-convention": "off",
@@ -98,12 +98,9 @@ const eslintConfig = defineConfig([
       "src/app/agent/_components/filesystem-panel.tsx",
       "src/app/agent/_components/git-diff-panel.tsx",
       "src/app/agent/_components/agent-browser.tsx",
-      "src/app/agent/_components/agent-workspace-shell.tsx",
       "src/app/agent/_components/use-workspace.ts",
       "src/app/agent/_components/agent-workspace-shell.tsx",
       "src/app/agent/sessions/page.tsx",
-      "src/app/dashboard/dashboard-charts.tsx",
-      "src/app/dashboard/page.tsx",
       "src/components/projects-nav-section.tsx",
       "src/components/left-sidebar.tsx",
       "src/components/sessions-command.tsx",
@@ -125,12 +122,8 @@ const eslintConfig = defineConfig([
       "src/app/usage/hooks/use-usage.ts",
       "src/hooks/use-downloads.ts",
       "src/hooks/use-controller-events.ts",
-      "src/hooks/use-click-outside.ts",
       "src/hooks/use-model-lifecycle.ts",
       "src/hooks/use-sidebar-status.ts",
-      "src/lib/agent/projects/context.tsx",
-      "src/lib/agent/sessions/engine.ts",
-      "src/lib/agent/tools/context.tsx",
       "src/lib/agent/workspace/store.ts",
       "src/lib/agent/workspace/effects.ts",
       "src/lib/agent/pi-runtime.ts",
@@ -141,13 +134,17 @@ const eslintConfig = defineConfig([
       "src/lib/api/core.ts",
     ],
     rules: {
+      // File-length offenses remain warnings on tracked legacy files so we can
+      // refactor them gradually, but useEffect bans are NEVER softened. All
+      // useEffects must move into src/hooks/agent/use-*-effects.ts.
       "max-lines": "warn",
       "max-lines-per-function": "warn",
-      "no-restricted-syntax": "warn",
       "react-hooks/set-state-in-effect": "warn",
     },
   },
   {
+    // The ONE sanctioned home for useEffect. Anything matching this glob may
+    // call useEffect; everywhere else, it is an error.
     files: ["src/hooks/agent/use-*-effects.ts"],
     rules: {
       "no-restricted-syntax": "off",
@@ -155,11 +152,10 @@ const eslintConfig = defineConfig([
   },
   {
     files: ["src/app/agent/_components/**/*.{ts,tsx}"],
+    // Test files and lint fixtures stay exempt — production component files
+    // (including chat-pane, use-workspace, agent-workspace-shell) MUST obey
+    // the global useEffect ban. No carve-outs.
     ignores: [
-      "src/app/agent/_components/chat-pane.tsx",
-      "src/app/agent/_components/agent-workspace-shell.tsx",
-      "src/app/agent/_components/use-workspace.ts",
-      "src/app/agent/_components/agent-workspace-shell.tsx",
       "src/app/agent/_components/**/*.test.ts",
       "src/app/agent/_components/__lint__/**",
     ],
@@ -170,7 +166,7 @@ const eslintConfig = defineConfig([
           selector:
             "CallExpression[callee.name='useEffect'], CallExpression[callee.property.name='useEffect']",
           message:
-            "Agent workspace component files must not call useEffect. Route lifecycle work through the workspace hook or a typed effect adapter outside _components.",
+            "Agent workspace component files must not call useEffect. Move the effect into src/hooks/agent/use-*-effects.ts.",
         },
       ],
     },

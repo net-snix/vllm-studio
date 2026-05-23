@@ -2,7 +2,6 @@
 import Link from "next/link";
 import {
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -24,31 +23,29 @@ import {
 } from "@/components/icons";
 import { Button, UiModal, UiModalHeader } from "@/components/ui-kit";
 import { safeJson } from "@/lib/agent/safe-json";
+import type { ActiveAgentSessionSnapshot } from "@/lib/agent/active-sessions";
 import {
-  mergeActiveAgentSessions,
-  type ActiveAgentSessionSnapshot,
-} from "@/lib/agent/active-sessions";
+  useActiveAgentSessionsEffect,
+  usePinnedSessionsEffect,
+  useProjectDirectoryPickerModalEffects,
+  useProjectSessionsReloadEffect,
+  useProjectsNavAddProjectEffect,
+  useProjectsNavSessionPrefs,
+} from "@/hooks/agent/use-projects-nav-section-effects";
 import {
   ACTIVE_AGENT_SESSION_OPEN_EVENT,
   ACTIVE_AGENT_SESSION_RENAME_EVENT,
-  ACTIVE_AGENT_SESSIONS_EVENT,
   ADD_PROJECT_EVENT,
   NEW_AGENT_SESSION_EVENT,
   PROJECTS_CHANGED_EVENT,
-  SESSION_PREFS_CHANGED_EVENT,
-  SESSIONS_CHANGED_EVENT,
 } from "@/lib/agent/workspace/events";
-import {
-  loadPersistedActiveAgentSessions,
-  persistActiveAgentSessions,
-} from "@/lib/agent/workspace/store";
+import { loadPersistedActiveAgentSessions } from "@/lib/agent/workspace/store";
 import { useProjects } from "@/lib/agent/projects/context";
 import { addProjectFromPath, openProjectDirectory } from "@/lib/agent/projects/api";
 import { useClickOutside } from "@/hooks/use-click-outside";
 import {
   loadSessionPrefs,
   patchSessionPref,
-  hydrateSessionPrefsFromDesktop,
   type SessionPref,
   type SessionPrefs,
 } from "@/lib/agent/session/prefs";
@@ -77,7 +74,7 @@ type ActiveAgentSession = ActiveAgentSessionSnapshot;
 const SHOW_HIDDEN_KEY = "vllm-studio.agent.sessionPrefs.showHidden";
 const SESSION_NAV_TITLE_PREFIX = "vllm-studio.agent.sessionNavTitle:";
 const SESSION_MENU_CLASS =
-  "absolute right-0 top-5 z-50 min-w-[150px] rounded-md border border-(--border) bg-[#151515] p-1 text-xs text-(--fg) shadow-[0_8px_28px_rgba(0,0,0,0.65)]";
+  "absolute right-0 top-5 isolate z-[999] min-w-[150px] rounded-md border border-[#3a3a3a] bg-[#202020] p-1 text-xs text-(--fg) opacity-100 shadow-[0_12px_32px_rgba(0,0,0,0.85)]";
 function setAgentSessionDragData(
   event: DragEvent,
   session: {
@@ -95,17 +92,31 @@ function setAgentSessionDragData(
   event.dataTransfer.setData("application/x-vllm-agent-session", JSON.stringify(session));
   event.dataTransfer.effectAllowed = "copy";
 }
-function activeSessionPrefKeys(session: ActiveAgentSession): string[] {
+function activeSessionPrefKeys(
+  session: Pick<ActiveAgentSession, "piSessionId" | "paneId" | "tabId">,
+): string[] {
   return [
     session.piSessionId,
     session.paneId && session.tabId ? `tab:${session.paneId}:${session.tabId}` : null,
   ].filter((value): value is string => Boolean(value));
 }
+export function mergeActiveSessionPref(
+  session: Pick<ActiveAgentSession, "piSessionId" | "paneId" | "tabId">,
+  prefs: SessionPrefs,
+): SessionPref {
+  const merged: SessionPref = {};
+  for (const key of activeSessionPrefKeys(session)) {
+    const pref = prefs[key];
+    if (!pref) continue;
+    if (pref.title) merged.title = pref.title;
+    if (pref.pinned) merged.pinned = true;
+    if (pref.hidden) merged.hidden = true;
+  }
+  return merged;
+}
+
 function activeSessionPref(session: ActiveAgentSession, prefs: SessionPrefs): SessionPref {
-  return activeSessionPrefKeys(session).reduce<SessionPref>(
-    (merged, key) => ({ ...merged, ...(prefs[key] ?? {}) }),
-    {},
-  );
+  return mergeActiveSessionPref(session, prefs);
 }
 function patchActiveSessionPref(session: ActiveAgentSession, patch: SessionPref) {
   for (const key of activeSessionPrefKeys(session)) patchSessionPref(key, patch);
@@ -128,27 +139,7 @@ function sessionDedupeKey(session: SessionSummary): string {
     .toLowerCase();
   return `${label}:${relativeAge(session.startedAt)}`;
 }
-function useSessionPrefs() {
-  const [prefs, setPrefs] = useState<SessionPrefs>(() => loadSessionPrefs());
-  useEffect(() => {
-    void hydrateSessionPrefsFromDesktop();
-    const refresh = () =>
-      setPrefs((current) => {
-        const next = loadSessionPrefs();
-        try {
-          if (JSON.stringify(current) === JSON.stringify(next)) return current;
-        } catch {}
-        return next;
-      });
-    window.addEventListener(SESSION_PREFS_CHANGED_EVENT, refresh);
-    window.addEventListener("storage", refresh);
-    return () => {
-      window.removeEventListener(SESSION_PREFS_CHANGED_EVENT, refresh);
-      window.removeEventListener("storage", refresh);
-    };
-  }, []);
-  return prefs;
-}
+const useSessionPrefs = useProjectsNavSessionPrefs;
 export function triggerAddProjectFlow() {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new Event(ADD_PROJECT_EVENT));
@@ -211,10 +202,7 @@ function ProjectDirectoryPickerModal({
       setLoading(false);
     }
   }, []);
-  useEffect(() => {
-    if (!open) return;
-    void loadDirectory();
-  }, [open, loadDirectory]);
+  useProjectDirectoryPickerModalEffects({ loadDirectory, open });
   const goToDraftPath = () => {
     const next = draftPath.trim();
     if (next) void loadDirectory(next);
@@ -441,71 +429,20 @@ function ProjectDirectoryPickerModal({
       else next.add(id);
       return next;
     });
-  const [chatsExpanded, setChatsExpanded] = useState(true);
+  // Chats collapses by default — its row count grows fast and most navigation
+  // happens via the Pinned strip above it.
+  const [chatsExpanded, setChatsExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
-  useEffect(() => {
-    window.addEventListener(ADD_PROJECT_EVENT, handleAddProject);
-    return () => window.removeEventListener(ADD_PROJECT_EVENT, handleAddProject);
-  }, [handleAddProject]);
-  useEffect(() => {
-    const onActiveSessions = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessions?: ActiveAgentSession[] }>).detail;
-      const sessions = Array.isArray(detail?.sessions) ? detail.sessions : [];
-      setActiveSessions((current) =>
-        sessions.length > 0 ? mergeActiveAgentSessions([], sessions, loadSessionPrefs()) : [],
-      );
-      persistActiveAgentSessions(sessions);
-    };
-    window.addEventListener(ACTIVE_AGENT_SESSIONS_EVENT, onActiveSessions);
-    return () => window.removeEventListener(ACTIVE_AGENT_SESSIONS_EVENT, onActiveSessions);
-  }, []);
-  useEffect(() => {
-    if (!expanded || projects.length === 0) {
-      queueMicrotask(() => setPinnedSessions([]));
-      return;
-    }
-    if (!pinnedPrefIdsKey) {
-      queueMicrotask(() => setPinnedSessions([]));
-      return;
-    }
-    let cancelled = false;
-    const pinnedIdsList = pinnedPrefIdsKey.split("\u0000").filter(Boolean);
-    const pinnedIds = new Set(pinnedIdsList);
-    const hiddenIds = new Set(hiddenPrefIdsKey.split("\u0000").filter(Boolean));
-    const idsParam = encodeURIComponent(pinnedIdsList.join(","));
-    (async () => {
-      const rows = await Promise.all(
-        projects.map(async (project) => {
-          try {
-            const response = await fetch(
-              `/api/agent/sessions?cwd=${encodeURIComponent(project.path)}&since=30d&ids=${idsParam}`,
-              { cache: "no-store" },
-            );
-            const payload = await safeJson<{ sessions?: SessionSummary[] }>(response);
-            return (payload.sessions ?? [])
-              .filter((session) => pinnedIds.has(session.id) && !hiddenIds.has(session.id))
-              .map((session) => ({ ...session, project }));
-          } catch {
-            return [];
-          }
-        }),
-      );
-      if (!cancelled) {
-        setPinnedSessions(
-          rows
-            .flat()
-            .sort(
-              (a, b) =>
-                new Date(b.startedAt || b.updatedAt).getTime() -
-                new Date(a.startedAt || a.updatedAt).getTime(),
-            ),
-        );
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activePiSessionIdsKey, expanded, hiddenPrefIdsKey, pinnedPrefIdsKey, projects]);
+  useProjectsNavAddProjectEffect(handleAddProject);
+  useActiveAgentSessionsEffect({ setActiveSessions });
+  usePinnedSessionsEffect({
+    activePiSessionIdsKey,
+    expanded,
+    hiddenPrefIdsKey,
+    pinnedPrefIdsKey,
+    projects,
+    setPinnedSessions,
+  });
   if (!expanded) {
     return null;
   }
@@ -520,7 +457,7 @@ function ProjectDirectoryPickerModal({
       />
       {pinnedSessions.length > 0 || pinnedActiveSessions.length > 0 ? (
         <div className="flex flex-col pb-1">
-          <div className="mt-4 flex h-6 items-center px-2 text-[11px] font-medium text-(--dim)">
+          <div className="mt-4 flex h-6 items-center px-1.5 text-[10.5px] font-medium text-(--dim)">
             Pinned
           </div>{" "}
           {pinnedActiveSessions.map(({ session, project }) => (
@@ -550,23 +487,11 @@ function ProjectDirectoryPickerModal({
             open={chatsExpanded}
             onToggle={() => setChatsExpanded((value) => !value)}
             action={
-              <Link
-                href={`/agent?project=${encodeURIComponent(chatProject.id)}&new=1`}
-                onClick={(event) => {
-                  if (window.location.pathname !== "/agent") return;
-                  event.preventDefault();
-                  window.dispatchEvent(
-                    new CustomEvent(NEW_AGENT_SESSION_EVENT, {
-                      detail: { projectId: chatProject.id },
-                    }),
-                  );
-                }}
-                className="rounded p-0.5 text-(--dim) transition-colors hover:text-(--fg)"
-                title="New chat"
-                aria-label="New chat"
-              >
-                <PlusIcon className="h-3.5 w-3.5" />{" "}
-              </Link>
+              <NewChatPlusButton
+                projectId={chatProject.id}
+                label="New chat"
+                className="flex h-5 w-5 items-center justify-center rounded text-(--dim) transition-colors hover:text-(--fg)"
+              />
             }
           />
           {chatsExpanded ? (
@@ -587,11 +512,11 @@ function ProjectDirectoryPickerModal({
           <button
             type="button"
             onClick={handleAddProject}
-            className="rounded p-0.5 text-(--dim) transition-colors hover:text-(--fg)"
+            className="flex h-5 w-5 items-center justify-center rounded text-(--dim) transition-colors hover:text-(--fg)"
             title="Add folder"
             aria-label="Add folder"
           >
-            <PlusIcon className="h-3.5 w-3.5" />{" "}
+            <PlusIcon className="block h-3.5 w-3.5" />
           </button>
         }
       />
@@ -641,19 +566,23 @@ function SidebarSectionHeader({
   action?: ReactNode;
 }) {
   return (
-    <div className="mt-4 flex h-6 items-center justify-between px-2 text-[11px] font-medium text-(--dim)">
+    <div className="group mt-4 flex h-6 items-center justify-between px-1.5 text-[10.5px] font-medium text-(--dim)">
       <button
         type="button"
         onClick={onToggle}
-        className="flex min-w-0 items-center gap-1.5 text-left hover:text-(--fg)"
+        className="flex min-w-0 items-center gap-1.5 text-left hover:text-(--fg) focus-visible:text-(--fg) focus-visible:outline-none"
         aria-expanded={open}
       >
-        <ChevronDownIcon
-          className={`h-2.5 w-2.5 shrink-0 transition-transform ${open ? "" : "-rotate-90"}`}
-        />
         <span>{label}</span>
+        <ChevronDownIcon
+          className={`h-2.5 w-2.5 shrink-0 opacity-0 transition-[opacity,transform] group-hover:opacity-100 group-focus-within:opacity-100 ${open ? "" : "-rotate-90"}`}
+        />
       </button>
-      {action}
+      {action ? (
+        <div className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          {action}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -677,6 +606,7 @@ function ProjectRow({
   icon?: "folder" | "chat";
 }) {
   const [missingErrorVisible, setMissingErrorVisible] = useState(false);
+  const [newChatMenuOpen, setNewChatMenuOpen] = useState(false);
   const handleToggle = () => {
     if (!project.exists) {
       setMissingErrorVisible(true);
@@ -687,13 +617,13 @@ function ProjectRow({
   };
   return (
     <div className="flex flex-col">
-      <div className="group relative flex h-7 items-center rounded-md pl-2 pr-1.5 text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)">
+      <div className="group relative flex h-6 items-center rounded-md pl-1.5 pr-1 text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)">
         {" "}
         <button
           type="button"
           onClick={handleToggle}
           title={project.path}
-          className="flex min-w-0 flex-1 items-center gap-2 px-0 pr-8 text-left"
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-0 pr-8 text-left"
         >
           {icon === "chat" ? (
             <ChatIcon className="h-3.5 w-3.5 shrink-0 text-(--dim)" />
@@ -708,7 +638,7 @@ function ProjectRow({
               />{" "}
             </span>
           )}
-          <span className="truncate text-[13px] font-medium text-(--fg)">{project.name}</span>{" "}
+          <span className="truncate text-[12px] font-medium text-(--fg)">{project.name}</span>{" "}
           {!project.exists ? (
             <span
               className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
@@ -717,21 +647,18 @@ function ProjectRow({
             />
           ) : null}
         </button>{" "}
-        <Link
-          href={`/agent?project=${encodeURIComponent(project.id)}&new=1`}
-          onClick={(event) => {
-            if (window.location.pathname !== "/agent") return;
-            event.preventDefault();
-            window.dispatchEvent(
-              new CustomEvent(NEW_AGENT_SESSION_EVENT, { detail: { projectId: project.id } }),
-            );
-          }}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-(--dim) opacity-0 hover:text-(--fg) group-hover:opacity-100"
-          title="New chat"
-          aria-label={`New chat in ${project.name}`}
+        <div
+          className={`absolute right-1.5 top-1/2 -translate-y-1/2 transition-opacity ${
+            newChatMenuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+          }`}
         >
-          <PlusIcon className="h-3.5 w-3.5" />{" "}
-        </Link>
+          <NewChatPlusButton
+            projectId={project.id}
+            label={`New chat in ${project.name}`}
+            className="flex h-5 w-5 items-center justify-center text-(--dim) hover:text-(--fg)"
+            onMenuOpenChange={setNewChatMenuOpen}
+          />
+        </div>
         {onRemove ? (
           <button
             type="button"
@@ -740,7 +667,7 @@ function ProjectRow({
               event.stopPropagation();
               onRemove();
             }}
-            className="absolute right-7 top-1/2 -translate-y-1/2 p-0.5 text-(--dim) opacity-0 hover:text-(--err) group-hover:opacity-100"
+            className="absolute right-6 top-1/2 -translate-y-1/2 p-0.5 text-(--dim) opacity-0 hover:text-(--err) group-hover:opacity-100"
             title="Remove from list"
             aria-label="Remove project"
           >
@@ -816,11 +743,7 @@ function ProjectSessions({
       setLoading(false);
     }
   }, [project.path]);
-  useEffect(() => {
-    void reload();
-    window.addEventListener(SESSIONS_CHANGED_EVENT, reload);
-    return () => window.removeEventListener(SESSIONS_CHANGED_EVENT, reload);
-  }, [reload]);
+  useProjectSessionsReloadEffect(reload);
   const [showHidden, setShowHidden] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(SHOW_HIDDEN_KEY) === "1";
@@ -874,9 +797,9 @@ function ProjectSessions({
         />
       ))}
       {loading && !sessions ? (
-        <div className="pl-10 pr-4 py-1 text-[12px] text-(--dim)">Loading…</div>
+        <div className="pl-7 pr-2 py-1 text-[11px] text-(--dim)">Loading…</div>
       ) : allRecent.length === 0 && visibleActiveSessions.length === 0 ? (
-        <div className="pl-10 pr-4 py-1 text-[12px] text-(--dim)">No chats</div>
+        <div className="pl-7 pr-2 py-1 text-[11px] text-(--dim)">No chats</div>
       ) : (
         <>
           {" "}
@@ -892,7 +815,7 @@ function ProjectSessions({
             <button
               type="button"
               onClick={toggleShowHidden}
-              className="flex h-6 items-center gap-1 pl-10 pr-4 text-[12px] text-(--dim) hover:text-(--fg)"
+              className="flex h-6 items-center gap-1 rounded-md pl-7 pr-2 text-[11px] text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
               title={showHidden ? "Hide hidden sessions" : "Show hidden sessions"}
             >
               <EyeOffIcon className="w-3 h-3 shrink-0" />{" "}
@@ -995,9 +918,9 @@ function SessionNavRow({
   const content = (
     <>
       {" "}
-      <span className="min-w-0 flex-1 truncate text-[11px] font-normal leading-6">{label}</span>
+      <span className="min-w-0 flex-1 truncate text-[10.5px] font-normal leading-5">{label}</span>
       {age ? (
-        <span className="shrink-0 pl-2 pr-1 font-mono text-[9px] text-(--dim)">{age}</span>
+        <span className="shrink-0 pl-1.5 pr-1 font-mono text-[8.5px] text-(--dim)">{age}</span>
       ) : null}{" "}
     </>
   );
@@ -1011,7 +934,7 @@ function SessionNavRow({
     : {};
   return (
     <div
-      className={rowClass}
+      className={`${rowClass} ${menuOpen ? "z-[900]" : "z-0"}`}
       onContextMenu={
         onContextMenu
           ? (event) => {
@@ -1029,7 +952,7 @@ function SessionNavRow({
       {href ? (
         <Link
           href={href}
-          title={label}
+          aria-label={label}
           draggable
           onClick={onRememberTitle}
           onDragStart={onDragStart}
@@ -1045,6 +968,7 @@ function SessionNavRow({
           draggable
           onDragStart={onDragStart}
           onClick={onOpen}
+          aria-label={label}
           className="flex min-w-0 flex-1 items-center gap-1 pr-5 text-left"
           {...openProps}
         >
@@ -1061,14 +985,16 @@ function SessionNavRow({
             event.stopPropagation();
             setMenuOpen((value) => !value);
           }}
-          className="p-0.5 text-(--dim) opacity-0 hover:text-(--fg) group-hover:opacity-100"
+          className={`inline-flex h-6 w-6 items-center justify-center rounded-md text-(--dim) hover:bg-(--hover) hover:text-(--fg) ${
+            menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+          }`}
           aria-label="Session options"
           title="Session options"
         >
-          <MoreIcon className={menuIconClass} />{" "}
+          <MoreIcon className={`pointer-events-none ${menuIconClass}`} />{" "}
         </button>
         {menuOpen ? (
-          <div className={SESSION_MENU_CLASS}>
+          <div className={SESSION_MENU_CLASS} role="menu">
             <SessionMenuItem
               onClick={() => {
                 setMenuOpen(false);
@@ -1139,7 +1065,7 @@ function ActiveSessionRow({
 }) {
   const label = pref.title || session.title || "Current session";
   const isActive = session.active === true;
-  const rowClass = `group relative flex h-6 items-center gap-1 pl-4 pr-2 transition-colors ${isActive ? "text-(--fg) before:absolute before:inset-y-1 before:left-0 before:w-[2px] before:rounded-full before:bg-(--accent) before:content-['']" : "text-(--dim) hover:text-(--fg)"}`;
+  const rowClass = `group relative flex h-6 items-center gap-1 rounded-md pl-1.5 pr-1 transition-colors ${isActive ? "bg-(--hover) text-(--fg)" : "text-(--dim) hover:bg-(--hover) hover:text-(--fg)"}`;
   return (
     <SessionNavRow
       pref={pref}
@@ -1176,7 +1102,7 @@ function ActiveSessionRow({
       isRunning={session.status !== "idle" && session.status !== "done"}
       canDoubleClickRename
       menuIconClass="h-3.5 w-3.5"
-      renameInputClass="text-[12px]"
+      renameInputClass="text-[10.5px]"
     />
   );
 }
@@ -1196,8 +1122,8 @@ function SessionRow({
       label={label}
       initialDraft={pref.title ?? session.firstUserMessage ?? ""}
       age={relativeAge(session.startedAt)}
-      rowClass="group relative flex h-6 items-center gap-1 pl-4 pr-2 text-(--dim) transition-colors hover:text-(--fg)"
-      renameRowClass="flex h-6 items-center gap-1 bg-(--surface)/60 pl-4 pr-2"
+      rowClass="group relative flex h-6 items-center gap-1 rounded-md pl-1.5 pr-1 text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
+      renameRowClass="flex h-6 items-center gap-1 rounded-md bg-(--surface)/60 pl-1.5 pr-1"
       href={`/agent?project=${encodeURIComponent(project.id)}&session=${encodeURIComponent(session.id)}`}
       onPatchPref={(patch) => patchSessionPref(session.id, patch)}
       onRememberTitle={() => rememberAgentSessionNavTitle(session.id, label)}
@@ -1253,5 +1179,66 @@ function SessionMenuItem({ onClick, children }: { onClick: () => void; children:
     >
       {children}{" "}
     </button>
+  );
+}
+
+/**
+ * The "+" affordance in the sidebar (Chats header + each project row). When
+ * already on the workspace page it pops a dropdown so the user explicitly
+ * picks Split (sibling pane) or New (replace focused pane). When elsewhere it
+ * acts as a regular `<Link>` into `/agent` — no UI choice to make until we
+ * land on the workspace.
+ */
+function NewChatPlusButton({
+  projectId,
+  label,
+  className,
+  onMenuOpenChange,
+}: {
+  projectId: string;
+  label: string;
+  className: string;
+  onMenuOpenChange?: (open: boolean) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const setMenuOpenAndNotify = (open: boolean) => {
+    setMenuOpen(open);
+    onMenuOpenChange?.(open);
+  };
+  useClickOutside(containerRef, menuOpen, () => setMenuOpenAndNotify(false));
+
+  const dispatchNew = (mode: "split" | "replace") => {
+    setMenuOpenAndNotify(false);
+    window.dispatchEvent(new CustomEvent(NEW_AGENT_SESSION_EVENT, { detail: { projectId, mode } }));
+  };
+
+  return (
+    <div ref={containerRef} className="relative flex items-center justify-center leading-none">
+      <Link
+        href={`/agent?project=${encodeURIComponent(projectId)}&new=1`}
+        onClick={(event) => {
+          if (window.location.pathname !== "/agent") return;
+          // On the workspace we never navigate — open the dropdown instead so
+          // the user can choose how to slot the new session.
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuOpenAndNotify(!menuOpen);
+        }}
+        className={className}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        title={label}
+      >
+        <PlusIcon className="block h-3.5 w-3.5" />
+      </Link>
+      {menuOpen ? (
+        <div className={`${SESSION_MENU_CLASS} min-w-[140px]`} role="menu">
+          <SessionMenuItem onClick={() => dispatchNew("replace")}>New session </SessionMenuItem>
+          <SessionMenuItem onClick={() => dispatchNew("split")}>Split right </SessionMenuItem>
+        </div>
+      ) : null}
+    </div>
   );
 }

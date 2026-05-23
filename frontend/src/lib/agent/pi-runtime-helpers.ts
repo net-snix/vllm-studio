@@ -24,6 +24,9 @@ export type RuntimeSkillRef = {
 
 export type RuntimeStartOptions = {
   browserToolEnabled?: boolean;
+  browserSessionId?: string;
+  browserBackend?: "embedded" | "parchi";
+  canvasEnabled?: boolean;
   plugins?: RuntimePluginRef[];
   skills?: RuntimeSkillRef[];
 };
@@ -135,6 +138,17 @@ export function resolveBrowserExtensionPath(): string | null {
   );
 }
 
+export function resolveParchiBrowserExtensionPath(): string | null {
+  return resolveBundledPiExtensionPath(
+    "parchi-browser.ts",
+    process.env.VLLM_STUDIO_PARCHI_BROWSER_EXTENSION_PATH,
+  );
+}
+
+export function resolveCanvasExtensionPath(): string | null {
+  return resolveBundledPiExtensionPath("canvas.ts", process.env.VLLM_STUDIO_CANVAS_EXTENSION_PATH);
+}
+
 export function resolveTimeoutExtensionPath(): string | null {
   return resolveBundledPiExtensionPath(
     "vllm-studio-timeouts.ts",
@@ -144,6 +158,26 @@ export function resolveTimeoutExtensionPath(): string | null {
 
 export function resolveMcpExtensionPath(): string | null {
   return resolveBundledPiExtensionPath("mcp-plugin.ts", process.env.VLLM_STUDIO_MCP_EXTENSION_PATH);
+}
+
+// Locate the bundled canvas skill directory (contains SKILL.md). Searched only
+// when the canvas toggle is ON so it can be appended to `--skill` and teach
+// the model how/when to use the canvas tools.
+export function resolveCanvasSkillPath(): string | null {
+  const override = process.env.VLLM_STUDIO_CANVAS_SKILL_PATH;
+  const candidates = [
+    override,
+    process.resourcesPath
+      ? path.join(process.resourcesPath, "desktop", "resources", "skills", "canvas")
+      : null,
+    path.resolve(process.cwd(), "frontend", "desktop", "resources", "skills", "canvas"),
+    path.resolve(process.cwd(), "desktop", "resources", "skills", "canvas"),
+    path.resolve(process.cwd(), "..", "frontend", "desktop", "resources", "skills", "canvas"),
+  ].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function pluginNameMatches(plugin: RuntimePluginRef, needle: string): boolean {
@@ -172,6 +206,9 @@ export function pluginFingerprint(options: RuntimeStartOptions): string {
     .sort();
   return JSON.stringify({
     browser: options.browserToolEnabled === true,
+    browserBackend: options.browserBackend ?? process.env.VLLM_STUDIO_BROWSER_BACKEND ?? "embedded",
+    browserSessionId: options.browserSessionId ?? "",
+    canvas: options.canvasEnabled === true,
     plugins: names,
     skills,
   });
@@ -277,8 +314,8 @@ export function pluginMcpConfigs(plugins: RuntimePluginRef[]): RuntimeMcpConfig[
   });
 }
 
-export function deriveFrontendBase(): string {
-  const port = process.env.PORT || "3000";
+export function deriveFrontendBase(env: NodeJS.ProcessEnv = process.env): string {
+  const port = env.PORT || "3000";
   return `http://127.0.0.1:${port}`;
 }
 
@@ -292,10 +329,28 @@ function shouldLoadBrowserTool(options: RuntimeStartOptions, plugins: RuntimePlu
   );
 }
 
-function skillArgs(plugins: RuntimePluginRef[], skills: RuntimeSkillRef[]): string[] {
-  return uniqueExistingPaths([...pluginSkillPaths(plugins), ...selectedSkillPaths(skills)]).flatMap(
-    (skillPath) => ["--skill", skillPath],
-  );
+function browserBackend(options: RuntimeStartOptions): "embedded" | "parchi" {
+  return options.browserBackend === "parchi" || process.env.VLLM_STUDIO_BROWSER_BACKEND === "parchi"
+    ? "parchi"
+    : "embedded";
+}
+
+function skillArgs(
+  options: RuntimeStartOptions,
+  plugins: RuntimePluginRef[],
+  skills: RuntimeSkillRef[],
+): string[] {
+  // The canvas skill is bundled and only attached when the user has explicitly
+  // flipped the canvas toggle ON in the composer. This is what teaches the
+  // model when/how to use the canvas_read/write/append tools registered by
+  // the canvas extension.
+  const canvasSkillPath =
+    options.canvasEnabled === true ? [resolveCanvasSkillPath()] : ([] as Array<string | null>);
+  return uniqueExistingPaths([
+    ...pluginSkillPaths(plugins),
+    ...selectedSkillPaths(skills),
+    ...canvasSkillPath,
+  ]).flatMap((skillPath) => ["--skill", skillPath]);
 }
 
 function extensionArgs(
@@ -311,8 +366,15 @@ function extensionArgs(
     if (mcpExtensionPath) args.push("--extension", mcpExtensionPath);
   }
   if (shouldLoadBrowserTool(options, plugins)) {
-    const browserExtensionPath = resolveBrowserExtensionPath();
+    const browserExtensionPath =
+      browserBackend(options) === "parchi"
+        ? resolveParchiBrowserExtensionPath()
+        : resolveBrowserExtensionPath();
     if (browserExtensionPath) args.push("--extension", browserExtensionPath);
+  }
+  if (options.canvasEnabled === true) {
+    const canvasExtensionPath = resolveCanvasExtensionPath();
+    if (canvasExtensionPath) args.push("--extension", canvasExtensionPath);
   }
   return args;
 }
@@ -335,7 +397,10 @@ export function buildPiLaunchPlan(input: RuntimeLaunchPlanInput): RuntimeLaunchP
   if (input.selectedModel.reasoning) args.push("--thinking", "high");
   if (input.selectedModel.tools === false) args.push("--no-tools");
   if (input.piSessionId) args.push("--session", input.piSessionId);
-  args.push(...skillArgs(plugins, skills), ...extensionArgs(input.options, plugins, mcpConfigs));
+  args.push(
+    ...skillArgs(input.options, plugins, skills),
+    ...extensionArgs(input.options, plugins, mcpConfigs),
+  );
 
   return {
     args,
@@ -344,8 +409,15 @@ export function buildPiLaunchPlan(input: RuntimeLaunchPlanInput): RuntimeLaunchP
       PATH: input.pathEnv,
       PI_CODING_AGENT_DIR: input.agentDir,
       PI_SKIP_VERSION_CHECK: "1",
-      VLLM_STUDIO_FRONTEND_BASE: input.processEnv.VLLM_STUDIO_FRONTEND_BASE ?? deriveFrontendBase(),
+      VLLM_STUDIO_BROWSER_SESSION_ID: input.options.browserSessionId ?? "",
+      VLLM_STUDIO_FRONTEND_BASE:
+        input.processEnv.VLLM_STUDIO_FRONTEND_BASE ?? deriveFrontendBase(input.processEnv),
       VLLM_STUDIO_MCP_PLUGIN_CONFIGS: JSON.stringify(mcpConfigs),
+      PARCHI_RELAY_ORIGIN:
+        input.processEnv.PARCHI_RELAY_ORIGIN ??
+        input.processEnv.VLLM_STUDIO_FRONTEND_BASE ??
+        deriveFrontendBase(input.processEnv),
+      PARCHI_RELAY_SESSION_ID: input.options.browserSessionId ?? "",
     },
     mcpConfigs,
     plugins,

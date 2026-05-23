@@ -1,19 +1,21 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   consumeAgentSessionNavTitle,
   triggerAddProjectFlow,
 } from "@/components/projects-nav-section";
 import { makeFreshTab, newPaneId, newRuntimeId } from "@/lib/agent/session/helpers";
-import { ChevronDownIcon, CloseIcon, ComputerIcon, PlusIcon } from "@/components/icons";
+import { ChevronDownIcon, CloseIcon, PlusIcon } from "@/components/icons";
 import type { WorkspaceDispatch } from "@/lib/agent/workspace/effects";
 import type { AgentModel, PaneId, WorkspaceState } from "@/lib/agent/workspace/types";
 import { useProjects, type ProjectsContextValue } from "@/lib/agent/projects/context";
 import { useTools } from "@/lib/agent/tools/context";
 import type { Project } from "@/lib/agent/projects/types";
 import { useClickOutside } from "@/hooks/use-click-outside";
+import { useAgentWorkspaceNavigationEffects } from "@/hooks/agent/use-agent-workspace-navigation-effects";
+import { useActiveCanvasSessionEffects } from "@/hooks/agent/use-active-canvas-session-effects";
 import { focusedSession, materializePaneSessions } from "@/lib/agent/sessions/selectors";
 import { AgentBrowserPanel } from "./agent-browser-panel";
 import { ChatPane } from "./chat-pane";
@@ -83,20 +85,25 @@ export function AgentWorkspaceShell({ state, dispatch, handles }: AgentWorkspace
   const searchParams = useSearchParams();
   const projectParam = searchParams.get("project");
 
-  useEffect(() => {
-    requestWorkspaceUrlNavigation(state, projects, searchParams, dispatch);
-  }, [searchParams, state, projects, dispatch]);
+  useAgentWorkspaceNavigationEffects(
+    useCallback(() => {
+      requestWorkspaceUrlNavigation(state, projects, searchParams, dispatch);
+    }, [searchParams, state, projects, dispatch]),
+  );
 
-  const activeProject = projects.selectedProject;
   const focusedTab = focusedSession(state);
-  const focusedComputerUseLoaded = tools
-    .selectionFor(focusedTab?.id)
-    .plugins.some((plugin) =>
-      [plugin.id, plugin.name, plugin.path].some((value) =>
-        value?.toLowerCase().includes("computer-use"),
-      ),
-    );
-
+  // The right panel (browser / files / git / terminal / status) follows the
+  // FOCUSED session, not the workspace-global selectedProject. Otherwise
+  // splitting/switching panes leaves the right panel pinned to whichever
+  // project was active when the panel was first opened.
+  const activeProject = projects.resolveProject(focusedTab) ?? projects.selectedProject;
+  useActiveCanvasSessionEffects({
+    sessionId: focusedTab?.id ?? null,
+    setActiveCanvasSession: tools.setActiveCanvasSession,
+  });
+  const focusedModel =
+    state.models.find((model) => model.id === (focusedTab?.modelId ?? state.selectedModel)) ?? null;
+  const focusedGitSummary = projects.gitSummary(activeProject?.path ?? focusedTab?.cwd);
   return (
     <div className="agent-workspace flex h-full min-h-0 w-full flex-col bg-(--bg) text-(--fg) md:h-[100dvh]">
       <div className="flex min-h-0 flex-1">
@@ -104,9 +111,6 @@ export function AgentWorkspaceShell({ state, dispatch, handles }: AgentWorkspace
           <WorkspaceTopBar
             error={state.error}
             setupWarning={state.setupWarning}
-            rightPanelOpen={tools.computer.open}
-            focusedComputerUseLoaded={focusedComputerUseLoaded}
-            onToggleComputer={tools.toggleComputerOpen}
             onClearError={() => dispatch({ type: "setError", error: "" })}
           />
           {shouldShowProjectEmptyState(projects, projectParam) ? (
@@ -128,7 +132,10 @@ export function AgentWorkspaceShell({ state, dispatch, handles }: AgentWorkspace
         <AgentBrowserPanel
           handles={handles}
           activeProject={activeProject}
-          focusedTitle={focusedTab?.title ?? "Focused session"}
+          focusedSession={focusedTab}
+          sessions={[...state.sessions.values()]}
+          activeModel={focusedModel}
+          gitSummary={focusedGitSummary}
         />
       </div>
     </div>
@@ -138,16 +145,10 @@ export function AgentWorkspaceShell({ state, dispatch, handles }: AgentWorkspace
 function WorkspaceTopBar({
   error,
   setupWarning,
-  rightPanelOpen,
-  focusedComputerUseLoaded,
-  onToggleComputer,
   onClearError,
 }: {
   error: string;
   setupWarning: string;
-  rightPanelOpen: boolean;
-  focusedComputerUseLoaded: boolean;
-  onToggleComputer: () => void;
   onClearError: () => void;
 }) {
   return (
@@ -160,31 +161,6 @@ function WorkspaceTopBar({
         ) : null}
         {setupWarning ? <WorkspaceBanner tone="warning">{setupWarning}</WorkspaceBanner> : null}
       </div>
-      <button
-        type="button"
-        onClick={onToggleComputer}
-        aria-pressed={rightPanelOpen}
-        className={`pointer-events-auto inline-flex !h-8 !min-h-8 !w-8 !min-w-8 items-center justify-center rounded-md border-0 backdrop-blur ${
-          rightPanelOpen
-            ? "bg-(--accent)/10 text-(--accent)"
-            : "bg-transparent text-(--dim) hover:bg-(--surface) hover:text-(--fg)"
-        }`}
-        title={rightPanelOpen ? "Hide computer" : "Show computer"}
-        aria-label={rightPanelOpen ? "Hide computer" : "Show computer"}
-      >
-        <span className="relative inline-flex">
-          <ComputerIcon className="h-4 w-4" />
-          {focusedComputerUseLoaded ? (
-            <span
-              className="absolute -right-1.5 -top-1 inline-flex h-2.5 w-2.5 items-center justify-center"
-              aria-hidden="true"
-            >
-              <span className="absolute h-2.5 w-2.5 animate-ping rounded-full bg-(--accent)/35" />
-              <span className="relative h-1.5 w-1.5 rounded-full bg-(--accent)" />
-            </span>
-          ) : null}
-        </span>
-      </button>
     </div>
   );
 }
@@ -303,6 +279,8 @@ function renderWorkspacePane(
       }
       browserToolEnabled={state.focusedPaneId === paneId && tools.browser.enabled}
       onToggleBrowserTool={tools.toggleBrowser}
+      canvasEnabled={state.focusedPaneId === paneId && tools.computer.canvasEnabled}
+      onToggleCanvas={tools.toggleCanvas}
       onPiSessionIdChange={handles.notifySessionsChanged}
       isFocused={state.focusedPaneId === paneId}
       onFocus={() => dispatch({ type: "focusPane", paneId })}
@@ -310,6 +288,9 @@ function renderWorkspacePane(
       activeTabId={pane.activeSessionId}
       onTabsChange={(nextTabsOrUpdater) => handles.setPaneTabs(paneId, nextTabsOrUpdater)}
       onClose={onlyOne ? undefined : () => handles.closePane(paneId)}
+      onForkSession={() => handles.splitTabIntoNewPane(paneId, pane.activeSessionId)}
+      rightPanelOpen={tools.computer.open}
+      onToggleRightPanel={tools.toggleComputerOpen}
       onRegisterHandle={(handle) => handles.registerPaneHandle(paneId, handle)}
     />
   );

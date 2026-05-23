@@ -7,6 +7,7 @@ import {
   type AgentTurnSsePayload,
   type RuntimeLoggedEvent,
 } from "@/lib/agent/session";
+import type { AgentImageInput } from "@/lib/agent/contracts/turn";
 import type { ComposerPluginRef, ComposerSkillRef } from "@/lib/agent/composer-context";
 
 export type RuntimeStatus = {
@@ -69,6 +70,8 @@ export type CompactSessionArgs = {
   cwd?: string;
   piSessionId?: string | null;
   browserToolEnabled: boolean;
+  browserSessionId?: string;
+  canvasEnabled?: boolean;
   plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
 };
@@ -95,11 +98,14 @@ export type SubmitTurnArgs = {
   sessionId: string;
   modelId: string;
   message: string;
+  images?: AgentImageInput[];
   cwd?: string;
   piSessionId?: string | null;
   /** Control mode for steer/follow-up; omitted for a normal prompt. */
   mode?: "steer" | "follow_up";
   browserToolEnabled: boolean;
+  browserSessionId?: string;
+  canvasEnabled?: boolean;
   plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
 };

@@ -1,9 +1,17 @@
 "use client";
 
-import React, { Children, isValidElement, useCallback, useState, type ReactNode } from "react";
+import React, {
+  Children,
+  isValidElement,
+  memo,
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { highlightFenced } from "@/lib/agent/highlight-cache";
 import { normalizeBrowserInput } from "@/lib/agent/tools/browser-url";
 import { useTools } from "@/lib/agent/tools/context";
 
@@ -57,7 +65,7 @@ function CodeBlockCopyButton({ code }: { code: string }) {
     <button
       type="button"
       onClick={handleCopy}
-      className="absolute right-1.5 top-1.5 rounded px-1 text-[10px] text-(--dim) hover:text-(--fg)"
+      className="shrink-0 rounded px-1 text-[10px] text-(--dim) hover:text-(--fg)"
       aria-label={copied ? "Copied" : "Copy code"}
       title={copied ? "Copied" : "Copy code"}
     >
@@ -66,18 +74,67 @@ function CodeBlockCopyButton({ code }: { code: string }) {
   );
 }
 
+function codeLanguage(children: ReactNode): string | null {
+  const codeElement = Children.toArray(children).find(
+    (child) =>
+      isValidElement<{ className?: string }>(child) &&
+      typeof child.props.className === "string" &&
+      /\blanguage-/.test(child.props.className),
+  );
+  if (!isValidElement<{ className?: string }>(codeElement)) return null;
+  const match = /\blanguage-([^\s]+)/.exec(codeElement.props.className ?? "");
+  return match ? match[1] : null;
+}
+
+const FencedCodeBlock = memo(function FencedCodeBlock({
+  code,
+  language,
+}: {
+  code: string;
+  language: string | null;
+}) {
+  const highlightedHtml = useMemo(() => highlightFenced(language, code), [code, language]);
+  const codeClassName = ["hljs", language ? `language-${language}` : "", "font-mono"]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <div className="assistant-code-block group my-3 overflow-hidden rounded-xl border border-white/[0.06] bg-[#2f2f33] shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+      <div className="flex h-8 items-center justify-between border-b border-white/[0.06] bg-white/[0.015] px-2.5">
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-(--dim)">
+          {language ?? "code"}
+        </span>
+        {code ? <CodeBlockCopyButton code={code} /> : null}
+      </div>
+      <pre className="m-0 max-w-full overflow-x-auto bg-transparent px-3 py-2.5 text-[12px] leading-5">
+        <code className={codeClassName} dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+      </pre>
+    </div>
+  );
+});
+FencedCodeBlock.displayName = "FencedCodeBlock";
+
 const components: Components = {
   h1: ({ node: _n, ...props }) => (
-    <h1 className="mb-1 mt-4 text-[18px] font-medium leading-[1.33] text-(--fg)" {...props} />
+    <h1
+      className="mb-3 mt-5 text-[24px] font-semibold leading-tight tracking-[-0.01em] text-(--fg) first:mt-0"
+      {...props}
+    />
   ),
   h2: ({ node: _n, ...props }) => (
-    <h2 className="mb-1 mt-4 text-[16px] font-medium leading-[1.33] text-(--fg)" {...props} />
+    <h2
+      className="mb-2 mt-5 text-[18px] font-semibold leading-snug tracking-[-0.01em] text-(--fg) first:mt-0"
+      {...props}
+    />
   ),
   h3: ({ node: _n, ...props }) => (
-    <h3 className="mb-1 mt-3 text-[14px] font-medium leading-[1.4] text-(--fg)" {...props} />
+    <h3
+      className="mb-2 mt-4 text-[16px] font-semibold leading-snug tracking-[-0.01em] text-(--fg) first:mt-0"
+      {...props}
+    />
   ),
   h4: ({ node: _n, ...props }) => (
-    <h4 className="mb-1 mt-3 text-[13px] font-medium leading-[1.4] text-(--fg)" {...props} />
+    <h4 className="mb-1.5 mt-3 text-[14px] font-medium leading-snug text-(--fg)" {...props} />
   ),
   p: ({ node: _n, ...props }) => (
     <p
@@ -101,28 +158,21 @@ const components: Components = {
     }
     return (
       <code
-        className="rounded bg-(--surface) px-1 py-0.5 font-mono text-[12px] text-(--fg) [overflow-wrap:anywhere]"
+        className="rounded bg-(--surface) px-1 py-0.5 font-mono text-[12px] leading-[18px] text-(--fg) [overflow-wrap:anywhere]"
         {...props}
       >
         {children}
       </code>
     );
   },
-  pre: ({ node: _n, children, ...props }) => {
+  pre: ({ node: _n, children }) => {
     const code = nodeToPlainText(
       Children.toArray(children).find(
         (child) => isValidElement(child) && (child as { type?: string }).type === "code",
       ) ?? children,
     );
-    return (
-      <pre
-        className="relative my-2 max-w-full overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded border border-(--border) bg-(--surface) p-2 text-[12px] leading-5 [overflow-wrap:anywhere] [&_code]:whitespace-pre-wrap"
-        {...props}
-      >
-        {code ? <CodeBlockCopyButton code={code} /> : null}
-        {children}
-      </pre>
-    );
+    const language = codeLanguage(children);
+    return <FencedCodeBlock code={code} language={language} />;
   },
   a: ({ node: _n, href, ...props }) => (
     <a
@@ -161,9 +211,19 @@ const components: Components = {
   ),
 };
 
-export function AssistantMarkdown({ text }: { text: string }) {
-  const tools = useTools();
-  const componentsWithAppLinks: Components = {
+// The remark/rehype plugin lists are constant. Hoisted out of render so the
+// `ReactMarkdown` reconciler sees the same array identity each commit.
+const REMARK_PLUGINS = [remarkGfm];
+
+type ToolHandlers = {
+  requestFileOpen: (path: string) => void;
+  setComputerOpen: (open: boolean) => void;
+  setComputerTab: (tab: "browser" | "files" | "status" | "canvas") => void;
+  setBrowserUrl: (url: string, input?: string) => void;
+};
+
+function buildComponentsWithAppLinks(tools: ToolHandlers): Components {
+  return {
     ...components,
     code: ({ node: _n, className, children, ...props }) => {
       const isBlock = typeof className === "string" && /\blanguage-/.test(className);
@@ -180,7 +240,7 @@ export function AssistantMarkdown({ text }: { text: string }) {
           <button
             type="button"
             onClick={() => tools.requestFileOpen(value)}
-            className="rounded bg-(--surface) px-1 py-0.5 font-mono text-[12px] text-(--fg) hover:bg-(--hover) [overflow-wrap:anywhere]"
+            className="rounded bg-(--surface) px-1 py-0.5 font-mono text-[12px] leading-[18px] text-(--fg) hover:bg-(--hover) [overflow-wrap:anywhere]"
             title="Open file"
           >
             {children}
@@ -189,7 +249,7 @@ export function AssistantMarkdown({ text }: { text: string }) {
       }
       return (
         <code
-          className="rounded bg-(--surface) px-1 py-0.5 font-mono text-[12px] text-(--fg) [overflow-wrap:anywhere]"
+          className="rounded bg-(--surface) px-1 py-0.5 font-mono text-[12px] leading-[18px] text-(--fg) [overflow-wrap:anywhere]"
           {...props}
         >
           {children}
@@ -218,8 +278,24 @@ export function AssistantMarkdown({ text }: { text: string }) {
       />
     ),
   };
+}
+
+function AssistantMarkdownInner({ text }: { text: string }) {
+  const tools = useTools();
+  // Stable `components` map: only changes when any of the four tool callbacks
+  // it captures changes identity (they're useCallback-stable in ToolsProvider).
+  const componentsWithAppLinks = useMemo<Components>(
+    () =>
+      buildComponentsWithAppLinks({
+        requestFileOpen: tools.requestFileOpen,
+        setComputerOpen: tools.setComputerOpen,
+        setComputerTab: tools.setComputerTab,
+        setBrowserUrl: tools.setBrowserUrl,
+      }),
+    [tools.requestFileOpen, tools.setComputerOpen, tools.setComputerTab, tools.setBrowserUrl],
+  );
   return (
-    <div className="min-w-0 max-w-full overflow-x-hidden font-sans text-[14px] leading-[22px] tracking-[-0.003em] text-(--fg) [overflow-wrap:anywhere]">
+    <div className="chat-markdown min-w-0 max-w-full overflow-x-hidden font-sans text-[14px] leading-[22px] tracking-[-0.003em] text-(--fg) [overflow-wrap:anywhere]">
       <MarkdownErrorBoundary
         fallback={
           <pre className="max-w-full whitespace-pre-wrap break-words font-sans text-[14px] leading-[22px] tracking-[-0.003em] [overflow-wrap:anywhere]">
@@ -227,14 +303,16 @@ export function AssistantMarkdown({ text }: { text: string }) {
           </pre>
         }
       >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-          components={componentsWithAppLinks}
-        >
+        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={componentsWithAppLinks}>
           {text}
         </ReactMarkdown>
       </MarkdownErrorBoundary>
     </div>
   );
 }
+
+// React.memo on `text` lets prior text blocks skip re-rendering entirely once
+// they're frozen. The streaming text block keeps changing identity per delta
+// (via appendDelta), which still re-renders correctly through this memo.
+export const AssistantMarkdown = memo(AssistantMarkdownInner);
+AssistantMarkdown.displayName = "AssistantMarkdown";

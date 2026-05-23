@@ -1,12 +1,14 @@
 // CRITICAL
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import api from "@/lib/api";
 import { getApiKey, setApiKey, clearApiKey } from "@/lib/api-key";
 import { resolveSettingsDefaultBackendUrl } from "@/lib/backend-config";
 import { getStoredBackendUrl, setStoredBackendUrl, clearStoredBackendUrl } from "@/lib/backend-url";
+import { scheduleDurableUiPreferencesSave } from "@/lib/desktop-ui-preferences";
 import type { CompatibilityReport, ConfigData } from "@/lib/types";
+import { useLegacyEffect } from "@/hooks/agent/use-legacy-effects";
 
 const FAST_STATUS_REQUEST = { timeout: 5_000, retries: 0 } as const;
 const FAST_COMPAT_REQUEST = { timeout: 20_000, retries: 0 } as const;
@@ -93,6 +95,7 @@ export function useConfigs() {
     } else if (!apiKey) {
       clearApiKey();
     }
+    scheduleDurableUiPreferencesSave();
   };
 
   const testConnection = async () => {
@@ -211,7 +214,7 @@ export function useConfigs() {
     }
   };
 
-  useEffect(() => {
+  useLegacyEffect(() => {
     loadConfig();
     loadApiSettings();
   }, []);

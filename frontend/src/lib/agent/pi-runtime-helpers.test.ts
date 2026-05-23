@@ -121,24 +121,39 @@ describe("pi runtime helper seams", () => {
     const root = makeRoot();
     const pluginSkills = path.join(root, "plugin", "skills");
     const selectedSkills = path.join(root, "selected-skills");
+    const canvasSkill = path.join(root, "canvas-skill");
     const timeoutExtension = path.join(root, "vllm-studio-timeouts.ts");
     const mcpExtension = path.join(root, "mcp-plugin.ts");
     const browserExtension = path.join(root, "browser.ts");
+    const parchiBrowserExtension = path.join(root, "parchi-browser.ts");
+    const canvasExtension = path.join(root, "canvas.ts");
     const mcpConfigPath = path.join(root, "plugin", ".mcp.json");
     mkdirSync(pluginSkills, { recursive: true });
     mkdirSync(selectedSkills, { recursive: true });
-    for (const file of [timeoutExtension, mcpExtension, browserExtension, mcpConfigPath]) {
+    mkdirSync(canvasSkill, { recursive: true });
+    for (const file of [
+      timeoutExtension,
+      mcpExtension,
+      browserExtension,
+      parchiBrowserExtension,
+      canvasExtension,
+      mcpConfigPath,
+    ]) {
       mkdirSync(path.dirname(file), { recursive: true });
       writeFileSync(file, file.endsWith(".json") ? JSON.stringify({ mcpServers: {} }) : "");
     }
     process.env.VLLM_STUDIO_TIMEOUT_EXTENSION_PATH = timeoutExtension;
     process.env.VLLM_STUDIO_MCP_EXTENSION_PATH = mcpExtension;
     process.env.VLLM_STUDIO_BROWSER_EXTENSION_PATH = browserExtension;
+    process.env.VLLM_STUDIO_PARCHI_BROWSER_EXTENSION_PATH = parchiBrowserExtension;
+    process.env.VLLM_STUDIO_CANVAS_EXTENSION_PATH = canvasExtension;
+    process.env.VLLM_STUDIO_CANVAS_SKILL_PATH = canvasSkill;
 
     const plan = buildPiLaunchPlan({
       agentDir: path.join(root, "agent"),
       modelId: "qwen",
       options: {
+        canvasEnabled: true,
         plugins: [{ name: "browser-use", path: path.join(root, "plugin") }],
         skills: [{ name: "selected", path: selectedSkills }],
       },
@@ -164,12 +179,16 @@ describe("pi runtime helper seams", () => {
       pluginSkills,
       "--skill",
       selectedSkills,
+      "--skill",
+      canvasSkill,
       "--extension",
       timeoutExtension,
       "--extension",
       mcpExtension,
       "--extension",
       browserExtension,
+      "--extension",
+      canvasExtension,
     ]);
     expect(plan.env).toMatchObject({
       PATH: "/tmp/pi-bin",
@@ -179,6 +198,40 @@ describe("pi runtime helper seams", () => {
       VLLM_STUDIO_MCP_PLUGIN_CONFIGS: JSON.stringify([
         { pluginName: "browser-use", configPath: mcpConfigPath },
       ]),
+      PARCHI_RELAY_ORIGIN: "http://frontend.test",
+    });
+  });
+
+  it("loads the Parchi browser extension when the Parchi backend is selected", () => {
+    const root = makeRoot();
+    const embeddedExtension = path.join(root, "browser.ts");
+    const parchiExtension = path.join(root, "parchi-browser.ts");
+    writeFileSync(embeddedExtension, "");
+    writeFileSync(parchiExtension, "");
+    process.env.VLLM_STUDIO_BROWSER_EXTENSION_PATH = embeddedExtension;
+    process.env.VLLM_STUDIO_PARCHI_BROWSER_EXTENSION_PATH = parchiExtension;
+    process.env.VLLM_STUDIO_BROWSER_BACKEND = "parchi";
+
+    const plan = buildPiLaunchPlan({
+      agentDir: path.join(root, "agent"),
+      modelId: "qwen",
+      options: {
+        browserToolEnabled: true,
+        browserSessionId: "runtime-123",
+      },
+      pathEnv: "/tmp/pi-bin",
+      piSessionId: null,
+      processEnv: { ...process.env, PORT: "3007" },
+      providerId: "vllm-studio",
+      selectedModel: {},
+    });
+
+    expect(plan.args).toContain(parchiExtension);
+    expect(plan.args).not.toContain(embeddedExtension);
+    expect(plan.env).toMatchObject({
+      PARCHI_RELAY_ORIGIN: "http://127.0.0.1:3007",
+      PARCHI_RELAY_SESSION_ID: "runtime-123",
+      VLLM_STUDIO_BROWSER_SESSION_ID: "runtime-123",
     });
   });
 
