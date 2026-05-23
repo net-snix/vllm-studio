@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const pkgPath = resolve(import.meta.dirname, "..", "package.json");
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const pkgPath = resolve(scriptDir, "..", "package.json");
 const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
 
 const required = ["scripts", "devDependencies"];
