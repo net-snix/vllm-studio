@@ -36,7 +36,8 @@ export function DashboardModelRuntime({
   controls,
 }: DashboardModelRuntimeProps) {
   const runtime = buildRuntimeSummary(statusData);
-  const title = `${hostname ?? "Linux host"} * ${runtime.modelName}`;
+  const hostLabel = hostname ?? "Linux host";
+  const title = `${hostLabel} - ${runtime.modelName}`;
 
   return (
     <section className="mb-3 px-1 pt-1 pb-4">
@@ -64,7 +65,11 @@ export function DashboardModelRuntime({
             className="mt-1.5 min-w-0 text-[20px] font-semibold leading-tight text-(--fg) sm:text-[22px]"
             title={title}
           >
-            <span className="line-clamp-2 break-words">{title}</span>
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="min-w-0 break-words">{hostLabel}</span>
+              <span aria-hidden="true" className="h-4 w-px shrink-0 bg-(--fg)/35" />
+              <span className="min-w-0 break-words">{runtime.modelName}</span>
+            </span>
           </h2>
         </div>
 
