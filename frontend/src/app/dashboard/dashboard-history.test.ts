@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import assert from "node:assert/strict";
+import { afterEach, test } from "node:test";
 import type { LinuxDashboardSnapshot } from "@/lib/types";
 import {
   appendDashboardHistory,
@@ -69,144 +70,155 @@ const makeSnapshot = (
   alerts: [],
 });
 
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+
+function restoreWindow(): void {
+  if (originalWindow) {
+    Object.defineProperty(globalThis, "window", originalWindow);
+    return;
+  }
+  Reflect.deleteProperty(globalThis, "window");
+}
+
 const stubStorage = (): Map<string, string> => {
   const values = new Map<string, string>();
-  vi.stubGlobal("window", {
-    localStorage: {
-      getItem: (key: string): string | null => values.get(key) ?? null,
-      setItem: (key: string, value: string): void => {
-        values.set(key, value);
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: (key: string): string | null => values.get(key) ?? null,
+        setItem: (key: string, value: string): void => {
+          values.set(key, value);
+        },
       },
     },
   });
   return values;
 };
 
-describe("dashboard history", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
+afterEach(restoreWindow);
 
-  it("deduplicates snapshots and keeps the newest samples inside the limit", () => {
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
-      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
-      makeSnapshot("2026-04-29T10:00:10.000Z", 20, [30]),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot, 2),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history deduplicates snapshots and keeps the newest samples inside the limit", () => {
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+    makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+    makeSnapshot("2026-04-29T10:00:10.000Z", 20, [30]),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot, 2),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    expect(history.map((point) => point.collected_at)).toEqual([
-      "2026-04-29T10:00:05.000Z",
-      "2026-04-29T10:00:10.000Z",
-    ]);
+  assert.deepEqual(
+    history.map((point) => point.collected_at),
+    ["2026-04-29T10:00:05.000Z", "2026-04-29T10:00:10.000Z"],
+  );
 
-    const deduped = appendDashboardHistory(
-      history,
-      makeSnapshot("2026-04-29T10:00:10.000Z", 99, [99]),
-      2,
-    );
-    expect(deduped).toBe(history);
-  });
+  const deduped = appendDashboardHistory(
+    history,
+    makeSnapshot("2026-04-29T10:00:10.000Z", 99, [99]),
+    2,
+  );
+  assert.equal(deduped, history);
+});
 
-  it("keeps only the newest five minutes of dashboard history", () => {
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
-      makeSnapshot("2026-04-29T10:04:59.000Z", 15, [25]),
-      makeSnapshot("2026-04-29T10:05:01.000Z", 20, [30]),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history keeps only the newest five minutes of dashboard history", () => {
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+    makeSnapshot("2026-04-29T10:04:59.000Z", 15, [25]),
+    makeSnapshot("2026-04-29T10:05:01.000Z", 20, [30]),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    expect(history.map((point) => point.collected_at)).toEqual([
-      "2026-04-29T10:04:59.000Z",
-      "2026-04-29T10:05:01.000Z",
-    ]);
-  });
+  assert.deepEqual(
+    history.map((point) => point.collected_at),
+    ["2026-04-29T10:04:59.000Z", "2026-04-29T10:05:01.000Z"],
+  );
+});
 
-  it("returns a separate utilization series for each GPU", () => {
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
-      makeSnapshot("2026-04-29T10:00:05.000Z", 10, [25, 70]),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history returns a separate utilization series for each GPU", () => {
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
+    makeSnapshot("2026-04-29T10:00:05.000Z", 10, [25, 70]),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    expect(getGpuUsageSeries(history, { index: 0, name: "GPU 0", uuid: "GPU-0" })).toEqual([
-      20, 25,
-    ]);
-    expect(getGpuUsageSeries(history, { index: 1, name: "GPU 1", uuid: "GPU-1" })).toEqual([
-      80, 70,
-    ]);
-  });
+  assert.deepEqual(
+    getGpuUsageSeries(history, { index: 0, name: "GPU 0", uuid: "GPU-0" }),
+    [20, 25],
+  );
+  assert.deepEqual(
+    getGpuUsageSeries(history, { index: 1, name: "GPU 1", uuid: "GPU-1" }),
+    [80, 70],
+  );
+});
 
-  it("returns timestamped CPU samples for time-window charts", () => {
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
-      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history returns timestamped CPU samples for time-window charts", () => {
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+    makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    expect(getCpuUsageSamples(history)).toEqual([
-      { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 10 },
-      { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 15 },
-    ]);
-  });
+  assert.deepEqual(getCpuUsageSamples(history), [
+    { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 10 },
+    { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 15 },
+  ]);
+});
 
-  it("returns weighted total VRAM samples across mixed-size GPUs", () => {
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
-      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history returns weighted total VRAM samples across mixed-size GPUs", () => {
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
+    makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    expect(getGpuMemoryUsageSamples(history)).toEqual([
-      { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 20 },
-      { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 50 },
-    ]);
-  });
+  assert.deepEqual(getGpuMemoryUsageSamples(history), [
+    { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 20 },
+    { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 50 },
+  ]);
+});
 
-  it("returns system power samples from CPU and all GPUs", () => {
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
-      makeSnapshot("2026-04-29T10:00:05.000Z", 15, []),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history returns system power samples from CPU and all GPUs", () => {
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20, 80]),
+    makeSnapshot("2026-04-29T10:00:05.000Z", 15, []),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    expect(getSystemPowerSamples(history)).toEqual([
-      { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 243 },
-      { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 42 },
-    ]);
-  });
+  assert.deepEqual(getSystemPowerSamples(history), [
+    { time: Date.parse("2026-04-29T10:00:00.000Z"), value: 243 },
+    { time: Date.parse("2026-04-29T10:00:05.000Z"), value: 42 },
+  ]);
+});
 
-  it("persists and restores valid browser history", () => {
-    stubStorage();
-    const history = [
-      makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
-      makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
-    ].reduce(
-      (acc, snapshot) => appendDashboardHistory(acc, snapshot),
-      [] as ReturnType<typeof appendDashboardHistory>,
-    );
+test("dashboard history persists and restores valid browser history", () => {
+  stubStorage();
+  const history = [
+    makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
+    makeSnapshot("2026-04-29T10:00:05.000Z", 15, [25]),
+  ].reduce(
+    (acc, snapshot) => appendDashboardHistory(acc, snapshot),
+    [] as ReturnType<typeof appendDashboardHistory>,
+  );
 
-    storeDashboardHistory(history);
+  storeDashboardHistory(history);
 
-    expect(loadStoredDashboardHistory()).toEqual(history);
-  });
+  assert.deepEqual(loadStoredDashboardHistory(), history);
+});
 
-  it("ignores invalid stored history", () => {
-    const storage = stubStorage();
-    storage.set("vllm-studio-dashboard-history", JSON.stringify([{ time: "bad" }]));
+test("dashboard history ignores invalid stored history", () => {
+  const storage = stubStorage();
+  storage.set("vllm-studio-dashboard-history", JSON.stringify([{ time: "bad" }]));
 
-    expect(loadStoredDashboardHistory()).toEqual([]);
-  });
+  assert.deepEqual(loadStoredDashboardHistory(), []);
 });

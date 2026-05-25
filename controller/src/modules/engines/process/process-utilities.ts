@@ -49,10 +49,10 @@ export const detectBackend = (args: string[]): Backend | null => {
   if (executableName === "ds4-server" || executableName === "ds4-server.exe") {
     return "ds4";
   }
-  if (args.some((arg) => arg.includes("vllm.entrypoints.openai.api_server"))) {
+  if (args.some((argument) => argument.includes("vllm.entrypoints.openai.api_server"))) {
     return "vllm";
   }
-  if (args.some((arg, index) => basename(arg) === "vllm" && args[index + 1] === "serve")) {
+  if (args.some((argument, index) => basename(argument) === "vllm" && args[index + 1] === "serve")) {
     return "vllm";
   }
   if (joined.includes("sglang.launch_server")) {

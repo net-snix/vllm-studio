@@ -8,8 +8,17 @@ const withBundleAnalyzer = bundleAnalyzer({
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  outputFileTracingRoot: __dirname,
   images: { unoptimized: true },
-  serverExternalPackages: ["@mariozechner/pi-coding-agent"],
+  // Keep the Pi SDK out of the webpack/turbopack bundle so it loads from
+  // node_modules at runtime (Node-only deps, dynamic jiti loader, etc.).
+  serverExternalPackages: [
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-tui",
+    "jiti",
+  ],
   turbopack: {
     root: path.join(__dirname, ".."),
     resolveAlias: {

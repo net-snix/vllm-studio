@@ -133,6 +133,10 @@ interface CoordinatorDeps { config: Config;
       ready: false, message: `Model ${options.recipe.id} failed to become ready (timeout)`,
     }; }
 
+  /**
+   * Return the readiness endpoint required by the recipe backend.
+   * @param recipe Recipe being launched.
+   */
   private readinessPathFor(recipe: Recipe): string {
     return recipe.backend === "ds4" ? "/v1/models" : "/health";
   }
