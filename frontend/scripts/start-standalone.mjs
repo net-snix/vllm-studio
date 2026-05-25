@@ -17,16 +17,19 @@ const copyDirectory = (from, to) => {
   cpSync(from, to, { recursive: true });
 };
 
-// Check if frontend directory exists inside standalone, which means monorepo or nested structure
 const frontendStandalone = resolve(standaloneRoot, "frontend");
+const rootServer = resolve(standaloneRoot, "server.js");
+const frontendServer = resolve(frontendStandalone, "server.js");
 let serverRoot = standaloneRoot;
 
-if (existsSync(frontendStandalone)) {
-  console.log("Detected nested frontend structure in standalone build.");
+if (existsSync(frontendServer)) {
+  console.log("Detected nested frontend standalone server.");
   serverRoot = frontendStandalone;
-  
-  // We need to copy public and static to the nested location too, or just run from there
-  // The server.js is likely in frontend/server.js
+} else if (!existsSync(rootServer)) {
+  console.error(
+    `Missing standalone server.js in ${standaloneRoot} or ${frontendStandalone}. Run "npm run build" first.`,
+  );
+  process.exit(1);
 }
 
 console.log(`Starting server from: ${serverRoot}`);
@@ -44,4 +47,3 @@ const server = spawn("node", ["server.js"], {
 });
 
 server.on("exit", (code) => process.exit(code ?? 0));
-
