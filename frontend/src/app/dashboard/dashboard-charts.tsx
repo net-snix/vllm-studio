@@ -11,7 +11,7 @@ import { Meter, Section } from "./dashboard-system-sections";
 const CHART_WIDTH = 360;
 const CHART_HEIGHT = 96;
 const CHART_PAD = 6;
-const CHART_WINDOW_MS = 30 * 60 * 1000;
+const CHART_WINDOW_MS = 5 * 60 * 1000;
 const COMPACT_CHART_WINDOW_MS = 60 * 1000;
 
 type ChartPoint = {
@@ -285,7 +285,7 @@ export function GpuTelemetry({
   const sortedGpus = [...data.gpus].sort((a, b) => b.memory_total_bytes - a.memory_total_bytes);
 
   return (
-    <Section title="GPUs" meta={`${sortedGpus.length} ${sortedGpus.length === 1 ? "gpu" : "gpus"}`}>
+    <Section title="GPUs">
       {sortedGpus.length > 0 ? (
         <div className="space-y-2.5">
           <div className="grid gap-2.5 lg:grid-cols-2">
@@ -317,7 +317,7 @@ function GpuUsageGraph({
   const samples = getGpuUsageSamples(history, gpu);
 
   return (
-    <div className="min-w-0 border border-(--border)/45 bg-transparent px-3 py-2 font-mono">
+    <div className="min-w-0 border-t border-(--border)/30 pt-2 font-mono">
       <div className="mb-1.5 flex items-baseline justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-[10.5px] text-(--fg)/82" title={gpu.name}>

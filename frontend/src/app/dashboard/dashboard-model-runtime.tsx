@@ -5,25 +5,50 @@ import { ChevronDown, Square } from "lucide-react";
 import { ModelStopConfirm } from "@/components/model-stop-confirm";
 import type { DashboardLayoutProps } from "@/components/dashboard/layout/dashboard-types";
 import { useModelLifecycle } from "@/hooks/use-model-lifecycle";
-import type { GPU, RecipeWithStatus } from "@/lib/types";
-import { toGB, toGBFromMB } from "@/lib/formatters";
+import type { LinuxDashboardHealth, RecipeWithStatus } from "@/lib/types";
+import { buildRuntimeSummary } from "./dashboard-runtime-summary";
 
 type DashboardModelRuntimeProps = {
   statusData: DashboardLayoutProps;
+  hostname?: string;
+  healthStatus?: LinuxDashboardHealth;
+  hostMeta?: string;
+  hostArch?: string;
+  hostSummary?: DashboardHostSummary | null;
+  controls?: React.ReactNode;
 };
 
-export function DashboardModelRuntime({ statusData }: DashboardModelRuntimeProps) {
+export type DashboardHostSummary = {
+  cpu: string | null;
+  memory: string;
+  vram: string;
+  power: string;
+  uptime: string;
+};
+
+export function DashboardModelRuntime({
+  statusData,
+  hostname,
+  healthStatus = "unknown",
+  hostMeta,
+  hostArch,
+  hostSummary,
+  controls,
+}: DashboardModelRuntimeProps) {
   const runtime = buildRuntimeSummary(statusData);
+  const title = `${hostname ?? "Linux host"} * ${runtime.modelName}`;
 
   return (
-    <section className="mb-3 rounded-[4px] border border-(--border)/70 bg-(--surface)/30 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] sm:px-4">
+    <section className="mb-3 px-1 pt-1 pb-4">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] tracking-[0.04em]">
-            <span className={`h-1.5 w-1.5 ${runtime.running ? "bg-(--fg)" : "bg-(--dim)/55"}`} />
+            <span className={`h-1.5 w-1.5 ${healthDotClass(healthStatus)}`} />
             <span className="font-medium uppercase tracking-[0.16em] text-(--dim)">
-              {runtime.running ? "Active" : "Standby"}
+              {healthStatus === "ok" ? "Active" : healthStatus}
             </span>
+            <RuntimeTag>linux</RuntimeTag>
+            {hostArch ? <RuntimeTag>{hostArch}</RuntimeTag> : null}
             {runtime.backend ? <RuntimeTag>{runtime.backend}</RuntimeTag> : null}
             {runtime.platform ? <RuntimeTag>{runtime.platform}</RuntimeTag> : null}
             {runtime.port ? (
@@ -31,16 +56,20 @@ export function DashboardModelRuntime({ statusData }: DashboardModelRuntimeProps
                 :{runtime.port}
               </span>
             ) : null}
+            {hostMeta ? (
+              <span className="font-mono text-[10px] tabular-nums text-(--dim)/70">{hostMeta}</span>
+            ) : null}
           </div>
           <h2
             className="mt-1.5 min-w-0 text-[20px] font-semibold leading-tight text-(--fg) sm:text-[22px]"
-            title={runtime.modelName}
+            title={title}
           >
-            <span className="line-clamp-2 break-words">{runtime.modelName}</span>
+            <span className="line-clamp-2 break-words">{title}</span>
           </h2>
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          {controls}
           <HeaderStopButton running={runtime.running} />
           <ModelsDropdown
             recipes={statusData.recipes}
@@ -59,7 +88,7 @@ export function DashboardModelRuntime({ statusData }: DashboardModelRuntimeProps
         </div>
       </div>
 
-      <dl className="mt-4 grid w-full grid-cols-1 border-y border-(--border)/35 py-3 sm:grid-cols-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.9fr)_minmax(0,1.08fr)_minmax(0,0.55fr)_minmax(0,0.85fr)_minmax(0,0.9fr)]">
+      <dl className="status-metric-strip mt-5 grid w-full grid-cols-1 border-b border-(--border)/40 pb-5 sm:grid-cols-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.9fr)_minmax(0,1.08fr)_minmax(0,0.55fr)_minmax(0,0.85fr)_minmax(0,0.9fr)]">
         <HeroMetric
           label="Decode"
           value={runtime.decode}
@@ -84,6 +113,16 @@ export function DashboardModelRuntime({ statusData }: DashboardModelRuntimeProps
         <RuntimeStat label="Completion tokens" value={runtime.completionTokens} />
         <RuntimeStat label="Duration" value={runtime.duration} />
       </dl>
+
+      {hostSummary ? (
+        <dl className="mt-3 grid gap-x-5 gap-y-2 border-b border-(--border)/35 pb-3 font-mono sm:grid-cols-2 xl:grid-cols-5">
+          <HostMetric label="CPU" value={hostSummary.cpu ?? "n/a"} unit="%" />
+          <HostMetric label="Memory" value={hostSummary.memory} />
+          <HostMetric label="VRAM" value={hostSummary.vram} />
+          <HostMetric label="System Power" value={hostSummary.power} />
+          <HostMetric label="Uptime" value={hostSummary.uptime} />
+        </dl>
+      ) : null}
     </section>
   );
 }
@@ -262,7 +301,7 @@ function RuntimeButton({
 
 function RuntimeTag({ children }: { children: React.ReactNode }) {
   return (
-    <span className="border border-(--border)/70 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-(--dim)/80">
+    <span className="border border-(--border)/60 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-(--dim)/80">
       {children}
     </span>
   );
@@ -322,155 +361,23 @@ function RuntimeStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function buildRuntimeSummary(statusData: DashboardLayoutProps) {
-  const metrics = statusData.metrics;
-  const currentProcess = statusData.currentProcess;
-  const currentRecipe = statusData.currentRecipe;
-  const running = Boolean(currentProcess);
-  const modelName =
-    currentRecipe?.name ||
-    currentProcess?.served_model_name ||
-    currentProcess?.model_path?.split("/").pop() ||
-    "No model loaded";
-
-  const fallbackPower = sumPositive(statusData.gpus.map((gpu) => gpu.power_draw));
-  const fallbackPowerLimit = sumPositive(statusData.gpus.map((gpu) => gpu.power_limit));
-  const fallbackVramUsed = sumPositive(statusData.gpus.map(gpuUsedGb));
-  const fallbackVramTotal = sumPositive(statusData.gpus.map(gpuTotalGb));
-
-  const decode = firstPositive(
-    metrics?.generation_throughput,
-    metrics?.session_avg_generation,
-    metrics?.session_peak_generation_throughput,
-    metrics?.session_peak_generation,
-    metrics?.peak_generation_tps,
+function HostMetric({ label, value, unit }: { label: string; value: string; unit?: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="truncate text-[9.5px] uppercase tracking-[0.16em] text-(--dim)/70">{label}</dt>
+      <dd className="mt-1 flex min-w-0 items-baseline gap-1.5 tabular-nums text-(--fg)/90">
+        <span className="min-w-0 truncate text-[13px]" title={value}>
+          {value}
+        </span>
+        {unit ? <span className="shrink-0 text-[10px] text-(--dim)/65">{unit}</span> : null}
+      </dd>
+    </div>
   );
-  const prefill = firstPositive(
-    metrics?.prompt_throughput,
-    metrics?.session_avg_prefill,
-    metrics?.session_peak_prompt_throughput,
-    metrics?.session_peak_prefill,
-    metrics?.peak_prefill_tps,
-  );
-  const ttft = firstPositive(
-    metrics?.avg_ttft_ms,
-    metrics?.session_peak_ttft_ms,
-    metrics?.peak_ttft_ms,
-  );
-  const decodePeak = firstPositive(
-    metrics?.session_peak_generation_throughput,
-    metrics?.session_peak_generation,
-    metrics?.peak_generation_tps,
-  );
-  const prefillPeak = firstPositive(
-    metrics?.session_peak_prompt_throughput,
-    metrics?.session_peak_prefill,
-    metrics?.peak_prefill_tps,
-  );
-  const ttftPeak = firstPositive(metrics?.session_peak_ttft_ms, metrics?.peak_ttft_ms);
-
-  const totalPower = firstPositive(metrics?.current_power_watts, fallbackPower);
-  const powerLimit = firstPositive(metrics?.power_limit_watts, fallbackPowerLimit);
-  const vramUsed = firstPositive(metrics?.vram_used_gb, fallbackVramUsed);
-  const vramTotal = firstPositive(metrics?.vram_capacity_gb, fallbackVramTotal);
-  const runningRequests = normalizeCount(metrics?.running_requests);
-  const peakRequests = normalizeCount(metrics?.session_peak_running_requests) || runningRequests;
-
-  return {
-    running,
-    modelName,
-    backend: currentProcess?.backend ?? currentRecipe?.backend ?? null,
-    platform: statusData.platformKind,
-    port: statusData.inferencePort || currentProcess?.port || null,
-    decode: formatNumberMetric(decode, 1),
-    ttft: formatNumberMetric(ttft, 0),
-    prefill: formatNumberMetric(prefill, 1),
-    decodePeak: formatPeak(decodePeak, 1),
-    ttftPeak: formatPeak(ttftPeak, 0, " ms"),
-    prefillPeak: formatPeak(prefillPeak, 1),
-    requests: `${runningRequests}/${peakRequests}`,
-    vram: formatRatio(vramUsed, vramTotal, "G", 1),
-    power: formatRatio(totalPower, powerLimit, "W", 0),
-    totalTokens: tokenTotalMetric(metrics),
-    promptTokens: tokenMetric(metrics?.prompt_tokens_total),
-    completionTokens: tokenMetric(metrics?.generation_tokens_total),
-    duration: durationMetric(metrics?.latency_avg),
-  };
 }
 
-function firstPositive(...values: Array<number | null | undefined>): number | null {
-  for (const value of values) {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
-  }
-  return null;
-}
-
-function normalizeCount(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
-}
-
-function formatNumberMetric(value: number | null, digits: number): string | null {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? value.toFixed(digits)
-    : null;
-}
-
-function formatPeak(value: number | null, digits: number, suffix = ""): string | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? `peak ${value.toFixed(digits)}${suffix}`
-    : undefined;
-}
-
-function formatRatio(
-  value: number | null,
-  total: number | null,
-  unit: string,
-  valueDigits: number,
-): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
-  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) return null;
-  return `${value.toFixed(valueDigits)}/${total.toFixed(0)}${unit}`;
-}
-
-function tokenMetric(...values: Array<number | undefined>): string {
-  const value = values.find(
-    (item) => typeof item === "number" && Number.isFinite(item) && item >= 0,
-  );
-  return typeof value === "number" ? Math.round(value).toLocaleString() : "unavailable";
-}
-
-function tokenTotalMetric(metrics: DashboardLayoutProps["metrics"]): string {
-  const explicit = tokenMetric(metrics?.total_tokens, metrics?.tokens_total);
-  if (explicit !== "unavailable") return explicit;
-  if (
-    typeof metrics?.prompt_tokens_total === "number" &&
-    typeof metrics.generation_tokens_total === "number"
-  ) {
-    return tokenMetric(metrics.prompt_tokens_total + metrics.generation_tokens_total);
-  }
-  return "unavailable";
-}
-
-function durationMetric(value: number | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "unavailable";
-  return value > 1000 ? `${(value / 1000).toFixed(2)}s` : `${value.toFixed(0)}ms`;
-}
-
-function gpuUsedGb(gpu: GPU): number {
-  if (gpu.memory_used_mb != null) return toGBFromMB(gpu.memory_used_mb);
-  return toGB(gpu.memory_used);
-}
-
-function gpuTotalGb(gpu: GPU): number {
-  if (gpu.memory_total_mb != null) return toGBFromMB(gpu.memory_total_mb);
-  return toGB(gpu.memory_total);
-}
-
-function sumPositive(values: Array<number | null | undefined>): number | null {
-  const total = values.reduce<number>(
-    (sum, value) =>
-      typeof value === "number" && Number.isFinite(value) && value > 0 ? sum + value : sum,
-    0,
-  );
-  return total > 0 ? total : null;
+function healthDotClass(status: LinuxDashboardHealth): string {
+  if (status === "critical") return "bg-(--err)";
+  if (status === "warning") return "bg-(--hl3)";
+  if (status === "ok") return "bg-(--hl2)";
+  return "bg-(--dim)/55";
 }

@@ -11,7 +11,7 @@ import type {
 import { formatBytes, formatUptime } from "./dashboard-format";
 import { formatGpuGb, formatGpuPower, GpuTelemetry, SystemOverview } from "./dashboard-charts";
 import { type DashboardHistoryPoint } from "./dashboard-history";
-import { DashboardModelRuntime } from "./dashboard-model-runtime";
+import { DashboardModelRuntime, type DashboardHostSummary } from "./dashboard-model-runtime";
 import {
   AlertStrip,
   ContainersTable,
@@ -61,6 +61,52 @@ export function LinuxDashboardView({
     return "ok";
   }, [data, visibleAlerts]);
   const summary = data ? buildSummary(data, history) : null;
+  const dashboardControls = (
+    <>
+      <label className="inline-flex h-8 items-center gap-2 px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--dim) hover:bg-(--fg)/5">
+        <input
+          type="checkbox"
+          checked={autoRefresh}
+          onChange={(event) => onAutoRefreshChange(event.target.checked)}
+          className="h-3 w-3 border-(--border) bg-transparent accent-(--fg)"
+        />
+        Auto
+      </label>
+      <button
+        onClick={onRefresh}
+        className="inline-flex h-8 items-center gap-2 px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--fg) hover:bg-(--fg)/5"
+      >
+        <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+        Refresh
+      </button>
+      <HostPowerConfirm
+        action="restart"
+        onConfirm={onRestart}
+        trigger={({ open, running }) => (
+          <button
+            onClick={open}
+            disabled={running}
+            className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+          >
+            {running ? "Restarting..." : "Restart"}
+          </button>
+        )}
+      />
+      <HostPowerConfirm
+        action="shutdown"
+        onConfirm={onShutdown}
+        trigger={({ open, running }) => (
+          <button
+            onClick={open}
+            disabled={running}
+            className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+          >
+            {running ? "Shutting..." : "Shut down"}
+          </button>
+        )}
+      />
+    </>
+  );
 
   if (loading && !data) {
     return (
@@ -74,85 +120,15 @@ export function LinuxDashboardView({
   return (
     <div className="min-h-full bg-(--bg) text-(--fg)">
       <div className="mx-auto max-w-[1600px] px-3 py-3 pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:px-4 lg:px-5">
-        <DashboardModelRuntime statusData={statusData} />
-
-        <header>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] tracking-[0.04em]">
-                <span className={`h-1.5 w-1.5 ${statusDotClass(topStatus)}`} />
-                <span className="font-medium uppercase tracking-[0.16em] text-(--dim)">
-                  {topStatus === "ok" ? "Active" : topStatus}
-                </span>
-                <Tag>linux</Tag>
-                <Tag>{data?.host.arch ?? "host"}</Tag>
-                {data ? (
-                  <span className="text-[10px] tabular-nums text-(--dim)/70">
-                    {data.host.platform} {data.host.kernel}
-                  </span>
-                ) : null}
-              </div>
-              <h1 className="mt-1 truncate text-[22px] font-semibold leading-tight text-(--fg)">
-                {data?.host.hostname ?? "Linux host"}
-              </h1>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-1.5">
-              <label className="inline-flex h-8 items-center gap-2 border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--dim) hover:bg-(--fg)/5">
-                <input
-                  type="checkbox"
-                  checked={autoRefresh}
-                  onChange={(event) => onAutoRefreshChange(event.target.checked)}
-                  className="h-3 w-3 border-(--border) bg-transparent accent-(--fg)"
-                />
-                Auto
-              </label>
-              <button
-                onClick={onRefresh}
-                className="inline-flex h-8 items-center gap-2 border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--fg) hover:bg-(--fg)/5"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-                Refresh
-              </button>
-              <HostPowerConfirm
-                action="restart"
-                onConfirm={onRestart}
-                trigger={({ open, running }) => (
-                  <button
-                    onClick={open}
-                    disabled={running}
-                    className="inline-flex h-8 items-center border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
-                  >
-                    {running ? "Restarting..." : "Restart"}
-                  </button>
-                )}
-              />
-              <HostPowerConfirm
-                action="shutdown"
-                onConfirm={onShutdown}
-                trigger={({ open, running }) => (
-                  <button
-                    onClick={open}
-                    disabled={running}
-                    className="inline-flex h-8 items-center border border-(--border) px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
-                  >
-                    {running ? "Shutting..." : "Shut down"}
-                  </button>
-                )}
-              />
-            </div>
-          </div>
-
-          {summary ? (
-            <dl className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.82fr)]">
-              <MetricCard label="CPU" value={summary.cpu} unit="%" detailWrap />
-              <MetricCard label="Memory" value={summary.memory} />
-              <MetricCard label="VRAM" value={summary.vram} />
-              <MetricCard label="System Power" value={summary.power} compactValue />
-              <MetricCard label="Uptime" value={summary.uptime} />
-            </dl>
-          ) : null}
-        </header>
+        <DashboardModelRuntime
+          statusData={statusData}
+          hostname={data?.host.hostname}
+          healthStatus={topStatus}
+          hostMeta={data ? `${data.host.platform} ${data.host.kernel}` : undefined}
+          hostArch={data?.host.arch}
+          hostSummary={summary}
+          controls={dashboardControls}
+        />
 
         {error ? (
           <div className="mt-4 border border-(--err)/35 px-3 py-2 font-mono text-[11px] text-(--err)">
@@ -198,59 +174,10 @@ export function LinuxDashboardView({
   );
 }
 
-function MetricCard({
-  label,
-  value,
-  unit,
-  detail,
-  detailWrap = false,
-  compactValue = false,
-}: {
-  label: string;
-  value: string | null;
-  unit?: string;
-  detail?: string;
-  detailWrap?: boolean;
-  compactValue?: boolean;
-}) {
-  return (
-    <div className="min-w-0 rounded-[4px] border border-(--border)/70 bg-(--surface)/35 px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-      <dt className="font-mono text-[10px] uppercase tracking-[0.2em] text-(--dim)/80">{label}</dt>
-      <dd className="mt-2 flex min-w-0 items-baseline gap-1.5 font-mono tabular-nums">
-        <span
-          className={`min-w-0 font-light text-(--fg)/95 ${
-            compactValue
-              ? "whitespace-normal break-words text-[17px] leading-tight"
-              : "truncate text-[22px] leading-none"
-          }`}
-        >
-          {value ?? "n/a"}
-        </span>
-        {unit ? <span className="shrink-0 text-[11px] text-(--dim)/70">{unit}</span> : null}
-      </dd>
-      <div className="mt-2 min-w-0">
-        <span
-          className={`block min-w-0 font-mono text-[10.5px] text-(--dim)/70 ${
-            detailWrap ? "whitespace-normal break-words leading-snug" : "truncate"
-          }`}
-          title={detail}
-        >
-          {detail ?? "\u00a0"}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function Tag({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="border border-(--border) px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-(--dim)/80">
-      {children}
-    </span>
-  );
-}
-
-function buildSummary(data: LinuxDashboardSnapshot, history: DashboardHistoryPoint[]) {
+function buildSummary(
+  data: LinuxDashboardSnapshot,
+  history: DashboardHistoryPoint[],
+): DashboardHostSummary {
   const latestHistory = history.at(-1);
   const cpuValue =
     latestHistory?.cpu_usage_percent ?? data.cpu.usage_percent ?? data.cpu.load_percent_1m ?? null;
@@ -288,13 +215,6 @@ function knownBackendIds(statusData: DashboardLayoutProps): string[] {
     if (right === statusData.currentProcess?.backend) return 1;
     return left.localeCompare(right);
   });
-}
-
-function statusDotClass(status: LinuxDashboardHealth): string {
-  if (status === "critical") return "bg-(--err)";
-  if (status === "warning") return "bg-(--hl3)";
-  if (status === "ok") return "bg-(--hl2)";
-  return "bg-(--dim)/55";
 }
 
 function sumFinite(values: Array<number | null | undefined>): number | null {
