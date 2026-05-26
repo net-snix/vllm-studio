@@ -107,21 +107,21 @@ export function DashboardModelRuntime({
         <CompactMetric label="GPU Power" value={runtime.power} />
       </dl>
 
-      <dl className="mt-2 grid gap-2 font-mono text-[10.5px] text-(--dim) sm:grid-cols-2 xl:grid-cols-4">
-        <RuntimeStat label="Total tokens" value={runtime.totalTokens} />
-        <RuntimeStat label="Prompt tokens" value={runtime.promptTokens} />
-        <RuntimeStat label="Completion tokens" value={runtime.completionTokens} />
-        <RuntimeStat label="Duration" value={runtime.duration} />
-      </dl>
-
       {hostSummary ? (
-        <dl className="mt-3 grid gap-x-5 gap-y-2 border-b border-(--border)/35 pb-3 font-mono sm:grid-cols-2 xl:grid-cols-4">
+        <dl className="mt-3 grid gap-x-5 gap-y-2 font-mono sm:grid-cols-2 xl:grid-cols-4">
           <HostMetric label="CPU" value={hostSummary.cpu ?? "n/a"} unit="%" />
           <HostMetric label="Memory" value={hostSummary.memory} />
           <HostMetric label="System Power" value={hostSummary.power} />
           <HostMetric label="Uptime" value={hostSummary.uptime} />
         </dl>
       ) : null}
+
+      <dl className="mt-2 grid gap-2 border-b border-(--border)/35 pb-3 font-mono text-[10.5px] text-(--dim) sm:grid-cols-2 xl:grid-cols-4">
+        <RuntimeStat label="Total tokens" value={runtime.totalTokens} />
+        <RuntimeStat label="Prompt tokens" value={runtime.promptTokens} />
+        <RuntimeStat label="Completion tokens" value={runtime.completionTokens} />
+        <RuntimeStat label="Duration" value={runtime.duration} />
+      </dl>
     </section>
   );
 }
