@@ -38,7 +38,7 @@ export function DashboardModelRuntime({
   const title = `${hostLabel} - ${runtime.modelName}`;
 
   return (
-    <section className="mb-3 px-1 pt-1 pb-4">
+    <section className="mb-2 px-1 pt-1 pb-2">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] tracking-[0.04em]">
@@ -109,7 +109,7 @@ export function DashboardModelRuntime({
         <CompactMetric label="Uptime" value={hostSummary?.uptime ?? "n/a"} />
       </dl>
 
-      <dl className="mt-2 grid gap-2 border-b border-(--border)/35 pb-3 font-mono text-[10.5px] text-(--dim) sm:grid-cols-2 xl:grid-cols-4">
+      <dl className="mt-2 grid gap-x-3 gap-y-1 font-mono text-[10.5px] text-(--dim) sm:grid-cols-2 xl:grid-cols-4">
         <RuntimeStat label="Total tokens" value={runtime.totalTokens} />
         <RuntimeStat label="Prompt tokens" value={runtime.promptTokens} />
         <RuntimeStat label="Completion tokens" value={runtime.completionTokens} />
@@ -344,7 +344,7 @@ function CompactMetric({ label, value }: { label: string; value: string | null }
 
 function RuntimeStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex min-w-0 items-baseline justify-between gap-3 border-t border-(--border)/25 pt-1">
+    <div className="flex min-w-0 items-baseline justify-between gap-3">
       <dt className="truncate uppercase tracking-[0.12em]">{label}</dt>
       <dd className="truncate text-(--fg)" title={value}>
         {value}
