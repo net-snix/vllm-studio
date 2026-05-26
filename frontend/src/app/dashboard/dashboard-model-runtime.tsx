@@ -109,7 +109,7 @@ export function DashboardModelRuntime({
         />
         <CompactMetric label="Req" value={runtime.requests} />
         <CompactMetric label="VRAM" value={runtime.vram} />
-        <CompactMetric label="Power" value={runtime.power} />
+        <CompactMetric label="GPU Power" value={runtime.power} />
       </dl>
 
       <dl className="mt-2 grid gap-2 font-mono text-[10.5px] text-(--dim) sm:grid-cols-2 xl:grid-cols-4">
