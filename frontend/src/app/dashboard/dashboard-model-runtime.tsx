@@ -88,7 +88,7 @@ export function DashboardModelRuntime({
         </div>
       </div>
 
-      <dl className="status-metric-strip mt-5 grid w-full grid-cols-1 border-b border-(--border)/40 pb-5 sm:grid-cols-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.9fr)_minmax(0,1.08fr)_minmax(0,0.55fr)_minmax(0,0.85fr)_minmax(0,0.9fr)]">
+      <dl className="status-metric-strip mt-5 grid w-full grid-cols-1 border-b border-(--border)/40 pb-5 sm:grid-cols-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.9fr)_minmax(0,1.08fr)_minmax(0,0.5fr)_minmax(0,0.78fr)_minmax(0,0.82fr)_minmax(0,0.82fr)_minmax(0,0.62fr)]">
         <HeroMetric
           label="Decode"
           value={runtime.decode}
@@ -105,16 +105,9 @@ export function DashboardModelRuntime({
         <CompactMetric label="Req" value={runtime.requests} />
         <CompactMetric label="VRAM" value={runtime.vram} />
         <CompactMetric label="GPU Power" value={runtime.power} />
+        <CompactMetric label="System Power" value={hostSummary?.power ?? "n/a"} />
+        <CompactMetric label="Uptime" value={hostSummary?.uptime ?? "n/a"} />
       </dl>
-
-      {hostSummary ? (
-        <dl className="mt-3 grid gap-x-5 gap-y-2 font-mono sm:grid-cols-2 xl:grid-cols-4">
-          <HostMetric label="CPU" value={hostSummary.cpu ?? "n/a"} unit="%" />
-          <HostMetric label="Memory" value={hostSummary.memory} />
-          <HostMetric label="System Power" value={hostSummary.power} />
-          <HostMetric label="Uptime" value={hostSummary.uptime} />
-        </dl>
-      ) : null}
 
       <dl className="mt-2 grid gap-2 border-b border-(--border)/35 pb-3 font-mono text-[10.5px] text-(--dim) sm:grid-cols-2 xl:grid-cols-4">
         <RuntimeStat label="Total tokens" value={runtime.totalTokens} />
@@ -355,20 +348,6 @@ function RuntimeStat({ label, value }: { label: string; value: string }) {
       <dt className="truncate uppercase tracking-[0.12em]">{label}</dt>
       <dd className="truncate text-(--fg)" title={value}>
         {value}
-      </dd>
-    </div>
-  );
-}
-
-function HostMetric({ label, value, unit }: { label: string; value: string; unit?: string }) {
-  return (
-    <div className="min-w-0">
-      <dt className="truncate text-[9.5px] uppercase tracking-[0.16em] text-(--dim)/70">{label}</dt>
-      <dd className="mt-1 flex min-w-0 items-baseline gap-1.5 tabular-nums text-(--fg)/90">
-        <span className="min-w-0 truncate text-[13px]" title={value}>
-          {value}
-        </span>
-        {unit ? <span className="shrink-0 text-[10px] text-(--dim)/65">{unit}</span> : null}
       </dd>
     </div>
   );
