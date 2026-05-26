@@ -66,11 +66,11 @@ export function AlertStrip({ alerts }: { alerts: LinuxDashboardAlert[] }) {
   if (alerts.length === 0) return null;
 
   return (
-    <div className="grid gap-2 border-t border-(--border)/35 pt-3 md:grid-cols-2">
+    <div className="fixed right-4 bottom-4 z-50 grid w-[min(28rem,calc(100vw-2rem))] gap-2">
       {alerts.slice(0, 4).map((alert) => (
         <div
           key={`${alert.source}-${alert.message}`}
-          className={`flex items-center gap-2 border px-3 py-2 font-mono text-[10.5px] ${alertClasses[alert.severity]}`}
+          className={`flex items-center gap-2 border px-3 py-2 font-mono text-[10.5px] shadow-lg backdrop-blur ${alertClasses[alert.severity]}`}
         >
           <span className="h-1.5 w-1.5 shrink-0 bg-current" />
           <span className="min-w-0 truncate">{alert.message}</span>
