@@ -12,7 +12,6 @@ type DashboardModelRuntimeProps = {
   statusData: DashboardLayoutProps;
   hostname?: string;
   healthStatus?: LinuxDashboardHealth;
-  hostMeta?: string;
   hostSummary?: DashboardHostSummary | null;
   controls?: React.ReactNode;
   trailingControls?: React.ReactNode;
@@ -30,7 +29,6 @@ export function DashboardModelRuntime({
   statusData,
   hostname,
   healthStatus = "unknown",
-  hostMeta,
   hostSummary,
   controls,
   trailingControls,
@@ -55,9 +53,6 @@ export function DashboardModelRuntime({
               <span className="font-mono text-[10px] tabular-nums text-(--dim)/70">
                 :{runtime.port}
               </span>
-            ) : null}
-            {hostMeta ? (
-              <span className="font-mono text-[10px] tabular-nums text-(--dim)/70">{hostMeta}</span>
             ) : null}
           </div>
           <h2

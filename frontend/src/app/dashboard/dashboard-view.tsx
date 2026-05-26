@@ -128,7 +128,6 @@ export function LinuxDashboardView({
           statusData={statusData}
           hostname={data?.host.hostname}
           healthStatus={topStatus}
-          hostMeta={data ? `${data.host.platform} ${data.host.kernel}` : undefined}
           hostSummary={summary}
           controls={dashboardControls}
           trailingControls={dashboardTrailingControls}
