@@ -79,6 +79,10 @@ export function LinuxDashboardView({
         <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
         Refresh
       </button>
+    </>
+  );
+  const dashboardTrailingControls = (
+    <>
       <HostPowerConfirm
         action="restart"
         onConfirm={onRestart}
@@ -92,22 +96,20 @@ export function LinuxDashboardView({
           </button>
         )}
       />
+      <HostPowerConfirm
+        action="shutdown"
+        onConfirm={onShutdown}
+        trigger={({ open, running }) => (
+          <button
+            onClick={open}
+            disabled={running}
+            className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+          >
+            {running ? "Shutting..." : "Shut down"}
+          </button>
+        )}
+      />
     </>
-  );
-  const dashboardTrailingControls = (
-    <HostPowerConfirm
-      action="shutdown"
-      onConfirm={onShutdown}
-      trigger={({ open, running }) => (
-        <button
-          onClick={open}
-          disabled={running}
-          className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
-        >
-          {running ? "Shutting..." : "Shut down"}
-        </button>
-      )}
-    />
   );
 
   if (loading && !data) {
