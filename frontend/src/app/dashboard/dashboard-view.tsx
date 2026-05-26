@@ -92,20 +92,22 @@ export function LinuxDashboardView({
           </button>
         )}
       />
-      <HostPowerConfirm
-        action="shutdown"
-        onConfirm={onShutdown}
-        trigger={({ open, running }) => (
-          <button
-            onClick={open}
-            disabled={running}
-            className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
-          >
-            {running ? "Shutting..." : "Shut down"}
-          </button>
-        )}
-      />
     </>
+  );
+  const dashboardTrailingControls = (
+    <HostPowerConfirm
+      action="shutdown"
+      onConfirm={onShutdown}
+      trigger={({ open, running }) => (
+        <button
+          onClick={open}
+          disabled={running}
+          className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+        >
+          {running ? "Shutting..." : "Shut down"}
+        </button>
+      )}
+    />
   );
 
   if (loading && !data) {
@@ -127,6 +129,7 @@ export function LinuxDashboardView({
           hostMeta={data ? `${data.host.platform} ${data.host.kernel}` : undefined}
           hostSummary={summary}
           controls={dashboardControls}
+          trailingControls={dashboardTrailingControls}
         />
 
         {error ? (

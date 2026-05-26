@@ -15,6 +15,7 @@ type DashboardModelRuntimeProps = {
   hostMeta?: string;
   hostSummary?: DashboardHostSummary | null;
   controls?: React.ReactNode;
+  trailingControls?: React.ReactNode;
 };
 
 export type DashboardHostSummary = {
@@ -32,6 +33,7 @@ export function DashboardModelRuntime({
   hostMeta,
   hostSummary,
   controls,
+  trailingControls,
 }: DashboardModelRuntimeProps) {
   const runtime = buildRuntimeSummary(statusData);
   const hostLabel = hostname ?? "Linux host";
@@ -87,6 +89,7 @@ export function DashboardModelRuntime({
             onClick={statusData.onBenchmark}
             disabled={!runtime.running || statusData.benchmarking}
           />
+          {trailingControls}
         </div>
       </div>
 
