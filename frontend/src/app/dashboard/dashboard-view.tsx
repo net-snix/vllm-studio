@@ -184,17 +184,13 @@ function buildSummary(
   const totalVramUsed = data.gpus.reduce((sum, gpu) => sum + gpu.memory_used_bytes, 0);
   const totalVram = data.gpus.reduce((sum, gpu) => sum + gpu.memory_total_bytes, 0);
   const gpuPower = sumFinite(data.gpus.map((gpu) => gpu.power_draw_watts));
-  const cpuPowerLabel =
-    data.cpu.power_draw_watts == null
-      ? "CPU n/a"
-      : `CPU ${formatGpuPower(data.cpu.power_draw_watts, undefined)}`;
-  const gpuPowerLabel = gpuPower == null ? "GPU n/a" : `GPU ${formatGpuPower(gpuPower, undefined)}`;
+  const systemPower = sumFinite([data.cpu.power_draw_watts, gpuPower]);
 
   return {
     cpu: cpuValue == null ? null : String(Math.round(cpuValue)),
     memory: `${formatGpuGb(data.memory.used_bytes)}/${formatGpuGb(data.memory.total_bytes)}`,
     vram: `${formatGpuGb(totalVramUsed)}/${formatGpuGb(totalVram)}`,
-    power: `${cpuPowerLabel}/${gpuPowerLabel}`,
+    power: formatGpuPower(systemPower, undefined),
     uptime: formatUptime(data.host.uptime_seconds),
   };
 }
