@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const SHUTDOWN_GRACE_MS = 1_000;
+
 const thisFile = fileURLToPath(import.meta.url);
 const projectRoot = resolve(dirname(thisFile), "..");
 const standaloneRoot = resolve(projectRoot, ".next", "standalone");
@@ -39,6 +41,7 @@ copyDirectory(resolve(projectRoot, ".next", "static"), resolve(serverRoot, ".nex
 
 const server = spawn("node", ["server.js"], {
   cwd: serverRoot,
+  detached: true,
   stdio: "inherit",
   env: {
     ...process.env,
@@ -46,4 +49,56 @@ const server = spawn("node", ["server.js"], {
   },
 });
 
-server.on("exit", (code) => process.exit(code ?? 0));
+let isShuttingDown = false;
+
+const signalServer = (signal) => {
+  if (!server.pid) {
+    return false;
+  }
+
+  try {
+    process.kill(-server.pid, signal);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ESRCH") {
+      return false;
+    }
+
+    throw error;
+  }
+};
+
+const stopServer = (signal) => {
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
+  console.log(`Received ${signal}; stopping standalone server.`);
+
+  const forceStop = setTimeout(() => {
+    console.warn(`Standalone server did not stop within ${SHUTDOWN_GRACE_MS}ms; forcing exit.`);
+    signalServer("SIGKILL");
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS);
+  forceStop.unref();
+
+  if (server.exitCode !== null || server.killed) {
+    process.exit(0);
+  }
+
+  if (!signalServer("SIGTERM")) {
+    process.exit(0);
+  }
+};
+
+process.once("SIGINT", () => stopServer("SIGINT"));
+process.once("SIGTERM", () => stopServer("SIGTERM"));
+
+server.on("exit", (code, signal) => {
+  if (signal && isShuttingDown) {
+    process.exit(0);
+  }
+
+  process.exit(code ?? 0);
+});
