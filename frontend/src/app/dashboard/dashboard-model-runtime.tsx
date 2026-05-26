@@ -13,7 +13,6 @@ type DashboardModelRuntimeProps = {
   hostname?: string;
   healthStatus?: LinuxDashboardHealth;
   hostMeta?: string;
-  hostArch?: string;
   hostSummary?: DashboardHostSummary | null;
   controls?: React.ReactNode;
 };
@@ -31,7 +30,6 @@ export function DashboardModelRuntime({
   hostname,
   healthStatus = "unknown",
   hostMeta,
-  hostArch,
   hostSummary,
   controls,
 }: DashboardModelRuntimeProps) {
@@ -49,7 +47,6 @@ export function DashboardModelRuntime({
               {healthStatus === "ok" ? "Active" : healthStatus}
             </span>
             <RuntimeTag>linux</RuntimeTag>
-            {hostArch ? <RuntimeTag>{hostArch}</RuntimeTag> : null}
             {runtime.backend ? <RuntimeTag>{runtime.backend}</RuntimeTag> : null}
             {runtime.platform ? <RuntimeTag>{runtime.platform}</RuntimeTag> : null}
             {runtime.port ? (
