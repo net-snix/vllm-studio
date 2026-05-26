@@ -663,9 +663,6 @@ const buildAlerts = (snapshot: Omit<LinuxDashboardSnapshot, "alerts">): Dashboar
     } else if ((gpu.temperature_c ?? 0) >= 82) {
       push("warning", `gpu${gpu.index}`, `${gpu.name} is above 82 C`);
     }
-    if ((gpu.memory_used_percent ?? 0) >= 95) {
-      push("warning", `gpu${gpu.index}`, `${gpu.name} VRAM is above 95%`);
-    }
   }
 
   if (snapshot.gpus.length === 0 && snapshot.host.platform === "linux") {
