@@ -1,6 +1,13 @@
 "use client";
 
-import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { safeJson } from "@/lib/agent/safe-json";
 import { clampComputerWidth, gentlySnapComputerWidth } from "@/lib/agent/tools/persistence";
 import { createInitialState, reducer } from "@/lib/agent/workspace/store";
@@ -14,7 +21,6 @@ import {
 } from "@/lib/agent/workspace/effects";
 import { useWorkspaceHydrationEffects } from "@/hooks/agent/use-workspace-hydration-effects";
 import { useBrowserEventsEffects } from "@/hooks/agent/use-browser-events-effects";
-import { useLegacyEffect } from "@/hooks/agent/use-legacy-effects";
 import type {
   AgentModel,
   PaneId,
@@ -23,6 +29,9 @@ import type {
 } from "@/lib/agent/workspace/types";
 import { useProjects } from "@/lib/agent/projects/context";
 import { useTools } from "@/lib/agent/tools/context";
+import { getApiKey } from "@/lib/api-key";
+import { getStoredBackendUrl } from "@/lib/backend-url";
+import { loadSavedControllers, normalizeControllerUrl } from "@/lib/controllers";
 import type { Project } from "@/lib/agent/projects/types";
 import { paneSessions } from "@/lib/agent/sessions/selectors";
 import { runBrowserPanelCommand, type BrowserCommandResult } from "@/lib/agent/browser/command";
@@ -41,7 +50,6 @@ export type WorkspaceHandles = {
   registerBrowserHandle: (handle: AgentBrowserHandle | null) => void;
   registerComputerAside: (element: HTMLElement | null) => void;
   openNewSessionInFocusedPane: (project?: Project) => void;
-  openSideSessionFromFocusedPane: () => void;
   replaySessionInFocusedPane: (piSessionId: string) => void;
   replaySessionInSplitPane: (piSessionId: string) => void;
   openSessionPayloadInPane: (paneId: PaneId, payload: SessionDropPayload) => void;
@@ -111,6 +119,17 @@ function focusedBrowserSessionId(state: WorkspaceState): string | null {
   return activeSession?.runtimeSessionId || pane.runtimeSessionId || null;
 }
 
+function browserSessionIsKnown(state: WorkspaceState, sessionId: string): boolean {
+  if (!sessionId) return false;
+  for (const pane of state.panesById.values()) {
+    if (pane.runtimeSessionId === sessionId) return true;
+  }
+  for (const session of state.sessions.values()) {
+    if (session.runtimeSessionId === sessionId) return true;
+  }
+  return false;
+}
+
 function postBrowserResult(id: string, result: BrowserCommandResult) {
   return fetch("/api/agent/browser/result", {
     method: "POST",
@@ -135,7 +154,7 @@ function createBrowserEvents(
     verb: string,
     payload: Record<string, unknown>,
   ) => Promise<BrowserCommandResult>,
-  focusedSessionId: () => string | null,
+  resolveSession: (sessionId: string) => { focused: string | null; known: boolean },
 ): BrowserEventsSubscription {
   let source: EventSource | null = null;
   let enabled = false;
@@ -156,12 +175,14 @@ function createBrowserEvents(
         if (typeof event.data !== "string") return;
         const command = parseBrowserCommand(event.data);
         if (!command || typeof fetch !== "function") return;
-        const focused = focusedSessionId();
-        if (command.sessionId && command.sessionId !== focused) {
+        const session = command.sessionId
+          ? resolveSession(command.sessionId)
+          : { focused: null, known: true };
+        if (command.sessionId && !session.known) {
           void postBrowserResult(command.id, {
             ok: false,
-            error: focused
-              ? `Browser is connected to the focused session (${focused}); focus the requesting session to run browser_${command.verb}.`
+            error: session.focused
+              ? `Browser is connected to ${session.focused}; the requesting session ${command.sessionId} is no longer open.`
               : `Browser is not connected to the requesting session (${command.sessionId}).`,
           });
           return;
@@ -180,6 +201,45 @@ function createBrowserEvents(
   };
 }
 
+function agentModelControllersPayload() {
+  const byUrl = new Map<string, { url: string; apiKey?: string; name?: string }>();
+  const activeUrl = normalizeControllerUrl(getStoredBackendUrl());
+  if (activeUrl) {
+    const activeApiKey = getApiKey();
+    byUrl.set(activeUrl, {
+      url: activeUrl,
+      ...(activeApiKey ? { apiKey: activeApiKey } : {}),
+      name: "primary",
+    });
+  }
+  for (const controller of loadSavedControllers()) {
+    const url = normalizeControllerUrl(controller.url);
+    if (!url) continue;
+    const existing = byUrl.get(url);
+    byUrl.set(url, {
+      ...existing,
+      url,
+      ...(controller.apiKey || existing?.apiKey
+        ? { apiKey: controller.apiKey || existing?.apiKey }
+        : {}),
+      ...(controller.name || existing?.name ? { name: controller.name || existing?.name } : {}),
+    });
+  }
+  return [...byUrl.values()];
+}
+
+async function loadAgentModelsPayload(): Promise<{ models?: AgentModel[]; error?: string }> {
+  const response = await fetch("/api/agent/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ controllers: agentModelControllersPayload() }),
+  });
+  const payload = await safeJson<{ models?: AgentModel[]; error?: string }>(response);
+  if (!response.ok) throw new Error(payload.error || "Failed to load models");
+  return payload;
+}
+
 function api(): WorkspaceEffectDeps["api"] {
   return {
     loadSetupChecks: async () => {
@@ -187,10 +247,7 @@ function api(): WorkspaceEffectDeps["api"] {
       return safeJson<{ checks?: Array<{ id: string; ok: boolean; guidance?: string }> }>(response);
     },
     loadModels: async () => {
-      const response = await fetch("/api/agent/models", { cache: "no-store" });
-      const payload = await safeJson<{ models?: AgentModel[]; error?: string }>(response);
-      if (!response.ok) throw new Error(payload.error || "Failed to load models");
-      return payload;
+      return loadAgentModelsPayload();
     },
   };
 }
@@ -226,9 +283,10 @@ export function useWorkspace(): UseWorkspaceResult {
   const controller = useMemo(() => {
     let browserEvents: BrowserEventsSubscription | null = null;
     const getBrowserEvents = () => {
-      browserEvents ??= createBrowserEvents(runBrowserCommand, () =>
-        focusedBrowserSessionId(stateRef.current),
-      );
+      browserEvents ??= createBrowserEvents(runBrowserCommand, (sessionId) => ({
+        focused: focusedBrowserSessionId(stateRef.current),
+        known: browserSessionIsKnown(stateRef.current, sessionId),
+      }));
       return browserEvents;
     };
     const makeDeps = (workspaceDispatch: WorkspaceDispatch): WorkspaceEffectDeps | null => {
@@ -276,41 +334,41 @@ export function useWorkspace(): UseWorkspaceResult {
 
   useBrowserEventsEffects({ browserEvents, enabled: tools.browser.enabled });
 
-  // Re-fetch the model list whenever the active controller (backend URL or
-  // api key) changes. The control panel persists this to localStorage and
-  // fires a `storage` event on changes; we listen for it here so the agent's
-  // model picker always reflects whichever controller is currently primary.
-  useLegacyEffect(() => {
-    if (typeof window === "undefined") return;
-    const reload = () => {
-      dispatch({ type: "setModelsLoading", loading: true });
-      dispatch({ type: "setError", error: "" });
-      void (async () => {
-        const response = await fetch("/api/agent/models", { cache: "no-store" });
-        const payload = await safeJson<{ models?: AgentModel[]; error?: string }>(response);
-        if (!response.ok) throw new Error(payload.error || "Failed to load models");
-        return payload.models ?? [];
-      })()
-        .then((models) => {
-          dispatch({ type: "setModels", models });
-        })
-        .catch((error) => {
-          dispatch({
-            type: "setError",
-            error: error instanceof Error ? error.message : String(error),
-          });
-          dispatch({ type: "setModels", models: [] });
-        })
-        .finally(() => dispatch({ type: "setModelsLoading", loading: false }));
-    };
-    const onStorage = (event: StorageEvent | Event) => {
-      const key = (event as StorageEvent).key;
-      if (key && key !== "vllmstudio_backend_url" && key !== "vllm-studio.controllers") return;
-      reload();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [dispatch]);
+  const subscribeWorkspaceModelStorage = useCallback(
+    (_notify: () => void) => {
+      if (typeof window === "undefined") return () => {};
+      const reload = () => {
+        dispatch({ type: "setModelsLoading", loading: true });
+        dispatch({ type: "setError", error: "" });
+        void loadAgentModelsPayload()
+          .then((models) => {
+            dispatch({ type: "setModels", models: models.models ?? [] });
+          })
+          .catch((error) => {
+            dispatch({
+              type: "setError",
+              error: error instanceof Error ? error.message : String(error),
+            });
+            dispatch({ type: "setModels", models: [] });
+          })
+          .finally(() => dispatch({ type: "setModelsLoading", loading: false }));
+      };
+      const onStorage = (event: StorageEvent | Event) => {
+        const key = (event as StorageEvent).key;
+        if (key && key !== "vllmstudio_backend_url" && key !== "vllm-studio.controllers") return;
+        reload();
+      };
+      window.addEventListener("storage", onStorage);
+      return () => window.removeEventListener("storage", onStorage);
+    },
+    [dispatch],
+  );
+
+  useSyncExternalStore(
+    subscribeWorkspaceModelStorage,
+    getWorkspaceModelStorageSnapshot,
+    getWorkspaceModelStorageSnapshot,
+  );
 
   const handles = useMemo<WorkspaceHandles>(
     () => ({
@@ -328,23 +386,6 @@ export function useWorkspace(): UseWorkspaceResult {
           tab: makeFreshTab(),
           paneId: newPaneId(),
           runtimeSessionId: newRuntimeId(),
-        });
-      },
-      openSideSessionFromFocusedPane: () => {
-        const focused = stateRef.current.panesById.get(stateRef.current.focusedPaneId);
-        const session = focused ? stateRef.current.sessions.get(focused.sessionId) : null;
-        const project =
-          projectsRef.current.resolveProject(session ?? null) ??
-          projectsRef.current.selectedProject ??
-          undefined;
-        if (project) projectsRef.current.selectProject(project);
-        dispatch({
-          type: "openNewSession",
-          project,
-          tab: makeFreshTab(),
-          paneId: newPaneId(),
-          runtimeSessionId: newRuntimeId(),
-          mode: "split",
         });
       },
       replaySessionInFocusedPane: (piSessionId: string) =>
@@ -484,3 +525,5 @@ export function useWorkspace(): UseWorkspaceResult {
 
   return { state, dispatch, handles };
 }
+
+const getWorkspaceModelStorageSnapshot = (): number => 0;

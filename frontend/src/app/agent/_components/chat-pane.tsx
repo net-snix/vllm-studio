@@ -52,7 +52,6 @@ import {
   type ComposerPromptTemplateRef,
   type ComposerSkillRef,
 } from "@/lib/agent/composer-context";
-import { promptRequestsBrowser } from "@/lib/agent/browser/intent";
 import {
   AgentTurnSsePayload,
   AssistantBlock,
@@ -60,7 +59,9 @@ import {
   ChatMessage,
   ChatPaneHandle,
   EventBlock,
+  cleanSessionTitle,
   formatTokenCount,
+  isPlaceholderSessionTitle,
   newId,
   QueuedMessage,
   SessionTab,
@@ -71,6 +72,11 @@ import {
   visibleQueuedMessages,
 } from "@/lib/agent/session";
 import { useSessionEngine } from "@/lib/agent/sessions/engine";
+import {
+  beginSessionSubmit,
+  endSessionSubmit,
+  type SessionSubmitGuard,
+} from "@/lib/agent/sessions/submit-guard";
 import { copySessionPref, patchSessionPref } from "@/lib/agent/session/prefs";
 import { useTools } from "@/lib/agent/tools/context";
 import {
@@ -136,6 +142,7 @@ type Props = {
   rightPanelOpen: boolean;
   onToggleRightPanel: () => void;
   onRegisterHandle?: (handle: ChatPaneHandle | null) => void;
+  showHeader?: boolean;
 };
 type FileMentionRow = {
   id: string;
@@ -145,9 +152,7 @@ type FileMentionRow = {
   source: string;
 };
 type ExtensionRowState = ComposerExtensionRef & {
-  /** Resolved on/off state after layering the per-turn override on top of `enabled`. */
   effectiveEnabled: boolean;
-  /** Whether the current selection carries a per-turn override for this extension. */
   hasTurnOverride: boolean;
 };
 
@@ -187,10 +192,12 @@ export function ChatPane({
   rightPanelOpen,
   onToggleRightPanel,
   onRegisterHandle,
+  showHeader = true,
 }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const composerSubmitInFlightRef = useRef(false);
+  const composerSubmitInFlightRef = useRef<SessionSubmitGuard>(new Set());
+  const controlSubmitInFlightRef = useRef<SessionSubmitGuard>(new Set());
   // Track the height we last *applied* to the composer textarea so we can
   // skip the "height: auto" reset on every keystroke. Resetting to auto
   // collapses the textarea for one paint before the new scrollHeight is
@@ -345,7 +352,7 @@ export function ChatPane({
     [activeTab?.id, activeTab?.piSessionId, paneId],
   );
   const sessionPrefTitle = sessionPrefKeys.reduce((title, key) => {
-    const nextTitle = sessionPrefs[key]?.title?.trim();
+    const nextTitle = cleanSessionTitle(sessionPrefs[key]?.title);
     return nextTitle || title;
   }, "");
   // Rule: if the visible session is empty (no rendered messages, no input,
@@ -360,7 +367,7 @@ export function ChatPane({
     !activeTab || (activeTab.messages.length === 0 && !activeTab.input.trim() && !running);
   const displayedSessionTitle = sessionLooksEmpty
     ? ""
-    : sessionPrefTitle || activeTab?.title?.trim() || "";
+    : sessionPrefTitle || cleanSessionTitle(activeTab?.title) || "";
   const sessionPinned = sessionPrefKeys.some((key) => Boolean(sessionPrefs[key]?.pinned));
   const patchActiveSessionPrefs = useCallback(
     (patch: { title?: string; pinned?: boolean }) => {
@@ -382,7 +389,7 @@ export function ChatPane({
   const renameActiveSession = useCallback(
     (nextTitle: string) => {
       if (!activeTab) return;
-      const trimmed = nextTitle.trim();
+      const trimmed = cleanSessionTitle(nextTitle);
       if (!trimmed || trimmed === displayedSessionTitle) return;
       onRenameSession(activeTab.id, trimmed);
       patchActiveSessionPrefs({ title: trimmed });
@@ -634,7 +641,18 @@ export function ChatPane({
           previewUrl: durablePreviewUrl,
         };
       });
-      return { text, prompt, displayText, userText, images, attachments: messageAttachments };
+      return {
+        text,
+        prompt,
+        displayText,
+        userText,
+        images,
+        attachments: messageAttachments,
+        plugins: activeComposerPlugins(selection.plugins) as ComposerPluginRef[],
+        skills: selection.skills,
+        promptTemplates: selection.promptTemplates,
+        extensionOverrides: selection.extensionOverrides,
+      };
     },
     [attachments, tools],
   );
@@ -644,9 +662,9 @@ export function ChatPane({
       if (!targetId) return;
       if ((!rawText.trim() && attachments.length === 0) || !modelId || readingAttachments) return;
       const args = buildPromptArgs(targetId, rawText);
-      if (promptRequestsBrowser(args.userText)) {
-        tools.setComputerTab("browser");
-        tools.setBrowserEnabled(true);
+      const currentSelection = tools.selectionFor(targetId);
+      if (currentSelection.skills.length > 0) {
+        tools.setSelection(targetId, { ...currentSelection, skills: [] });
       }
       setStickToBottom(true);
       setAttachments([]);
@@ -694,35 +712,40 @@ export function ChatPane({
   const sendMessage = useCallback(
     async (event: FormEvent) => {
       event.preventDefault();
-      if (composerSubmitInFlightRef.current) return;
       if (!activeTab) return;
-      // Only block while a prompt is actively starting up; a "loading"
-      // status means we're hydrating prior session history and the user
-      // must still be able to send. Without this, a stuck/never-resolving
-      // canonical-session replay leaves the composer permanently locked.
-      if (activeTab.status === "starting") return;
       const text = activeTab.input.trim();
-      if ((!text && attachments.length === 0) || !modelId || readingAttachments) return;
-      // Dismiss any open mention picker on submit so it doesn't linger.
-      setMention(null);
-      composerSubmitInFlightRef.current = true;
-      try {
-        const runtime = activeTab.runtimeSessionId || runtimeSessionId;
-        // When the UI shows a live turn, the form's primary action is
-        // "Steer" — always honor that intent and let the server decide
-        // whether to steer (turn in flight) or treat it as a fresh prompt
-        // (turn already settled). The previous accepts-control gate
-        // silently demoted explicit steers to brand-new prompts whenever
-        // the runtime's `active` snapshot lagged the UI, which made the
-        // Steer button look like a no-op.
-        if (running) {
-          if (!text) return;
-          await queueAndSendControl("steer", text, activeTab, runtime);
+      const runtime = activeTab.runtimeSessionId || runtimeSessionId;
+      if (running) {
+        if (!text || isPlaceholderSessionTitle(text) || readingAttachments) return;
+        if (!modelId) {
+          updateTab(activeTab.id, (t) => ({ ...t, error: "Select a model to send." }));
           return;
         }
+        if (!beginSessionSubmit(controlSubmitInFlightRef.current, activeTab.id)) return;
+        setMention(null);
+        try {
+          await queueAndSendControl("steer", text, activeTab, runtime);
+        } finally {
+          endSessionSubmit(controlSubmitInFlightRef.current, activeTab.id);
+        }
+        return;
+      }
+      if (
+        ((!text || isPlaceholderSessionTitle(text)) && attachments.length === 0) ||
+        readingAttachments
+      ) {
+        return;
+      }
+      if (!modelId) {
+        updateTab(activeTab.id, (t) => ({ ...t, error: "Select a model to send." }));
+        return;
+      }
+      if (!beginSessionSubmit(composerSubmitInFlightRef.current, activeTab.id)) return;
+      setMention(null);
+      try {
         await submitPrompt(text, activeTab.id);
       } finally {
-        composerSubmitInFlightRef.current = false;
+        endSessionSubmit(composerSubmitInFlightRef.current, activeTab.id);
       }
     },
     [
@@ -734,31 +757,49 @@ export function ChatPane({
       running,
       runtimeSessionId,
       submitPrompt,
+      updateTab,
     ],
   );
   const queueMessage = useCallback(async () => {
-    if (composerSubmitInFlightRef.current) return;
     if (!activeTab) return;
     const text = activeTab.input.trim();
-    if (!text || !modelId) return;
-    setMention(null);
-    composerSubmitInFlightRef.current = true;
-    try {
-      // Queue follows the same contract as Steer: trust the user's
-      // explicit intent and let the server route follow_up vs. fresh
-      // prompt based on the live runtime state. The old client-side
-      // accepts-control fallback silently turned Queue clicks into
-      // ordinary prompts when the status snapshot was stale.
-      if (!running) {
-        await submitPrompt(text, activeTab.id);
-        return;
-      }
-      const runtime = activeTab.runtimeSessionId || runtimeSessionId;
-      await queueAndSendControl("follow_up", text, activeTab, runtime, cwd);
-    } finally {
-      composerSubmitInFlightRef.current = false;
+    if (!text || isPlaceholderSessionTitle(text)) return;
+    if (!modelId) {
+      updateTab(activeTab.id, (t) => ({ ...t, error: "Select a model to send." }));
+      return;
     }
-  }, [activeTab, cwd, modelId, queueAndSendControl, running, runtimeSessionId, submitPrompt]);
+    // Queue follows the same contract as Steer: trust the user's
+    // explicit intent and let the server route follow_up vs. fresh
+    // prompt based on the live runtime state. The prompt stream can still be
+    // in flight here, so follow-up controls must not share its in-flight guard.
+    if (running) {
+      if (!beginSessionSubmit(controlSubmitInFlightRef.current, activeTab.id)) return;
+      setMention(null);
+      try {
+        const runtime = activeTab.runtimeSessionId || runtimeSessionId;
+        await queueAndSendControl("follow_up", text, activeTab, runtime, cwd);
+      } finally {
+        endSessionSubmit(controlSubmitInFlightRef.current, activeTab.id);
+      }
+      return;
+    }
+    if (!beginSessionSubmit(composerSubmitInFlightRef.current, activeTab.id)) return;
+    setMention(null);
+    try {
+      await submitPrompt(text, activeTab.id);
+    } finally {
+      endSessionSubmit(composerSubmitInFlightRef.current, activeTab.id);
+    }
+  }, [
+    activeTab,
+    cwd,
+    modelId,
+    queueAndSendControl,
+    running,
+    runtimeSessionId,
+    submitPrompt,
+    updateTab,
+  ]);
   const removeQueued = useCallback(
     (queueId: string) => {
       if (!activeTab) return;
@@ -891,20 +932,22 @@ export function ChatPane({
     <section
       onMouseDownCapture={onFocus}
       data-pane-id={paneId}
-      className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--bg)"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--agent-bg)"
     >
-      <ChatPaneHeader
-        title={displayedSessionTitle}
-        pinned={sessionPinned}
-        rightPanelOpen={rightPanelOpen}
-        canFork={Boolean(onForkSession)}
-        canClose={Boolean(onClose)}
-        onTogglePinned={togglePinnedSession}
-        onRename={renameActiveSession}
-        onFork={onForkSession}
-        onClose={onClose}
-        onToggleRightPanel={onToggleRightPanel}
-      />
+      {showHeader ? (
+        <ChatPaneHeader
+          title={displayedSessionTitle}
+          pinned={sessionPinned}
+          rightPanelOpen={rightPanelOpen}
+          canFork={Boolean(onForkSession)}
+          canClose={Boolean(onClose)}
+          onTogglePinned={togglePinnedSession}
+          onRename={renameActiveSession}
+          onFork={onForkSession}
+          onClose={onClose}
+          onToggleRightPanel={onToggleRightPanel}
+        />
+      ) : null}
       {activeTab?.error ? (
         <div className="border-b border-(--border) bg-(--err)/10 px-4 py-2 text-xs text-(--err)">
           {activeTab.error}
@@ -921,7 +964,7 @@ export function ChatPane({
           emptyPrompt={Boolean(showEmptyPrompt)}
         />
       </div>
-      <form onSubmit={sendMessage} className="shrink-0 bg-(--bg) px-6 pb-1.5 pt-2">
+      <form onSubmit={sendMessage} className="shrink-0 bg-(--agent-bg) px-6 pb-1.5 pt-2">
         {visibleQueueItems.length > 0 ? (
           <div className="mx-auto mb-1 w-[85%] max-w-[var(--composer-w)] overflow-hidden rounded-lg bg-(--composer) px-4 py-2 text-[11px] text-(--fg)">
             <button
@@ -973,7 +1016,7 @@ export function ChatPane({
           onDragOver={handleComposerDragOver}
           onDragLeave={handleComposerDragLeave}
           onDrop={handleComposerDrop}
-          className={`mx-auto max-w-[var(--composer-w)] overflow-visible rounded-[var(--composer-radius)] bg-(--composer) shadow-none transition-colors ${composerDragActive ? "outline outline-1 outline-(--accent)/50" : ""}`}
+          className={`mx-auto w-full max-w-[var(--composer-w)] overflow-visible rounded-2xl border border-(--border)/20 bg-(--sidebar-bg) transition-colors ${composerDragActive ? "outline outline-1 outline-(--accent)/50" : ""}`}
         >
           {" "}
           {composerDragActive ? (
@@ -1230,16 +1273,8 @@ export function ChatPane({
                 }
               }
             }}
-            placeholder={
-              !modelName && modelsLoading
-                ? "Loading models…"
-                : !modelName
-                  ? "No models available"
-                  : running
-                    ? `Steer ${modelName}…`
-                    : `Message ${modelName}`
-            }
-            className="min-h-[34px] max-h-[50vh] w-full resize-none overflow-y-auto bg-transparent px-4 py-2 text-[13px] leading-6 tracking-normal text-(--fg) outline-none [font-family:var(--codex-chat-font-family)] [font-weight:var(--codex-chat-font-weight)] placeholder:text-(--dim)"
+            placeholder=""
+            className="min-h-[44px] max-h-[50vh] w-full resize-none overflow-y-auto bg-transparent px-4 py-2.5 text-[14px] leading-[1.6] tracking-normal text-(--fg) outline-none placeholder:text-(--dim)/60"
           />
           <div className="agent-composer-actions-row flex min-h-8 items-center gap-1.5 bg-transparent px-3 pb-1.5 pt-0.5 text-xs">
             {" "}
@@ -1340,10 +1375,7 @@ export function ChatPane({
                 <button
                   type="submit"
                   disabled={
-                    (!activeTab?.input.trim() && attachments.length === 0) ||
-                    !modelId ||
-                    readingAttachments ||
-                    activeTab?.status === "starting"
+                    (!activeTab?.input.trim() && attachments.length === 0) || readingAttachments
                   }
                   className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center text-(--dim)/85 hover:text-(--fg)/85 disabled:opacity-30"
                   aria-label="Send"
@@ -1359,7 +1391,7 @@ export function ChatPane({
             </div>
           </div>{" "}
         </div>
-        <div className="relative z-20 mx-auto mt-0.5 flex max-w-[var(--composer-w)] items-center gap-2 overflow-visible font-mono text-[10px] text-(--dim)">
+        <div className="relative z-20 mx-auto mt-2.5 flex w-full max-w-[var(--composer-w)] items-center gap-2 overflow-visible font-mono text-[10px] text-(--dim)">
           {" "}
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-visible">
             <div className="min-w-0 max-w-[42%] shrink overflow-visible">
@@ -1637,7 +1669,7 @@ function LoadedContextTab({
   const meta = LOADED_TAB_META[prefix];
   return (
     <span
-      className={`inline-flex max-w-[240px] items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] ${meta.classes}`}
+      className={`inline-flex max-w-[240px] items-center gap-1.5 rounded border px-2 py-1 text-[11px] shadow-sm shadow-black/5 ${meta.classes}`}
       title={title ?? label}
     >
       <meta.Icon className="h-3 w-3 shrink-0" />
@@ -1646,7 +1678,7 @@ function LoadedContextTab({
       <button
         type="button"
         onClick={onRemove}
-        className="-mr-0.5 ml-0.5 rounded p-0.5 text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
+        className="-mr-1 ml-0.5 rounded p-0.5 text-(--dim) hover:bg-black/10 hover:text-(--fg)"
         aria-label={`Unload ${prefix}${label}`}
         title={`Unload ${prefix}${label}`}
       >
@@ -1666,7 +1698,7 @@ const LOADED_TAB_META: Record<
   },
   $: {
     Icon: Sparkles,
-    classes: "border-violet-500/30 bg-violet-500/10 text-violet-300",
+    classes: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
   },
   "/": {
     Icon: Slash,
@@ -1681,10 +1713,6 @@ const LOADED_TAB_META: Record<
     classes: "border-red-500/30 bg-red-500/10 text-red-300",
   },
 };
-
-// ---------------------------------------------------------------------------
-// Mention picker chrome
-// ---------------------------------------------------------------------------
 
 const MENTION_KIND_META: Record<
   "plugin" | "skill" | "promptTemplate" | "extension",

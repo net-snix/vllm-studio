@@ -1,4 +1,10 @@
-import { useEffect, type Dispatch, type RefObject, type SetStateAction } from "react";
+import {
+  useCallback,
+  useSyncExternalStore,
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+} from "react";
 import api from "@/lib/api";
 import type { LinuxDashboardSnapshot } from "@/lib/types";
 
@@ -42,55 +48,80 @@ export function useLinuxDashboardEffects({
   setLoading,
   setRefreshing,
 }: UseLinuxDashboardEffectsArgs) {
-  useEffect(() => {
-    if (autoRefresh) return;
-    if (!data) void load("initial");
-  }, [autoRefresh, data, load]);
+  const subscribeInitialLoad = useCallback(
+    (notify: () => void) => {
+      if (autoRefresh || data) return () => {};
+      let cancelled = false;
+      void load("initial").finally(() => {
+        if (!cancelled) notify();
+      });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [autoRefresh, data, load],
+  );
 
-  useEffect(() => {
-    if (!autoRefresh) return;
-    const abort = new AbortController();
-    let reconnectId: number | null = null;
+  const subscribeDashboardStream = useCallback(
+    (_notify: () => void) => {
+      if (!autoRefresh) return () => {};
+      const abort = new AbortController();
+      let reconnectId: number | null = null;
 
-    const connect = async (): Promise<void> => {
-      try {
-        setRefreshing(true);
-        setError(null);
-        const stream = await api.streamLinuxDashboard({ signal: abort.signal });
-        setRefreshing(false);
-        for await (const event of stream) {
-          if (abort.signal.aborted) break;
-          if (event.event === "linux-dashboard") {
-            if (isLinuxDashboardSnapshot(event.data)) {
-              applySnapshot(event.data);
-              setLoading(false);
-              setError(null);
+      const connect = async (): Promise<void> => {
+        try {
+          setRefreshing(true);
+          setError(null);
+          const stream = await api.streamLinuxDashboard({ signal: abort.signal });
+          setRefreshing(false);
+          for await (const event of stream) {
+            if (abort.signal.aborted) break;
+            if (event.event === "linux-dashboard") {
+              if (isLinuxDashboardSnapshot(event.data)) {
+                applySnapshot(event.data);
+                setLoading(false);
+                setError(null);
+              }
+              continue;
             }
-            continue;
+            if (event.event === "linux-dashboard-error") {
+              const message = event.data["message"];
+              setError(typeof message === "string" ? message : "Dashboard stream failed");
+            }
           }
-          if (event.event === "linux-dashboard-error") {
-            const message = event.data["message"];
-            setError(typeof message === "string" ? message : "Dashboard stream failed");
+        } catch (err) {
+          if (!abort.signal.aborted) {
+            setError(err instanceof Error ? err.message : String(err));
+            if (!hasSnapshotRef.current) void load("initial");
+          }
+        } finally {
+          setRefreshing(false);
+          if (!abort.signal.aborted) {
+            reconnectId = window.setTimeout(() => void connect(), STREAM_RECONNECT_MS);
           }
         }
-      } catch (err) {
-        if (!abort.signal.aborted) {
-          setError(err instanceof Error ? err.message : String(err));
-          if (!hasSnapshotRef.current) void load("initial");
-        }
-      } finally {
-        setRefreshing(false);
-        if (!abort.signal.aborted) {
-          reconnectId = window.setTimeout(() => void connect(), STREAM_RECONNECT_MS);
-        }
-      }
-    };
+      };
 
-    void connect();
+      void connect();
 
-    return () => {
-      if (reconnectId !== null) window.clearTimeout(reconnectId);
-      abort.abort();
-    };
-  }, [applySnapshot, autoRefresh, hasSnapshotRef, load, setError, setLoading, setRefreshing]);
+      return () => {
+        if (reconnectId !== null) window.clearTimeout(reconnectId);
+        abort.abort();
+      };
+    },
+    [applySnapshot, autoRefresh, hasSnapshotRef, load, setError, setLoading, setRefreshing],
+  );
+
+  useSyncExternalStore(
+    subscribeInitialLoad,
+    getLinuxDashboardEffectsSnapshot,
+    getLinuxDashboardEffectsSnapshot,
+  );
+  useSyncExternalStore(
+    subscribeDashboardStream,
+    getLinuxDashboardEffectsSnapshot,
+    getLinuxDashboardEffectsSnapshot,
+  );
 }
+
+const getLinuxDashboardEffectsSnapshot = (): number => 0;

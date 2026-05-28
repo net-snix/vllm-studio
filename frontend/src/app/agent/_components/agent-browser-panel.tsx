@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import {
   Activity,
   Code2,
@@ -19,8 +20,10 @@ import { useTools } from "@/lib/agent/tools/context";
 import type { ComputerTab } from "@/lib/agent/tools/types";
 import type { Project } from "@/lib/agent/projects/types";
 import type { Session } from "@/lib/agent/sessions/types";
+import { makeFreshTab, newRuntimeId } from "@/lib/agent/session/helpers";
 import type { AgentModel } from "@/lib/agent/workspace/types";
 import { AgentBrowser, type AgentBrowserHandle } from "./agent-browser";
+import { ChatPane } from "./chat-pane";
 import { ComputerStatusPanel } from "./computer-status-panel";
 import { FilesystemPanel } from "./filesystem-panel";
 import { GitDiffPanel } from "./git-diff-panel";
@@ -34,7 +37,6 @@ type AgentBrowserPanelHandles = Pick<
   | "startComputerResize"
   | "registerBrowserHandle"
   | "runBrowserCommand"
-  | "openSideSessionFromFocusedPane"
   | "compactFocusedSession"
 >;
 
@@ -43,6 +45,7 @@ type AgentBrowserPanelProps = {
   activeProject: Project | null;
   focusedSession: Session | null;
   sessions: Session[];
+  activeModelId: string;
   activeModel: AgentModel | null;
   gitSummary?: {
     isRepo: boolean;
@@ -53,24 +56,37 @@ type AgentBrowserPanelProps = {
   } | null;
 };
 
+function createSideChatSession(
+  activeProject: Project | null,
+  focusedSession: Session | null,
+  activeModelId: string,
+): Session {
+  const tab = makeFreshTab();
+  return {
+    ...tab,
+    runtimeSessionId: newRuntimeId(),
+    title: "Side chat",
+    cwd: activeProject?.path ?? focusedSession?.cwd,
+    projectId: activeProject?.id ?? focusedSession?.projectId,
+    modelId: focusedSession?.modelId ?? activeModelId,
+  };
+}
+
 export function AgentBrowserPanel({
   handles,
   activeProject,
   focusedSession,
   sessions,
+  activeModelId,
   activeModel,
   gitSummary,
 }: AgentBrowserPanelProps) {
   const tools = useTools();
-  if (!tools.computer.open) return null;
-
-  const {
-    registerComputerAside,
-    startComputerResize,
-    registerBrowserHandle,
-    runBrowserCommand,
-    openSideSessionFromFocusedPane,
-  } = handles;
+  const [sideChatSession, setSideChatSession] = useState<Session>(() =>
+    createSideChatSession(null, null, ""),
+  );
+  const { registerComputerAside, startComputerResize, registerBrowserHandle, runBrowserCommand } =
+    handles;
   const isElectron = typeof navigator !== "undefined" && /electron/i.test(navigator.userAgent);
   const navigateBrowser = (value: string) => {
     const next = normalizeBrowserInput(value, activeProject?.path ?? "");
@@ -78,10 +94,43 @@ export function AgentBrowserPanel({
     tools.setBrowserUrl(next, next);
     void runBrowserCommand("navigate", { url: next });
   };
+  const openSideChat = useCallback(() => {
+    setSideChatSession((current) =>
+      current.messages.length
+        ? current
+        : {
+            ...current,
+            cwd: activeProject?.path ?? focusedSession?.cwd,
+            projectId: activeProject?.id ?? focusedSession?.projectId,
+            modelId: current.modelId || focusedSession?.modelId || activeModelId,
+          },
+    );
+    tools.setComputerTab("side-chat");
+  }, [activeModelId, activeProject, focusedSession, tools]);
+  const updateSideChatTabs = useCallback(
+    (nextTabsOrUpdater: Session[] | ((tabs: Session[]) => Session[])) => {
+      setSideChatSession((current) => {
+        const nextTabs =
+          typeof nextTabsOrUpdater === "function"
+            ? nextTabsOrUpdater([current])
+            : nextTabsOrUpdater;
+        return nextTabs.at(-1) ?? current;
+      });
+    },
+    [],
+  );
+  const renameSideChat = useCallback((tabId: string, title: string) => {
+    setSideChatSession((current) => (current?.id === tabId ? { ...current, title } : current));
+  }, []);
+  const closeSideChat = useCallback(() => {
+    setSideChatSession(createSideChatSession(activeProject ?? null, focusedSession, activeModelId));
+    tools.closeComputerTab("side-chat");
+  }, [activeModelId, activeProject, focusedSession, tools]);
+  if (!tools.computer.open) return null;
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-l border-(--border) bg-(--bg)"
+      className="relative flex shrink-0 flex-col border-l border-(--border) bg-(--agent-bg)"
       ref={registerComputerAside}
       style={{ width: `${tools.computer.width}px`, minWidth: "max(280px, 25%)", maxWidth: "65%" }}
     >
@@ -96,7 +145,9 @@ export function AgentBrowserPanel({
         tab={tools.computer.tab}
         openTabs={tools.computer.tabs}
         onSelectTab={tools.setComputerTab}
-        onCloseTab={tools.closeComputerTab}
+        onCloseTab={(closing) =>
+          closing === "side-chat" ? closeSideChat() : tools.closeComputerTab(closing)
+        }
         onShowLauncher={() => tools.setComputerTab("tools")}
       />
 
@@ -113,10 +164,35 @@ export function AgentBrowserPanel({
         <ComputerLauncherPanel
           activeTab={tools.computer.tab}
           onSelectTab={tools.setComputerTab}
-          onStartSideChat={openSideSessionFromFocusedPane}
+          onStartSideChat={openSideChat}
         />
       ) : tools.computer.tab === "canvas" ? (
         <CanvasPanel />
+      ) : tools.computer.tab === "side-chat" ? (
+        <ChatPane
+          paneId="computer-side-chat"
+          runtimeSessionId={sideChatSession.runtimeSessionId}
+          modelId={sideChatSession.modelId ?? focusedSession?.modelId ?? activeModelId}
+          modelName={activeModel?.name ?? null}
+          modelsLoading={false}
+          contextWindow={activeModel?.contextWindow ?? 0}
+          cwd={sideChatSession.cwd ?? activeProject?.path ?? focusedSession?.cwd ?? ""}
+          projectName={activeProject?.name ?? null}
+          browserToolEnabled={false}
+          onToggleBrowserTool={() => tools.setComputerTab("browser")}
+          canvasEnabled={false}
+          onToggleCanvas={tools.toggleCanvas}
+          isFocused
+          onFocus={() => undefined}
+          tabs={[sideChatSession]}
+          activeTabId={sideChatSession.id}
+          onTabsChange={updateSideChatTabs}
+          onRenameSession={renameSideChat}
+          onClose={closeSideChat}
+          rightPanelOpen
+          onToggleRightPanel={() => tools.setComputerOpen(false)}
+          showHeader={false}
+        />
       ) : tools.computer.tab === "browser" ? (
         <AgentBrowser
           ref={registerBrowserHandle}
@@ -149,6 +225,7 @@ const TAB_LABELS: Record<ComputerTab, string> = {
   status: "Status",
   tools: "Tools",
   canvas: "Canvas",
+  "side-chat": "Side chat",
   browser: "Browser",
   files: "Filesystem",
   diff: "Git",
@@ -167,6 +244,12 @@ const TAB_OPTIONS: Array<{
     label: "Canvas",
     description: "Shared scratchboard for human and model",
     icon: Code2,
+  },
+  {
+    tab: "side-chat",
+    label: "Side chat",
+    description: "Focused side conversation",
+    icon: MessageSquarePlus,
   },
   {
     tab: "browser",
@@ -219,6 +302,7 @@ function ComputerHeader({
         {visibleTabs.map((openTab) => {
           const meta = tabMeta(openTab);
           const Icon = meta.icon;
+          const canClose = openTab !== "status";
           return (
             <div
               key={openTab}
@@ -237,18 +321,20 @@ function ComputerHeader({
                 <Icon className="pointer-events-none h-3 w-3 shrink-0" />
                 <span className="max-w-[7rem] truncate">{meta.label}</span>
               </button>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCloseTab(openTab);
-                }}
-                className="inline-flex h-8 w-7 items-center justify-center rounded text-(--dim)/65 hover:bg-(--hover) hover:text-(--fg)/75"
-                aria-label={`Close ${meta.label}`}
-                title={`Close ${meta.label}`}
-              >
-                <CloseIcon className="pointer-events-none h-2 w-2" />
-              </button>
+              {canClose ? (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCloseTab(openTab);
+                  }}
+                  className="inline-flex h-8 w-7 items-center justify-center rounded text-(--dim)/65 hover:bg-(--hover) hover:text-(--fg)/75"
+                  aria-label={`Close ${meta.label}`}
+                  title={`Close ${meta.label}`}
+                >
+                  <CloseIcon className="pointer-events-none h-2 w-2" />
+                </button>
+              ) : null}
             </div>
           );
         })}
@@ -327,7 +413,7 @@ function ComputerLauncherPanel({
     },
   ] as const;
   return (
-    <section className="min-h-0 flex-1 overflow-y-auto bg-(--bg) px-5 py-7">
+    <section className="min-h-0 flex-1 overflow-y-auto bg-(--agent-bg) px-5 py-7">
       <div className="mx-auto flex max-w-[30rem] flex-col gap-3">
         {cards.map((card) => {
           const Icon = card.icon;

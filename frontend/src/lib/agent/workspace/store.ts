@@ -4,7 +4,7 @@ import {
   type ActiveAgentSessionSnapshot,
   type ActiveSessionPrefs,
 } from "@/lib/agent/active-sessions";
-import { makeFreshTab, newRuntimeId } from "@/lib/agent/session/helpers";
+import { cleanSessionTitle, makeFreshTab, newRuntimeId } from "@/lib/agent/session/helpers";
 import type { Session, SessionId } from "@/lib/agent/sessions/types";
 import type { ToolSelection } from "@/lib/agent/tools/types";
 import type { ComposerPluginRef, ComposerSkillRef } from "@/lib/agent/composer-context";
@@ -89,7 +89,7 @@ export function normalizePersistedTab(value: unknown): Session | null {
     id: tab.id,
     runtimeSessionId: tab.runtimeSessionId,
     piSessionId: typeof tab.piSessionId === "string" ? tab.piSessionId : null,
-    title: typeof tab.title === "string" && tab.title.trim() ? tab.title : fallback.title,
+    title: cleanSessionTitle(tab.title) || fallback.title,
     // The canonical session log is the transcript source of truth. Legacy
     // pane-state entries may still contain messages, but restoring them here
     // would put large reasoning/tool payloads back onto the renderer hot path.
@@ -102,6 +102,7 @@ export function normalizePersistedTab(value: unknown): Session | null {
     activeAssistantId:
       typeof tab.activeAssistantId === "string" ? tab.activeAssistantId : undefined,
     lastEventSeq: typeof tab.lastEventSeq === "number" ? tab.lastEventSeq : undefined,
+    usedSkills: Array.isArray(tab.usedSkills) ? (tab.usedSkills as ComposerSkillRef[]) : undefined,
   };
 }
 
@@ -243,11 +244,12 @@ export function sessionMetaForPersistence(
     projectId: tab.projectId,
     cwd: tab.cwd,
     modelId: tab.modelId,
-    title: tab.title,
+    title: cleanSessionTitle(tab.title) || "New session",
     status: tab.status,
     startedAt: tab.startedAt,
     input: tab.input,
     tokenStats: tab.tokenStats,
+    usedSkills: tab.usedSkills,
     activeAssistantId: tab.activeAssistantId,
     lastEventSeq: tab.lastEventSeq,
     queue: tab.queue,
@@ -307,7 +309,9 @@ export function loadPersistedActiveAgentSessions(
           tabId: typeof entry.tabId === "string" ? entry.tabId : "",
           piSessionId: piSessionId || null,
           modelId: typeof entry.modelId === "string" ? entry.modelId : undefined,
-          title: typeof entry.title === "string" ? entry.title : "Loading session",
+          title:
+            cleanSessionTitle(typeof entry.title === "string" ? entry.title : null) ||
+            "Loading session",
           status: typeof entry.status === "string" ? entry.status : "idle",
           active: entry.active === true,
           startedAt: typeof entry.startedAt === "string" ? entry.startedAt : undefined,
@@ -316,6 +320,9 @@ export function loadPersistedActiveAgentSessions(
             ? (entry.plugins as ComposerPluginRef[])
             : undefined,
           skills: Array.isArray(entry.skills) ? (entry.skills as ComposerSkillRef[]) : undefined,
+          usedSkills: Array.isArray(entry.usedSkills)
+            ? (entry.usedSkills as ComposerSkillRef[])
+            : undefined,
         };
       })
       .filter(

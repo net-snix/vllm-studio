@@ -61,15 +61,14 @@ function setPane(state: WorkspaceState, paneId: PaneId, pane: PaneState): Worksp
   return { ...state, panesById: next };
 }
 
-function paneWithSession(pane: PaneState, sessionId: SessionId): PaneState {
-  return { ...pane, sessionId };
+function paneWithSession(pane: PaneState, session: Session): PaneState {
+  return { ...pane, sessionId: session.id, runtimeSessionId: session.runtimeSessionId };
 }
 
 function withSessions(state: WorkspaceState, sessions: SessionsMap): WorkspaceState {
   return state.sessions === sessions ? state : { ...state, sessions };
 }
 
-/** Remove sessions from the map that aren't referenced by any pane anymore. */
 function pruneOrphanSessions(state: WorkspaceState): WorkspaceState {
   return withSessions(state, pruneSessions(state.sessions, referencedSessionIds(state)));
 }
@@ -99,7 +98,7 @@ function replacePaneSession(
   if (!pane || !isSession(session)) return state;
   const sessions = setSessionInMap(state.sessions, session);
   const next = pruneOrphanSessions(
-    setPane(withSessions(state, sessions), paneId, paneWithSession(pane, session.id)),
+    setPane(withSessions(state, sessions), paneId, paneWithSession(pane, session)),
   );
   return { ...next, focusedPaneId: paneId };
 }
@@ -110,7 +109,7 @@ function copySession(source: Session, fallback: Session | undefined): Session | 
 }
 
 function createPane(session: Session, runtimeSessionId: string): PaneState {
-  return { sessionId: session.id, runtimeSessionId };
+  return { sessionId: session.id, runtimeSessionId: session.runtimeSessionId || runtimeSessionId };
 }
 
 function splitPaneWithSession(
@@ -244,8 +243,19 @@ export function openNewSessionInFocusedPane(
     const freshTitle = isSession(payload.tab) ? payload.tab.title : "New session";
     const starterPatch: Partial<Session> = {
       title: freshTitle,
+      piSessionId: null,
+      messages: [],
+      input: "",
       error: "",
       status: "idle",
+      startedAt: undefined,
+      tokenStats: undefined,
+      usedSkills: undefined,
+      contextUsage: null,
+      activeAssistantId: undefined,
+      lastEventSeq: undefined,
+      queue: undefined,
+      modelId: existing.modelId || state.selectedModel || undefined,
       ...(payload.project ? { projectId: payload.project.id, cwd: payload.project.path } : {}),
     };
     const sessions = patchSessionInMap(state.sessions, existing.id, starterPatch);
@@ -259,6 +269,7 @@ export function openNewSessionInFocusedPane(
     ...payload.tab,
     projectId: payload.project?.id,
     cwd: payload.project?.path,
+    modelId: payload.tab.modelId || state.selectedModel || undefined,
   };
   if (payload.mode === "split") {
     return openSessionAdjacentToFocusedPane(

@@ -23,23 +23,19 @@ export interface AgentModel {
   id: string;
   name: string;
   provider: "vllm-studio";
+  providerId?: string;
+  rawId?: string;
+  controllerUrl?: string;
+  controllerName?: string;
   contextWindow: number;
   maxTokens: number;
   reasoning: boolean;
-  tools: boolean;
   vision: boolean;
   active: boolean;
+  tools: boolean;
 }
 
-export interface BackendRecipeListItem {
-  served_model_name?: unknown;
-  model_id?: unknown;
-  status?: unknown;
-  enable_auto_tool_choice?: unknown;
-  tool_call_parser?: unknown;
-  extra_args?: unknown;
-  [key: string]: unknown;
-}
+export type BackendRecipeListItem = Record<string, unknown>;
 
 export function inferReasoningSupport(modelId: string): boolean {
   const normalized = modelId.toLowerCase();
@@ -101,10 +97,6 @@ function numberFromUnknown(value: unknown): number | undefined {
   return undefined;
 }
 
-function textFromUnknown(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
 function booleanFromUnknown(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
@@ -131,11 +123,15 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function textFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function extraArg(recipe: BackendRecipeListItem, ...keys: string[]): unknown {
-  const extraArgs = recordFromUnknown(recipe.extra_args);
+  const args = recordFromUnknown(recipe.extra_args);
   for (const key of keys) {
-    if (recipe[key] !== undefined) return recipe[key];
-    if (extraArgs[key] !== undefined) return extraArgs[key];
+    if (Object.prototype.hasOwnProperty.call(recipe, key)) return recipe[key];
+    if (Object.prototype.hasOwnProperty.call(args, key)) return args[key];
   }
   return undefined;
 }
@@ -197,7 +193,7 @@ function resolveReasoning(
   metadata: Record<string, unknown>,
   id: string,
 ): boolean {
-  const explicitReasoning = booleanFromUnknown(metadata.reasoning ?? model.reasoning);
+  const explicitReasoning = metadata.reasoning ?? model.reasoning;
   return typeof explicitReasoning === "boolean" ? explicitReasoning : inferReasoningSupport(id);
 }
 
@@ -244,9 +240,9 @@ export function normalizeOpenAIModel(model: OpenAIModelListItem): AgentModel {
     contextWindow,
     maxTokens,
     reasoning: resolveReasoning(model, metadata, id),
-    tools: false,
     vision: resolveVision(model, metadata, capabilities, id),
     active: explicitActive === true,
+    tools: false,
   };
 }
 
@@ -291,24 +287,52 @@ export function modelsWithRecipeToolCapabilities(
     }
   }
   return models.map((model) => {
-    const support = toolSupportByModel.get(model.id);
+    const support =
+      toolSupportByModel.get(model.rawId ?? model.id) ?? toolSupportByModel.get(model.id);
     return support === undefined ? model : { ...model, tools: support.tools };
   });
 }
 
+function isDeepSeekReasoningModel(model: AgentModel): boolean {
+  const id = `${model.id} ${model.rawId ?? ""} ${model.name}`.toLowerCase();
+  return model.reasoning && id.includes("deepseek");
+}
+
 export function modelsToPiModels(models: AgentModel[]) {
-  return models.map((model) => ({
-    id: model.id,
-    name: model.name,
-    reasoning: model.reasoning,
-    input: model.vision ? ["text", "image"] : ["text"],
-    contextWindow: model.contextWindow,
-    maxTokens: model.maxTokens,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    compat: {
-      supportsDeveloperRole: false,
-      supportsReasoningEffort: model.reasoning,
-      maxTokensField: "max_tokens",
-    },
-  }));
+  return models.map((model) => {
+    const deepSeekReasoning = isDeepSeekReasoningModel(model);
+    return {
+      id: model.rawId ?? model.id,
+      name: model.name,
+      reasoning: model.reasoning,
+      input: model.vision ? ["text", "image"] : ["text"],
+      tools: model.tools,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      ...(deepSeekReasoning
+        ? {
+            thinkingLevelMap: {
+              off: null,
+              minimal: null,
+              low: "low",
+              medium: "medium",
+              high: "high",
+              xhigh: "max",
+            },
+          }
+        : {}),
+      compat: {
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: model.reasoning,
+        maxTokensField: "max_tokens",
+        ...(deepSeekReasoning
+          ? {
+              thinkingFormat: "deepseek",
+              requiresReasoningContentOnAssistantMessages: true,
+            }
+          : {}),
+      },
+    };
+  });
 }

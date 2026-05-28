@@ -1,9 +1,15 @@
 import type { ActiveAgentSessionSnapshot } from "@/lib/agent/active-sessions";
-import { makeFreshTab, newPaneId, newRuntimeId } from "@/lib/agent/session/helpers";
+import {
+  cleanSessionTitle,
+  makeFreshTab,
+  newPaneId,
+  newRuntimeId,
+} from "@/lib/agent/session/helpers";
 import { findPaneByPiSessionId } from "@/lib/agent/sessions/selectors";
 import type { Project } from "@/lib/agent/projects/types";
-import type { SessionId } from "@/lib/agent/sessions/types";
+import type { Session, SessionId } from "@/lib/agent/sessions/types";
 import type { ToolSelection } from "@/lib/agent/tools/types";
+import type { ComposerSkillRef } from "@/lib/agent/composer-context";
 import type { AgentModel, PaneId, WorkspaceAction, WorkspaceState } from "./types";
 import {
   loadPersistedActiveAgentSessions,
@@ -270,6 +276,7 @@ function computeActiveSessionBroadcast(
     if (!(Boolean(tab.piSessionId) || tab.messages.length > 0) || tab.status === "loading")
       continue;
     const selection = selectionFor(tab.id);
+    const usedSkills = usedSkillsForSession(tab);
     out.push({
       projectId: tab.projectId ?? "",
       cwd: tab.cwd ?? "",
@@ -277,16 +284,26 @@ function computeActiveSessionBroadcast(
       tabId: tab.id,
       piSessionId: tab.piSessionId,
       modelId: tab.modelId ?? state.selectedModel,
-      title: tab.title,
+      title: cleanSessionTitle(tab.title) || "Current session",
       status: tab.status,
       active: paneId === state.focusedPaneId,
       startedAt: tab.startedAt,
       updatedAt: tab.startedAt || new Date().toISOString(),
       plugins: selection.plugins.length > 0 ? selection.plugins : undefined,
       skills: selection.skills.length > 0 ? selection.skills : undefined,
+      usedSkills: usedSkills.length > 0 ? usedSkills : undefined,
     });
   }
   return out;
+}
+
+function usedSkillsForSession(tab: Pick<Session, "messages" | "usedSkills">): ComposerSkillRef[] {
+  const byId = new Map<string, ComposerSkillRef>();
+  for (const skill of tab.usedSkills ?? []) byId.set(skill.id || skill.path || skill.name, skill);
+  for (const message of tab.messages) {
+    for (const skill of message.skills ?? []) byId.set(skill.id || skill.path || skill.name, skill);
+  }
+  return [...byId.values()];
 }
 
 function activeSessionBroadcastKey(sessions: ActiveAgentSessionSnapshot[] | null): string {
@@ -297,7 +314,7 @@ function storedSessionsKey(state: WorkspaceState): string {
   const entries: Array<{ id: string; title: string; cwd?: string }> = [];
   for (const tab of state.sessions.values()) {
     if (!tab.piSessionId) continue;
-    entries.push({ id: tab.piSessionId, title: tab.title, cwd: tab.cwd });
+    entries.push({ id: tab.piSessionId, title: cleanSessionTitle(tab.title), cwd: tab.cwd });
   }
   entries.sort((a, b) => a.id.localeCompare(b.id));
   return JSON.stringify(entries);

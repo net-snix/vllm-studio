@@ -3,8 +3,8 @@ export const BACKEND_LABELS: Record<string, string> = {
   sglang: "SGLang",
   llamacpp: "llama.cpp",
   ds4: "DS4",
-  transformers: "Transformers",
-  tabbyapi: "TabbyAPI",
+  exllamav3: "ExLlama v3",
+  mlx: "MLX",
 };
 
 export const formatBackendLabel = (backend?: string | null): string => {

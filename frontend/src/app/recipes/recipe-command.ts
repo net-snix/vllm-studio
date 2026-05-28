@@ -1,4 +1,3 @@
-// CRITICAL
 import type { RecipeEditor } from "@/lib/types";
 import { normalizeExtraArgKey, prepareRecipeForSave } from "./recipe-utils";
 
@@ -83,18 +82,6 @@ const appendLlamacppArgsToCommand = (
     "description",
     "tags",
     "status",
-    "launch_command",
-    "custom_command",
-    "ds4_bin",
-    "ds4-bin",
-    "ds4_backend",
-    "ds4-backend",
-    "backend_mode",
-    "backend-mode",
-    "max_tokens",
-    "max-tokens",
-    "max_output_tokens",
-    "max-output-tokens",
   ]);
 
   for (const [key, value] of Object.entries(extraArgs)) {
@@ -147,12 +134,14 @@ export const generateCommand = (recipe: RecipeEditor): string => {
     args.push("llama-server");
   } else if (backend === "ds4") {
     args.push("ds4-server --cuda");
+  } else if (backend === "mlx") {
+    args.push("python -m mlx_lm.server");
   } else {
     args.push("python -m sglang.launch_server");
   }
 
   if (payload.model_path) {
-    if (backend === "llamacpp") {
+    if (backend === "llamacpp" || backend === "mlx") {
       args.push(`--model ${payload.model_path}`);
     } else if (backend === "ds4") {
       args.push(`-m ${payload.model_path}`);
@@ -163,7 +152,7 @@ export const generateCommand = (recipe: RecipeEditor): string => {
 
   if (payload.host && payload.host !== "0.0.0.0") args.push(`--host ${payload.host}`);
   if (payload.port && payload.port !== 8000) args.push(`--port ${payload.port}`);
-  if (payload.served_model_name && backend !== "ds4") {
+  if (payload.served_model_name && backend !== "mlx" && backend !== "ds4") {
     args.push(
       backend === "llamacpp"
         ? `--alias ${payload.served_model_name}`
@@ -171,7 +160,7 @@ export const generateCommand = (recipe: RecipeEditor): string => {
     );
   }
 
-  if (backend !== "llamacpp" && backend !== "ds4") {
+  if (backend !== "llamacpp" && backend !== "mlx" && backend !== "ds4") {
     if (payload.tensor_parallel_size && payload.tensor_parallel_size > 1) {
       args.push(`--tensor-parallel-size ${payload.tensor_parallel_size}`);
     }
@@ -185,7 +174,7 @@ export const generateCommand = (recipe: RecipeEditor): string => {
     if (!ctxOverride && payload.max_model_len) args.push(`--ctx-size ${payload.max_model_len}`);
   } else if (backend === "ds4") {
     if (!ctxOverride && payload.max_model_len) args.push(`--ctx ${payload.max_model_len}`);
-  } else {
+  } else if (backend !== "mlx") {
     if (payload.max_model_len) args.push(`--max-model-len ${payload.max_model_len}`);
     if (payload.max_num_seqs) args.push(`--max-num-seqs ${payload.max_num_seqs}`);
     if (payload.gpu_memory_utilization !== undefined && payload.gpu_memory_utilization !== null) {
@@ -196,7 +185,7 @@ export const generateCommand = (recipe: RecipeEditor): string => {
     }
   }
 
-  if (backend !== "llamacpp" && backend !== "ds4") {
+  if (backend !== "llamacpp" && backend !== "mlx" && backend !== "ds4") {
     if (payload.quantization) args.push(`--quantization ${payload.quantization}`);
     if (payload.dtype && payload.dtype !== "auto") args.push(`--dtype ${payload.dtype}`);
 

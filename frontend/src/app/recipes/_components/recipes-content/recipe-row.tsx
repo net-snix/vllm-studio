@@ -1,16 +1,9 @@
-// CRITICAL
 "use client";
 
 import { memo, useCallback, type MouseEvent } from "react";
 import { MoreVertical, Pin, PinOff, Play, Square } from "lucide-react";
 import type { RecipeWithStatus } from "@/lib/types";
-import {
-  ModelButton,
-  ModelRow,
-  ModelStatus,
-  ModelValue,
-  type ModelStatusTone,
-} from "./model-page-primitives";
+import { ModelButton, ModelRow, ModelStatus, ModelValue, type ModelStatusTone } from "@/ui";
 import { formatBackendLabel } from "../../recipe-labels";
 
 type Props = {

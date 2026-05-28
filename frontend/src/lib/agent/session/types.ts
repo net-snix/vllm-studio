@@ -1,9 +1,9 @@
 import type { ComposerPluginRef, ComposerSkillRef } from "@/lib/agent/composer-context";
 
 // Imperative handle exposed by ChatPane so the workspace can replay a past
-// pi session into the focused pane without going through useEffect-driven
-// prop plumbing. The workspace calls this directly from event/click handlers
-// so the control flow is auditable in one place.
+// pi session into the focused pane without prop-plumbing indirection. The
+// workspace calls this directly from event/click handlers so the control flow
+// is auditable in one place.
 export type ChatPaneHandle = {
   loadAndReplay: (piSessionId: string) => Promise<void>;
   compact: () => Promise<void>;
@@ -48,6 +48,7 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system";
   text: string;
   attachments?: ChatMessageAttachment[];
+  skills?: ComposerSkillRef[];
   blocks?: AssistantBlock[];
   timestamp?: string;
 };
@@ -74,7 +75,6 @@ export type AgentTurnSsePayload =
   | { type: "pi"; seq?: number; event: Record<string, unknown> };
 
 export type SessionTab = {
-  // Stable id local to this pane, used as a React key for tabs.
   id: string;
   // In-memory Pi runtime key. One per tab so tabs can run independent agent
   // sessions instead of sharing a pane-level runtime.
@@ -85,8 +85,6 @@ export type SessionTab = {
   projectId?: string;
   cwd?: string;
   modelId?: string;
-  // Display title — derived from the first user message of the session, or a
-  // placeholder while empty.
   title: string;
   messages: ChatMessage[];
   status: string;
@@ -94,7 +92,6 @@ export type SessionTab = {
   startedAt?: string;
   input: string;
   tokenStats?: TokenStats;
-  /** SDK-reported context usage; refreshed when runtime status is polled. */
   contextUsage?: {
     tokens: number | null;
     contextWindow: number;

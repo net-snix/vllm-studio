@@ -4,6 +4,7 @@
 // in different layouts; closing a pane doesn't drop session content).
 
 import type { ChatMessage, QueuedMessage, TokenStats } from "@/lib/agent/session/types";
+import type { ComposerSkillRef } from "@/lib/agent/composer-context";
 import type { RuntimeContextUsage } from "./api";
 
 export type SessionId = string;
@@ -29,7 +30,7 @@ export type Session = {
   startedAt?: string;
   input: string;
   tokenStats?: TokenStats;
-  /** SDK-reported context usage, refreshed when we poll runtime status. */
+  usedSkills?: ComposerSkillRef[];
   contextUsage?: RuntimeContextUsage | null;
   activeAssistantId?: string;
   lastEventSeq?: number;

@@ -1,15 +1,8 @@
-// CRITICAL
 "use client";
 
 import { Plus } from "lucide-react";
 import type { RecipeWithStatus } from "@/lib/types";
-import {
-  ModelButton,
-  ModelRow,
-  ModelSection,
-  ModelStatus,
-  ModelValue,
-} from "./model-page-primitives";
+import { ModelButton, ModelRow, ModelSection, ModelStatus, ModelValue } from "@/ui";
 import { RecipeRow } from "./recipe-row";
 
 type Props = {

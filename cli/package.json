@@ -10,7 +10,6 @@
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit",
     "build": "bun build src/main.ts --compile --outfile vllm-studio",
-    "prepare": "cd ../.. && husky cli/.husky",
     "check": "knip && jscpd src && depcheck",
     "check:fix": "knip --fix"
   },
@@ -23,7 +22,6 @@
     "@typescript-eslint/parser": "8.43.0",
     "depcheck": "1.4.7",
     "eslint": "9.35.0",
-    "husky": "9.1.7",
     "jscpd": "4.0.5",
     "knip": "5.44.2",
     "typescript": "^5.4.0"
