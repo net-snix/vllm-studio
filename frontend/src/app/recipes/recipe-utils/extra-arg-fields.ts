@@ -88,7 +88,12 @@ export const EXTRA_ARG_FIELDS: ExtraArgField[] = [
   { field: "limit_mm_per_prompt", key: "limit-mm-per-prompt", type: "string" },
   { field: "mm_processor_kwargs", key: "mm-processor-kwargs", type: "string" },
   { field: "allowed_local_media_path", key: "allowed-local-media-path", type: "string" },
-  { field: "disable_log_requests", key: "disable-log-requests", type: "boolean" },
+  {
+    field: "disable_log_requests",
+    key: "no-enable-log-requests",
+    type: "boolean",
+    aliases: ["disable-log-requests"],
+  },
   { field: "disable_log_stats", key: "disable-log-stats", type: "boolean" },
   { field: "max_log_len", key: "max-log-len", type: "number" },
   { field: "uvicorn_log_level", key: "uvicorn-log-level", type: "string" },
