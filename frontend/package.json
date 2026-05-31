@@ -7,7 +7,7 @@
     "build": "next build --webpack",
     "start": "node scripts/start-standalone.mjs",
     "start:next": "next start",
-    "test": "tsx --test scripts/test-build-agent-session-options.ts src/app/dashboard/dashboard-history.test.ts src/app/recipes/recipe-command.test.ts src/lib/agent/models.test.ts src/lib/agent/projects-store.test.ts src/lib/agent/tools/browser-url.test.ts src/lib/agent/workspace/reducer.test.ts",
+    "test": "tsx --test scripts/test-build-agent-session-options.ts src/app/dashboard/dashboard-history.test.ts src/app/recipes/recipe-command.test.ts src/lib/agent/models.test.ts src/lib/agent/projects-store.test.ts src/lib/agent/tools/browser-url.test.ts src/lib/agent/workspace/reducer.test.ts src/lib/agent/workspace/store.test.ts",
     "test:e2e": "tsx --test ../tests/frontend/e2e/*.test.ts",
     "lint": "eslint",
     "lint:fix": "eslint --fix",

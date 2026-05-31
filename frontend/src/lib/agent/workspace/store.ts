@@ -142,10 +142,33 @@ export type RestoredPaneState = {
   focusedPaneId: PaneId;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isPaneId(value: unknown): value is PaneId {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isWorkspaceLayout(value: unknown, depth = 0): value is WorkspaceLayout {
+  if (!isRecord(value) || depth > 24) return false;
+  if (value.kind === "leaf") return isPaneId(value.paneId);
+  if (value.kind !== "split") return false;
+  const directionOk = value.direction === "vertical" || value.direction === "horizontal";
+  return (
+    directionOk &&
+    typeof value.ratio === "number" &&
+    Number.isFinite(value.ratio) &&
+    isWorkspaceLayout(value.a, depth + 1) &&
+    isWorkspaceLayout(value.b, depth + 1)
+  );
+}
+
 function parsePersistedPaneState(raw: string): Partial<PersistedPaneState> | null {
   try {
-    const parsed = JSON.parse(raw) as Partial<PersistedPaneState>;
-    return parsed.layout && typeof parsed.layout === "object" ? parsed : null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed) || !isWorkspaceLayout(parsed.layout)) return null;
+    return parsed as Partial<PersistedPaneState>;
   } catch {
     return null;
   }
@@ -196,10 +219,10 @@ export function restorePersistedPaneState(raw: string): RestoredPaneState | null
   if (!parsed) return null;
 
   const layout = parsed.layout as WorkspaceLayout;
-  const leaves = collectLeaves(layout);
+  const leaves = collectLeaves(layout).filter(isPaneId);
   if (leaves.length === 0) return null;
 
-  const persistedPanes = parsed.panes && typeof parsed.panes === "object" ? parsed.panes : {};
+  const persistedPanes = isRecord(parsed.panes) ? parsed.panes : {};
   const panesById = new Map<PaneId, PaneState>();
   const sessions = new Map<SessionId, Session>();
   const selections = new Map<SessionId, ToolSelection>();
@@ -268,10 +291,6 @@ export function sessionMetaForPersistence(
     };
   }
   return base;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function defaultWorkspaceStorage(): WorkspaceStorage | null {
