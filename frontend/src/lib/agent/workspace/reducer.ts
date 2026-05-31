@@ -64,10 +64,12 @@ function chooseModelId(
   if (preferredModelId && models.some((model) => model.id === preferredModelId)) {
     return preferredModelId;
   }
+  const activeModelId = models.find((model) => model.active)?.id;
+  if (activeModelId) return activeModelId;
   if (currentModelId && models.some((model) => model.id === currentModelId)) {
     return currentModelId;
   }
-  return models.find((model) => model.active)?.id || models[0]?.id || "";
+  return models[0]?.id || "";
 }
 
 function hydrateSessionSnapshots(

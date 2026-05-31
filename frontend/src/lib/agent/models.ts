@@ -37,6 +37,11 @@ export interface AgentModel {
 
 export type BackendRecipeListItem = Record<string, unknown>;
 
+export type BackendProcessModelHint = {
+  served_model_name?: unknown;
+  model_path?: unknown;
+};
+
 export function inferReasoningSupport(modelId: string): boolean {
   const normalized = modelId.toLowerCase();
   return (
@@ -125,6 +130,22 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
 
 function textFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function pathBasename(value: string): string {
+  return (
+    value
+      .replace(/[\\/]+$/g, "")
+      .split(/[\\/]/)
+      .pop() || value
+  );
+}
+
+function addIdentity(out: Set<string>, value: unknown): void {
+  const text = textFromUnknown(value);
+  if (!text) return;
+  out.add(text);
+  out.add(pathBasename(text));
 }
 
 function extraArg(recipe: BackendRecipeListItem, ...keys: string[]): unknown {
@@ -271,9 +292,13 @@ export function recipeSupportsPiTools(recipe: BackendRecipeListItem): boolean {
 export function modelsWithRecipeToolCapabilities(
   models: AgentModel[],
   recipes: BackendRecipeListItem[],
+  process?: BackendProcessModelHint | null,
 ): AgentModel[] {
-  if (recipes.length === 0) return models;
+  if (recipes.length === 0 && !process) return models;
   const toolSupportByModel = new Map<string, { running: boolean; tools: boolean }>();
+  const activeIdentities = new Set<string>();
+  addIdentity(activeIdentities, process?.served_model_name);
+  addIdentity(activeIdentities, process?.model_path);
   for (const recipe of recipes) {
     const modelId =
       textFromUnknown(recipe.served_model_name) ||
@@ -281,6 +306,13 @@ export function modelsWithRecipeToolCapabilities(
       textFromUnknown(recipe.id);
     if (!modelId) continue;
     const running = textFromUnknown(recipe.status) === "running";
+    if (running) {
+      addIdentity(activeIdentities, recipe.served_model_name);
+      addIdentity(activeIdentities, recipe.model_id);
+      addIdentity(activeIdentities, recipe.id);
+      addIdentity(activeIdentities, recipe.name);
+      addIdentity(activeIdentities, recipe.model_path);
+    }
     const existing = toolSupportByModel.get(modelId);
     if (!existing || running || !existing.running) {
       toolSupportByModel.set(modelId, { running, tools: recipeSupportsPiTools(recipe) });
@@ -289,8 +321,25 @@ export function modelsWithRecipeToolCapabilities(
   return models.map((model) => {
     const support =
       toolSupportByModel.get(model.rawId ?? model.id) ?? toolSupportByModel.get(model.id);
-    return support === undefined ? model : { ...model, tools: support.tools };
+    const active = modelMatchesIdentity(model, activeIdentities);
+    return {
+      ...model,
+      ...(support === undefined ? {} : { tools: support.tools }),
+      ...(activeIdentities.size > 0 ? { active } : {}),
+    };
   });
+}
+
+function modelMatchesIdentity(model: AgentModel, identities: Set<string>): boolean {
+  if (identities.size === 0) return false;
+  const candidates = new Set<string>();
+  addIdentity(candidates, model.id);
+  addIdentity(candidates, model.rawId);
+  addIdentity(candidates, model.name);
+  for (const candidate of candidates) {
+    if (identities.has(candidate)) return true;
+  }
+  return false;
 }
 
 function isDeepSeekReasoningModel(model: AgentModel): boolean {

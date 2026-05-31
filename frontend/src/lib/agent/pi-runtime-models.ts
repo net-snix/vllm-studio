@@ -8,6 +8,7 @@ import {
   normalizeOpenAIModels,
   modelsToPiModels,
   type AgentModel,
+  type BackendProcessModelHint,
   type BackendRecipeListItem,
 } from "./models";
 
@@ -29,6 +30,11 @@ type ControllerModels = {
   controller: PiControllerConfig;
   models: AgentModel[];
   providerId: string;
+};
+
+type ControllerStatusPayload = {
+  running?: boolean;
+  process?: BackendProcessModelHint | null;
 };
 
 function controllersPath(agentDir: string): string {
@@ -150,6 +156,19 @@ async function fetchRecipesFromController(
     : [];
 }
 
+async function fetchStatusProcessFromController(
+  controller: PiControllerConfig,
+): Promise<BackendProcessModelHint | null> {
+  const backendUrl = normalizeBackendUrl(controller.url);
+  const headers: HeadersInit = { Accept: "application/json" };
+  if (controller.apiKey) headers.Authorization = `Bearer ${controller.apiKey}`;
+  const response = await fetch(`${backendUrl}/status`, { headers, cache: "no-store" });
+  if (!response.ok) return null;
+  const payload = (await response.json()) as ControllerStatusPayload;
+  if (!payload.running || !payload.process || typeof payload.process !== "object") return null;
+  return payload.process;
+}
+
 async function fetchModelsFromController(
   controller: PiControllerConfig,
   index: number,
@@ -162,16 +181,17 @@ async function fetchModelsFromController(
   if (!response.ok) {
     throw new Error(`${backendUrl}/v1/models failed with HTTP ${response.status}`);
   }
-  const [payload, recipes] = await Promise.all([
+  const [payload, recipes, process] = await Promise.all([
     response.json() as Promise<unknown>,
     fetchRecipesFromController({ ...controller, url: backendUrl }).catch(() => []),
+    fetchStatusProcessFromController({ ...controller, url: backendUrl }).catch(() => null),
   ]);
   const providerId = providerIdForController(controller, index);
   const label = controllerLabel(controller, index);
   const normalizedModels = normalizeOpenAIModels(
     payload && typeof payload === "object" ? payload : {},
   );
-  const modelsWithTools = modelsWithRecipeToolCapabilities(normalizedModels, recipes);
+  const modelsWithTools = modelsWithRecipeToolCapabilities(normalizedModels, recipes, process);
   const models = modelsWithTools.map((model) => ({
     ...model,
     id: qualifyModelId(providerId, model.id),
