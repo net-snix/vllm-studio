@@ -2,6 +2,8 @@
 // relative paths under the project cwd, http(s), localhost, and a search-engine
 // fallback for free-text input.
 
+const SEARXNG_PORT = "8081";
+
 import { sanitizeLocalFileUrl } from "@/lib/sanitize-embedded-browser-url";
 import { DEFAULT_BROWSER_URL } from "./persistence";
 
@@ -31,6 +33,19 @@ function expandHomeFilePath(cwd: string, value: string): string | null {
   return `${homeMatch[1]}${value.slice(1)}`;
 }
 
+function searchBaseUrl(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:8081";
+  const { protocol, hostname } = window.location;
+  const safeProtocol = protocol === "https:" ? "https:" : "http:";
+  return `${safeProtocol}//${hostname}:${SEARXNG_PORT}`;
+}
+
+export function buildSearchUrl(query: string): string {
+  const url = new URL("/search", searchBaseUrl());
+  url.searchParams.set("q", query);
+  return url.toString();
+}
+
 export function normalizeBrowserInput(raw: string, cwd: string): string {
   const value = raw.trim();
   if (!value) return DEFAULT_BROWSER_URL;
@@ -58,5 +73,5 @@ export function normalizeBrowserInput(raw: string, cwd: string): string {
   if (value.includes("/") && cwd) {
     return encodeFilePath(resolveRelativeFilePath(cwd, value));
   }
-  return `https://www.google.com/search?q=${encodeURIComponent(value)}`;
+  return buildSearchUrl(value);
 }
