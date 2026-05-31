@@ -102,12 +102,17 @@ export const isRecipeRunning = (
   }
 
   const canonicalName = (recipe.served_model_name ?? "").toLowerCase();
-  if (
-    canonicalName &&
-    current.served_model_name &&
-    current.served_model_name.toLowerCase() === canonicalName
-  ) {
-    return true;
+  const currentServedName = (current.served_model_name ?? "").toLowerCase();
+  if (currentServedName) {
+    if (canonicalName && currentServedName === canonicalName) {
+      return true;
+    }
+    if (!canonicalName && currentServedName === String(recipe.id).toLowerCase()) {
+      return true;
+    }
+    if (canonicalName) {
+      return false;
+    }
   }
 
   if (!current.model_path) {

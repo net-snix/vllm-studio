@@ -89,6 +89,13 @@ const shouldBufferImplicitReasoningContent = (
   );
 };
 
+const shouldPreserveReasoningTagsInContent = (recipe: Recipe | null): boolean => {
+  if (!recipe || recipe.backend !== "llamacpp") return false;
+  const reasoningFormat =
+    recipe.extra_args["reasoning-format"] ?? recipe.extra_args["reasoning_format"];
+  return typeof reasoningFormat === "string" && reasoningFormat.toLowerCase() === "none";
+};
+
 export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
   const nonRunningModelWarnings = new Map<string, NonRunningModelWarningState>();
 
@@ -450,6 +457,7 @@ export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
           recordedModel,
           reasoningParser
         ),
+        preserveReasoningTagsInContent: shouldPreserveReasoningTagsInContent(matchedRecipe),
       }
     );
 

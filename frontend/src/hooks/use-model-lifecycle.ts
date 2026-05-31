@@ -18,12 +18,13 @@ interface ModelLifecycle {
 const STARTING_STAGES = new Set(["preempting", "evicting", "launching", "waiting"]);
 
 const matchesProcess = (recipe: RecipeWithStatus, process: ProcessInfo): boolean => {
-  if (recipe.model_path && process.model_path && recipe.model_path === process.model_path)
-    return true;
   if (recipe.served_model_name && process.served_model_name) {
     return recipe.served_model_name === process.served_model_name;
   }
-  return recipe.id === process.served_model_name;
+  if (!recipe.served_model_name && recipe.id === process.served_model_name) return true;
+  if (recipe.model_path && process.model_path && recipe.model_path === process.model_path)
+    return true;
+  return false;
 };
 
 export function useModelLifecycle(): ModelLifecycle {

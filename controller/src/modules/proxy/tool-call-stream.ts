@@ -16,6 +16,7 @@ export interface StreamUsage {
 
 export interface ToolCallStreamOptions {
   bufferImplicitReasoningContent?: boolean;
+  preserveReasoningTagsInContent?: boolean;
 }
 
 export const createToolCallStream = (
@@ -252,6 +253,7 @@ export const createToolCallStream = (
     };
   };
 
+  const preserveReasoningTagsInContent = Boolean(options.preserveReasoningTagsInContent);
   const contentThink = createThinkRewriter({
     bufferImplicitReasoningContent: Boolean(options.bufferImplicitReasoningContent),
   });
@@ -447,17 +449,27 @@ export const createToolCallStream = (
             let reasoning = "";
             let reasoningFromContent = "";
             if (content) {
-              const rewritten = contentThink.rewrite(content, false);
-              if (rewritten.content) {
-                visibleContentBuffer += rewritten.content;
+              if (preserveReasoningTagsInContent) {
+                visibleContentBuffer += content;
+                const cleanedContent = stripToolXmlDelta(content);
+                if (cleanedContent) {
+                  delta["content"] = cleanedContent;
+                } else if ("content" in delta) {
+                  delete delta["content"];
+                }
+              } else {
+                const rewritten = contentThink.rewrite(content, false);
+                if (rewritten.content) {
+                  visibleContentBuffer += rewritten.content;
+                }
+                const cleanedContent = stripToolXmlDelta(rewritten.content);
+                if (cleanedContent) {
+                  delta["content"] = cleanedContent;
+                } else if ("content" in delta) {
+                  delete delta["content"];
+                }
+                reasoningFromContent = rewritten.reasoningAppend;
               }
-              const cleanedContent = stripToolXmlDelta(rewritten.content);
-              if (cleanedContent) {
-                delta["content"] = cleanedContent;
-              } else if ("content" in delta) {
-                delete delta["content"];
-              }
-              reasoningFromContent = rewritten.reasoningAppend;
             } else if (rawContent && "content" in delta) {
               delete delta["content"];
             }

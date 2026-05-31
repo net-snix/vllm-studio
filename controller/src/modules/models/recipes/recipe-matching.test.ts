@@ -86,4 +86,37 @@ describe("isRecipeRunning", () => {
       )
     ).toBe(true);
   });
+
+  it("does not match sibling llama.cpp recipes by path when served aliases differ", () => {
+    const running = process({
+      backend: "llamacpp",
+      model_path: "/models/step-3.7.gguf",
+      served_model_name: "step-3-7-mtp-256k",
+      executable_path: "/usr/local/bin/llama-server",
+      runtime_env: {},
+    });
+
+    expect(
+      isRecipeRunning(
+        recipe({
+          backend: "llamacpp",
+          model_path: "/models/step-3.7.gguf",
+          served_model_name: "step-3-7-mtp-128k",
+          extra_args: {},
+        }),
+        running
+      )
+    ).toBe(false);
+    expect(
+      isRecipeRunning(
+        recipe({
+          backend: "llamacpp",
+          model_path: "/models/step-3.7.gguf",
+          served_model_name: "step-3-7-mtp-256k",
+          extra_args: {},
+        }),
+        running
+      )
+    ).toBe(true);
+  });
 });
