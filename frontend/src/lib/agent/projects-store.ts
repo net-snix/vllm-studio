@@ -105,20 +105,27 @@ function withMeta(record: ProjectRecord): ProjectEntry {
   };
 }
 
+function chatsPath(): string {
+  return path.join(homedir(), ".vllm-studio");
+}
+
 function chatsProject(): ProjectEntry {
-  const chatsPath = path.join(homedir(), ".vllm-studio");
-  mkdirSync(chatsPath, { recursive: true });
+  const projectPath = chatsPath();
+  mkdirSync(projectPath, { recursive: true });
   return withMeta({
     id: CHATS_PROJECT_ID,
     name: "Chats",
-    path: chatsPath,
+    path: projectPath,
     addedAt: "1970-01-01T00:00:00.000Z",
   });
 }
 
 export function listProjectsFromStore(): ProjectEntry[] {
+  const reservedChatsPath = chatsPath();
   const projects = readDocument(projectsFilePath())
-    .projects.filter((project) => project.id !== CHATS_PROJECT_ID)
+    .projects.filter(
+      (project) => project.id !== CHATS_PROJECT_ID && project.path !== reservedChatsPath,
+    )
     .map(withMeta);
   return [chatsProject(), ...projects];
 }
@@ -126,6 +133,7 @@ export function listProjectsFromStore(): ProjectEntry[] {
 export function addProjectToStore(rawPath: string): ProjectEntry {
   const trimmed = rawPath.trim().replace(/\/+$/, "") || rawPath.trim();
   if (!trimmed) throw new Error("path is required");
+  if (trimmed === chatsPath()) return chatsProject();
   if (!isExistingDirectory(trimmed)) {
     throw new Error(`Path is not a directory: ${trimmed}`);
   }
