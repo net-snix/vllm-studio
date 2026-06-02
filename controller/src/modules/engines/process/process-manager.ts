@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream } from "node:fs";
 import type { WriteStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { setTimeout as delayTimeout } from "node:timers/promises";
@@ -44,24 +44,6 @@ export const createProcessManager = (
     command: string;
   };
 
-  const readRuntimeEnvironment = (pid: number): Record<string, string> | null => {
-    try {
-      const content = readFileSync(`/proc/${pid}/environ`, "utf-8");
-      const entries = content.split("\0").filter(Boolean);
-      const environment: Record<string, string> = {};
-      for (const entry of entries) {
-        const separator = entry.indexOf("=");
-        if (separator <= 0) continue;
-        const key = entry.slice(0, separator);
-        if (!key.startsWith("DS4_") && key !== "CUDA_VISIBLE_DEVICES") continue;
-        environment[key] = entry.slice(separator + 1);
-      }
-      return environment;
-    } catch {
-      return null;
-    }
-  };
-
   const findInferenceProcess = async (port: number): Promise<ProcessInfo | null> => {
     const processes = listProcesses();
     for (const proc of processes) {
@@ -78,6 +60,15 @@ export const createProcessManager = (
       let modelPath = extractFlag(proc.args, "--model") || extractFlag(proc.args, "--model-path");
       if (!modelPath && (backend === "llamacpp" || backend === "exllamav3" || backend === "ds4")) {
         modelPath = extractFlag(proc.args, "-m");
+      }
+      if (!modelPath && backend === "sglang") {
+        const launchServerIndex = proc.args.findIndex(
+          (argument) => argument === "sglang.launch_server"
+        );
+        const candidate = launchServerIndex >= 0 ? proc.args[launchServerIndex + 1] : undefined;
+        if (candidate && !candidate.startsWith("-")) {
+          modelPath = candidate;
+        }
       }
       const servedModelName =
         extractFlag(proc.args, "--served-model-name") ||
@@ -100,8 +91,6 @@ export const createProcessManager = (
         model_path: modelPath ?? null,
         port,
         served_model_name: servedModelName ?? null,
-        executable_path: proc.args[0] ?? null,
-        runtime_env: readRuntimeEnvironment(proc.pid),
       };
     }
     return null;

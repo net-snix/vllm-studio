@@ -219,6 +219,7 @@ export const registerStudioRoutes = (app: Hono, context: AppContext): void => {
         tabby_api_dir: context.config.tabby_api_dir ?? null,
         llama_bin: context.config.llama_bin ?? null,
         mlx_python: context.config.mlx_python ?? null,
+        exllamav3_command: context.config.exllamav3_command ?? null,
       },
     });
   });

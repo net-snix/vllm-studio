@@ -35,11 +35,14 @@ export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
   let reasoningGroup: ThinkingBlock[] = [];
   let toolGroup: ToolBlock[] = [];
 
+  // Positional ids keep React keys stable across streaming frames: blocks only
+  // ever append (their ids are derived from call+content index), so the routed
+  // sequence is a stable growing prefix and these positional ids never churn.
   const flushReasoningSegment = () => {
     if (reasoningGroup.length === 0) return;
     activitySegments.push({
       kind: "reasoning",
-      id: `reasoning-${reasoningGroup[0]?.id ?? routed.length}`,
+      id: `reasoning-${activitySegments.length}`,
       blocks: reasoningGroup,
     });
     reasoningGroup = [];
@@ -49,7 +52,7 @@ export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
     if (toolGroup.length === 0) return;
     activitySegments.push({
       kind: "tools",
-      id: `tools-${toolGroup[0]?.id ?? routed.length}`,
+      id: `tools-${activitySegments.length}`,
       blocks: toolGroup,
     });
     toolGroup = [];
@@ -61,7 +64,7 @@ export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
     if (activitySegments.length === 0) return;
     routed.push({
       kind: "activity-group",
-      id: `activity-${activitySegments[0]?.id ?? routed.length}`,
+      id: `activity-${routed.length}`,
       segments: activitySegments.splice(0),
     });
   };
@@ -104,7 +107,7 @@ const MemoEventBlock = memo(function MemoEventBlock({ block }: { block: EventBlo
   return <EventBlockView block={block} />;
 });
 
-function SessionPaneBlockRouterInner({ message }: { message: ChatMessage }) {
+function SessionPaneBlockRouterInner({ message, live }: { message: ChatMessage; live: boolean }) {
   if (message.role === "user") {
     return (
       <article className="flex justify-end">
@@ -122,7 +125,7 @@ function SessionPaneBlockRouterInner({ message }: { message: ChatMessage }) {
     );
   }
 
-  return <AssistantBlocks blocks={message.blocks ?? EMPTY_BLOCKS} />;
+  return <AssistantBlocks blocks={message.blocks ?? EMPTY_BLOCKS} live={live} />;
 }
 
 const EMPTY_BLOCKS: AssistantBlock[] = [];
@@ -132,7 +135,13 @@ const EMPTY_BLOCKS: AssistantBlock[] = [];
 // `attachments`) don't redo `groupAssistantBlocks`. Re-runs only on a new
 // `blocks` array identity — which `appendDelta` only produces when the
 // assistant actually mutates a block.
-const AssistantBlocks = memo(function AssistantBlocks({ blocks }: { blocks: AssistantBlock[] }) {
+const AssistantBlocks = memo(function AssistantBlocks({
+  blocks,
+  live,
+}: {
+  blocks: AssistantBlock[];
+  live: boolean;
+}) {
   const routedBlocks = useMemo(() => groupAssistantBlocks(blocks), [blocks]);
   traceAgentReasoning("render.blocks", { blocks, routedBlocks });
 
@@ -142,7 +151,7 @@ const AssistantBlocks = memo(function AssistantBlocks({ blocks }: { blocks: Assi
         <div className="flex flex-col gap-3.5">
           {routedBlocks.map((item) => {
             if (item.kind === "activity-group") {
-              return <AssistantActivityGroup key={item.id} segments={item.segments} />;
+              return <AssistantActivityGroup key={item.id} segments={item.segments} live={live} />;
             }
             if (item.kind === "content") {
               return <MemoContentBlock key={item.block.id} block={item.block} />;
@@ -164,7 +173,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
   if (attachment.previewKind === "image" && attachment.previewUrl) {
     return (
       <figure
-        className="overflow-hidden rounded-md border border-(--border) bg-black/40"
+        className="overflow-hidden rounded-md border border-(--border) bg-black/40 p-0"
         title={title}
       >
         <img
@@ -181,7 +190,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
   if (attachment.previewKind === "video" && attachment.previewUrl) {
     return (
       <figure
-        className="overflow-hidden rounded-md border border-(--border) bg-black/40"
+        className="overflow-hidden rounded-md border border-(--border) bg-black/40 p-0"
         title={title}
       >
         <video src={attachment.previewUrl} className="max-h-72 w-full" controls />
@@ -194,7 +203,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
   if (attachment.previewKind === "pdf" && attachment.previewUrl) {
     return (
       <div
-        className="overflow-hidden rounded-md border border-(--border) bg-black/40"
+        className="overflow-hidden rounded-md border border-(--border) bg-black/40 p-0"
         title={title}
       >
         <iframe
@@ -227,13 +236,20 @@ function formatAttachmentSize(bytes: number) {
 
 const AssistantActivityGroup = memo(function AssistantActivityGroup({
   segments,
+  live,
 }: {
   segments: ActivitySegment[];
+  live: boolean;
 }) {
-  const hasActiveTool = segments.some(
-    (segment) =>
-      segment.kind === "tools" && segment.blocks.some((block) => block.status === "running"),
-  );
+  // A tool only counts as "active" while the session is actually streaming.
+  // Once the turn ends, a block left in "running" (e.g. an errored call, or a
+  // stream that dropped its tool_execution_end) must not show a perpetual badge.
+  const hasActiveTool =
+    live &&
+    segments.some(
+      (segment) =>
+        segment.kind === "tools" && segment.blocks.some((block) => block.status === "running"),
+    );
   // Default collapsed: tool calls + reasoning are progress detail, not the
   // primary signal. The summary row already shows what happened ("Explored 1
   // search, read 2 files") plus a live "running" badge while a tool is in

@@ -3,6 +3,8 @@ import {
   assistantPiEventAffectsBlocks,
   asRecord,
   blocksFromMessageContent,
+  blocksFromTurnSnapshots,
+  finalizeRunningToolBlocks,
   messageTextFromBlocks,
   type AssistantBlock,
   type ChatMessage,
@@ -14,6 +16,7 @@ import {
   usageFromEvent,
   visibleUserTextFromPi,
 } from "@/lib/agent/session";
+import { isAgentEndEvent } from "@/lib/agent/pi-events";
 import { traceAgentReasoning } from "@/lib/agent/trace-reasoning";
 import type { Session, SessionId } from "./types";
 
@@ -53,6 +56,21 @@ export function applyPiEventToSession(
     deps.updateSession(sessionId, (session) => ({ ...session, tokenStats: usage }));
   }
 
+  // Assistant message lifecycle -> rebuild blocks from accumulated per-call
+  // snapshots (NOT from token deltas). This owns message_start/update/end.
+  if (applyAssistantSnapshotEvent(deps, sessionId, assistantId, event)) return;
+
+  // Turn finished: settle any still-"running" tool badges and drop the
+  // transient per-call snapshots.
+  if (isAgentEndEvent(event)) {
+    deps.patchAssistant(sessionId, currentAssistantId(deps, sessionId, assistantId), (msg) => ({
+      ...msg,
+      blocks: finalizeRunningToolBlocks(msg.blocks ?? []),
+      streamCalls: undefined,
+    }));
+    return;
+  }
+
   if (patchFinalAssistantMessageFromPiEvent(deps, sessionId, assistantId, event)) return;
 
   if (!assistantPiEventAffectsBlocks(event)) return;
@@ -76,6 +94,57 @@ function currentAssistantId(
   assistantId: string,
 ): string {
   return deps.liveAssistantIdsRef.current.get(sessionId) ?? assistantId;
+}
+
+// Accumulate one content snapshot per LLM call and rebuild the bubble's blocks
+// from all of them. `message_start` opens a new call slot; `message_update` /
+// `message_end` replace the current slot with the call's full accumulated
+// content. Tool results (from tool_execution_* events) are preserved across
+// rebuilds via mergeExistingToolState.
+function applyAssistantSnapshotEvent(
+  deps: PiEventApplierDeps,
+  sessionId: SessionId,
+  assistantId: string,
+  event: Record<string, unknown>,
+): boolean {
+  const type = event.type;
+  if (type !== "message_start" && type !== "message_update" && type !== "message_end") return false;
+  const message = asRecord(event.message);
+  if (message?.role !== "assistant") return false;
+  const content = Array.isArray(message.content)
+    ? (message.content as Array<Record<string, unknown>>)
+    : [];
+
+  const stopReason = typeof message.stopReason === "string" ? message.stopReason : "";
+  const callFailed = type === "message_end" && (stopReason === "error" || stopReason === "aborted");
+
+  deps.patchAssistant(sessionId, currentAssistantId(deps, sessionId, assistantId), (current) => {
+    const streamCalls = nextStreamCalls(current.streamCalls, type, content);
+    let blocks = mergeExistingToolState(current.blocks ?? [], blocksFromTurnSnapshots(streamCalls));
+    // An LLM call that errored/aborted will never execute the tools it declared
+    // — settle them now instead of leaving a perpetual "running" badge.
+    if (callFailed) blocks = finalizeRunningToolBlocks(blocks, "error");
+    return { ...current, streamCalls, blocks, text: messageTextFromBlocks(blocks) };
+  });
+  return true;
+}
+
+function nextStreamCalls(
+  prev: Array<Array<Record<string, unknown>>> | undefined,
+  type: string,
+  content: Array<Record<string, unknown>>,
+): Array<Array<Record<string, unknown>>> {
+  const calls = prev ? prev.slice() : [];
+  if (type === "message_start") {
+    calls.push(content);
+    return calls;
+  }
+  if (calls.length === 0) {
+    calls.push(content);
+  } else {
+    calls[calls.length - 1] = content;
+  }
+  return calls;
 }
 
 function appendUserMessageFromPiEvent(
@@ -114,7 +183,9 @@ function patchFinalAssistantMessageFromPiEvent(
   assistantId: string,
   event: Record<string, unknown>,
 ): boolean {
-  if (event.type !== "message" && event.type !== "message_end") return false;
+  // `message_end` is owned by the snapshot path; this only handles the canonical
+  // `message` event shape (replayed/settled messages).
+  if (event.type !== "message") return false;
   const msg = asRecord(event.message);
   if (msg?.role !== "assistant") return false;
   const content = finalMessageContent(msg.content);

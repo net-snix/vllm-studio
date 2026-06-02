@@ -9,7 +9,7 @@ import {
   TerminalSquare,
   Wrench,
 } from "lucide-react";
-import { GlobeIcon } from "@/components/icons";
+import { GlobeIcon } from "@/ui/icons";
 import type { ToolBlock } from "@/lib/agent/session";
 import {
   FILE_WRITE_TOOL_NAMES,
@@ -24,6 +24,14 @@ import {
 } from "./tool-metadata";
 
 type ToolMeta = { icon: ReactNode; label: string; detail: string | null };
+
+function previewHtmlDocument(source: string): string {
+  const resetStyle = "<style>html,body{margin:0;padding:0}</style>";
+  if (/<head[\s>]/i.test(source)) return source.replace(/<head([^>]*)>/i, `<head$1>${resetStyle}`);
+  if (/<html[\s>]/i.test(source))
+    return source.replace(/<html([^>]*)>/i, `<html$1><head>${resetStyle}</head>`);
+  return `<!doctype html><html><head><meta charset="utf-8">${resetStyle}</head><body>${source}</body></html>`;
+}
 
 function iconForKind(kind: ToolKind): ReactNode {
   switch (kind) {
@@ -247,8 +255,8 @@ function FileWritePreview({
         <iframe
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
-          srcDoc={body}
-          className="h-72 w-full rounded-md border border-(--border) bg-white"
+          srcDoc={previewHtmlDocument(body)}
+          className="m-0 h-72 w-full rounded-md border border-(--border) bg-white p-0"
           title={filePath ?? "preview"}
         />
       ) : (

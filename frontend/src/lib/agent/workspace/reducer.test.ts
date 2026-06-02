@@ -11,7 +11,9 @@ function model(id: string, active = false): AgentModel {
     contextWindow: 128_000,
     maxTokens: 65_536,
     reasoning: false,
+    vision: false,
     active,
+    tools: false,
   };
 }
 

@@ -50,6 +50,10 @@ export type ChatMessage = {
   attachments?: ChatMessageAttachment[];
   skills?: ComposerSkillRef[];
   blocks?: AssistantBlock[];
+  // Transient streaming state: one accumulated pi content snapshot per LLM call
+  // of the in-flight turn. `blocks` are rebuilt from this each frame. Cleared
+  // when the turn ends; not meant for persistence.
+  streamCalls?: Array<Array<Record<string, unknown>>>;
   timestamp?: string;
 };
 
@@ -68,11 +72,6 @@ export type QueuedMessage = {
   text: string;
   sent?: boolean;
 };
-
-export type AgentTurnSsePayload =
-  | { type: "status"; phase: string; piSessionId?: string | null }
-  | { type: "error"; error: string }
-  | { type: "pi"; seq?: number; event: Record<string, unknown> };
 
 export type SessionTab = {
   id: string;

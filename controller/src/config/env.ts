@@ -155,10 +155,7 @@ export const createConfig = (): Config => {
     config.mlx_python = parsed.VLLM_STUDIO_MLX_PYTHON;
   }
   if (parsed.VLLM_STUDIO_EXLLAMAV3_COMMAND) {
-    const command = parsed.VLLM_STUDIO_EXLLAMAV3_COMMAND.trim();
-    if (command) {
-      config.exllamav3_command = command;
-    }
+    config.exllamav3_command = parsed.VLLM_STUDIO_EXLLAMAV3_COMMAND;
   }
 
   const persisted = loadPersistedConfig(config.data_dir);

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Square } from "lucide-react";
-import { ModelStopConfirm } from "@/components/model-stop-confirm";
+import { ModelStopConfirm } from "@/ui/model-stop-confirm";
 import type { DashboardLayoutProps } from "@/components/dashboard/layout/dashboard-types";
 import { useModelLifecycle } from "@/hooks/use-model-lifecycle";
 import type { LinuxDashboardHealth, RecipeWithStatus } from "@/lib/types";

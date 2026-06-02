@@ -16,33 +16,52 @@ export const extractFlag = (args: string[], flag: string): string | undefined =>
   return undefined;
 };
 
+const executableName = (value: string | undefined): string => {
+  if (!value) return "";
+  return value.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? value.toLowerCase();
+};
+
+const hasModuleInvocation = (args: string[], moduleName: string): boolean => {
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "-m" && args[index + 1] === moduleName) {
+      return true;
+    }
+    if (args[index] === moduleName) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const hasVllmServeInvocation = (args: string[]): boolean => {
+  const executableIndex = args.findIndex((argument) => executableName(argument) === "vllm");
+  return executableIndex >= 0 && args[executableIndex + 1] === "serve";
+};
+
 export const detectBackend = (args: string[]): Backend | null => {
   if (args.length === 0) {
     return null;
   }
-  const joined = args.join(" ");
-  const executableName = args[0]?.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? "";
-  const basename = (value: string): string =>
-    value.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? "";
-
-  if (executableName === "ds4-server" || executableName === "ds4-server.exe") {
+  const commandName = executableName(args[0]);
+  if (commandName === "ds4-server" || commandName === "ds4-server.exe") {
     return "ds4";
   }
-  if (args.some((argument) => argument.includes("vllm.entrypoints.openai.api_server"))) {
-    return "vllm";
-  }
-  if (args.some((argument, index) => basename(argument) === "vllm" && args[index + 1] === "serve")) {
-    return "vllm";
-  }
-  if (joined.includes("sglang.launch_server")) {
-    return "sglang";
-  }
-  if (joined.includes("mlx_lm.server") || joined.includes("mlx-lm")) {
-    return "mlx";
-  }
-  const joinedLower = joined.toLowerCase();
+  const joinedLower = args.join(" ").toLowerCase();
   if (joinedLower.includes("exllama") || joinedLower.includes("exllamav3")) {
     return "exllamav3";
+  }
+  if (hasModuleInvocation(args, "vllm.entrypoints.openai.api_server")) {
+    return "vllm";
+  }
+  if (hasVllmServeInvocation(args)) {
+    return "vllm";
+  }
+  if (hasModuleInvocation(args, "sglang.launch_server")) {
+    return "sglang";
+  }
+  const joined = args.join(" ");
+  if (joined.includes("mlx_lm.server") || joined.includes("mlx-lm")) {
+    return "mlx";
   }
   if (
     joined.includes("llama-server") ||
@@ -107,10 +126,6 @@ export const buildEnvironment = (recipe: Recipe): Record<string, string> => {
 
   for (const [key, value] of Object.entries(environmentVariables)) {
     env[key] = value;
-  }
-
-  if (!env["CUDA_DEVICE_ORDER"]) {
-    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID";
   }
 
   const readExtraArgument = (key: string): unknown => {

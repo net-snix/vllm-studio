@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Recipe, RecipeEditor } from "@/lib/types";
-import { generateCommand } from "./recipe-command";
-import { normalizeRecipeForEditor, prepareRecipeForSave } from "./recipe-utils";
+import { generateCommand } from "@/lib/recipes/recipe-command";
+import { normalizeRecipeForEditor, prepareRecipeForSave } from "@/lib/recipes/recipe-utils";
 
 test("vLLM disable log requests emits the v0.22 boolean flag", () => {
   const command = generateCommand({
