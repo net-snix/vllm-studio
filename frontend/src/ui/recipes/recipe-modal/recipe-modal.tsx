@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { RefreshCw, Save, X } from "lucide-react";
+import { useCallback, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Cpu, HardDrive, Network, RefreshCw, Save } from "lucide-react";
 import { Button, StatusPill } from "@/ui";
+import { Drawer, DrawerBody, DrawerFooter, DrawerHeader } from "@/ui/drawer";
 import api from "@/lib/api";
 import type { Backend, ModelInfo, Recipe, RecipeEditor, RecipeWithStatus } from "@/lib/types";
 import { formatBackendLabel } from "@/lib/recipes/recipe-labels";
@@ -219,97 +220,149 @@ export function RecipeModal({
   };
 
   return (
-    <aside
-      className="relative flex shrink-0 flex-col border-l border-(--ui-border) bg-(--ui-bg)"
-      style={{ width: "720px", minWidth: "min(420px, 40%)", maxWidth: "min(820px, 65%)" }}
-    >
-      {/* Header — matches chat sidepanel ComputerHeader (h-9, text-[11px]) */}
-      <div className="relative flex h-9 shrink-0 items-center gap-2 border-b border-(--ui-border) px-2 text-[11px]">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="truncate font-medium text-(--ui-fg)/85">
-            {recipe.id ? "Edit recipe" : "New recipe"}
-          </span>
+    <Drawer width={860}>
+      <DrawerHeader
+        title={recipe.id ? recipe.name || "Edit recipe" : "New recipe"}
+        badge={
           <StatusPill tone="info" variant="badge" className="shrink-0">
             {formatBackendLabel(recipe.backend)}
           </StatusPill>
-        </div>
-        <Button
-          variant="icon"
-          size="sm"
-          onClick={onClose}
-          aria-label="Close recipe drawer"
-          title="Close"
-        >
-          <X className="h-3 w-3" />
-        </Button>
-      </div>
+        }
+        onClose={onClose}
+      />
 
       <RecipeModalTabBar activeTab={activeTab} onSelectTab={setActiveTab} />
 
-      {/* Content */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <RecipeModalTabContent
-          activeTab={activeTab}
-          recipe={recipe}
-          onChange={applyRecipeChange}
-          availableModels={availableModels}
-          modelServedNames={modelServedNames}
-          isLlamacpp={isLlamacpp}
-          getExtraArgValueForKey={getExtraArgValueForKeyLocal}
-          setExtraArgValueForKey={setExtraArgValueForKeyLocal}
-          envVarEntries={envVarEntries}
-          onAddEnvVar={handleAddEnvVar}
-          onChangeEnvVar={handleEnvVarChange}
-          onRemoveEnvVar={handleRemoveEnvVar}
-          extraArgsText={extraArgsText}
-          extraArgsError={extraArgsError}
-          onExtraArgsChange={handleExtraArgsChange}
-          llamaConfigLoading={llamaConfigLoading}
-          llamaConfigHelp={llamaConfigHelp}
-          recipeSourceText={recipeSourceText}
-          recipeSourceError={recipeSourceError}
-          onRecipeSourceChange={handleRecipeSourceChange}
-          onFormatRecipeSource={handleRecipeSourceFormat}
-          commandText={commandText}
-          generatedCommand={generatedCommand}
-          hasCommandOverride={hasCommandOverride}
-          onCommandChange={handleCommandChange}
-          onResetCommand={handleCommandReset}
-        />
-      </div>
+      <DrawerBody>
+        <div className="space-y-4">
+          <RecipeModalSummary
+            recipe={recipe}
+            backend={backend}
+            commandOverridden={hasCommandOverride}
+          />
+          <RecipeModalTabContent
+            activeTab={activeTab}
+            recipe={recipe}
+            onChange={applyRecipeChange}
+            availableModels={availableModels}
+            modelServedNames={modelServedNames}
+            isLlamacpp={isLlamacpp}
+            getExtraArgValueForKey={getExtraArgValueForKeyLocal}
+            setExtraArgValueForKey={setExtraArgValueForKeyLocal}
+            envVarEntries={envVarEntries}
+            onAddEnvVar={handleAddEnvVar}
+            onChangeEnvVar={handleEnvVarChange}
+            onRemoveEnvVar={handleRemoveEnvVar}
+            extraArgsText={extraArgsText}
+            extraArgsError={extraArgsError}
+            onExtraArgsChange={handleExtraArgsChange}
+            llamaConfigLoading={llamaConfigLoading}
+            llamaConfigHelp={llamaConfigHelp}
+            recipeSourceText={recipeSourceText}
+            recipeSourceError={recipeSourceError}
+            onRecipeSourceChange={handleRecipeSourceChange}
+            onFormatRecipeSource={handleRecipeSourceFormat}
+            commandText={commandText}
+            generatedCommand={generatedCommand}
+            hasCommandOverride={hasCommandOverride}
+            onCommandChange={handleCommandChange}
+            onResetCommand={handleCommandReset}
+          />
+        </div>
+      </DrawerBody>
 
-      {/* Footer */}
-      <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-t border-(--ui-border) bg-(--ui-bg) px-2 text-[11px]">
-        <div className="min-w-0 truncate text-(--ui-muted)/75">
-          {recipe.id ? `Editing ${recipe.name}` : "Creating new recipe"}
-          {extraArgsError && <span className="ml-3 text-(--ui-danger)">Extra args has errors</span>}
-          {recipeSourceError && (
-            <span className="ml-3 text-(--ui-danger)">Recipe JSON has errors</span>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button
-            size="sm"
-            onClick={onSave}
-            disabled={
-              saving ||
-              !!extraArgsError ||
-              !!recipeSourceError ||
-              !(recipe.name ?? "").trim() ||
-              !(recipe.model_path ?? "").trim()
-            }
-            icon={
-              saving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />
-            }
-          >
-            {saving ? "Saving..." : "Save recipe"}
-          </Button>
-        </div>
+      <DrawerFooter
+        status={
+          <>
+            {recipe.id ? `Editing ${recipe.name}` : "Creating new recipe"}
+            {extraArgsError && (
+              <span className="ml-3 text-(--ui-danger)">Extra args has errors</span>
+            )}
+            {recipeSourceError && (
+              <span className="ml-3 text-(--ui-danger)">Recipe JSON has errors</span>
+            )}
+          </>
+        }
+      >
+        <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
+          Cancel
+        </Button>
+        <Button
+          size="sm"
+          onClick={onSave}
+          disabled={
+            saving ||
+            !!extraArgsError ||
+            !!recipeSourceError ||
+            !(recipe.name ?? "").trim() ||
+            !(recipe.model_path ?? "").trim()
+          }
+          icon={
+            saving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />
+          }
+        >
+          {saving ? "Saving..." : "Save recipe"}
+        </Button>
+      </DrawerFooter>
+    </Drawer>
+  );
+}
+
+function RecipeModalSummary({
+  recipe,
+  backend,
+  commandOverridden,
+}: {
+  recipe: RecipeEditor;
+  backend: Backend;
+  commandOverridden: boolean;
+}) {
+  return (
+    <div className="grid gap-2 md:grid-cols-3">
+      <SummaryCell
+        icon={<Cpu className="h-3.5 w-3.5" />}
+        label="Backend"
+        value={formatBackendLabel(backend)}
+      />
+      <SummaryCell
+        icon={<HardDrive className="h-3.5 w-3.5" />}
+        label="Model"
+        value={recipe.model_path || "Select a model"}
+      />
+      <SummaryCell
+        icon={<Network className="h-3.5 w-3.5" />}
+        label="API name"
+        value={recipe.served_model_name || recipe.name || "Generated"}
+        badge={commandOverridden ? "command override" : undefined}
+      />
+    </div>
+  );
+}
+
+function SummaryCell({
+  icon,
+  label,
+  value,
+  badge,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  badge?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-md border border-(--ui-border) bg-(--ui-surface) px-3 py-2">
+      <div className="mb-1 flex items-center gap-1.5 text-[length:var(--fs-xs)] uppercase tracking-[0.12em] text-(--ui-muted)">
+        {icon}
+        {label}
       </div>
-    </aside>
+      <div className="truncate text-[length:var(--fs-md)] font-medium text-(--ui-fg)" title={value}>
+        {value}
+      </div>
+      {badge ? (
+        <div className="mt-1 text-[length:var(--fs-xs)] text-(--ui-warning)">{badge}</div>
+      ) : null}
+    </div>
   );
 }
 

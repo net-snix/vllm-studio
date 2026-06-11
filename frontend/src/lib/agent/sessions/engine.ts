@@ -1,81 +1,30 @@
 import { useCallback, useMemo, useRef } from "react";
 import {
-  useSessionEngineBatchCleanupEffect,
-  useSessionEnginePromptStreamCleanupEffect,
-  useSessionEngineTextDeltaCleanupEffect,
-} from "@/hooks/agent/use-session-engine-effects";
-import { isAgentEndEvent } from "@/lib/agent/pi-events";
-import {
-  type ChatMessage,
-  type ChatMessageAttachment,
   mergeCanonicalAndRuntimeEvents,
-  newId,
-  nowLabel,
-  piSessionIdFromEvent,
   replayCursorAfterRuntimeHydration,
   replaySessionEvents,
   runtimeStatusAcceptsControl,
-  sessionTitleFromPrompt,
-  statusAfterControlPhase,
   type TokenStats,
   usageFromEvent,
 } from "@/lib/agent/session";
 import {
   activeComposerPlugins,
   selectedContextPrompt,
-  type ComposerExtensionOverride,
   type ComposerPluginRef,
   type ComposerPromptTemplateRef,
   type ComposerSkillRef,
 } from "@/lib/agent/composer-context";
-import { promptRequestsBrowser } from "@/lib/agent/browser/intent";
-import type { AgentImageInput } from "@/lib/agent/contracts/turn";
-import type { Session, SessionId, SessionStatus } from "@/lib/agent/sessions/types";
-import type { ToolSelection } from "@/lib/agent/tools/types";
-import { traceAgentReasoning } from "@/lib/agent/trace-reasoning";
+import type { Session, SessionId } from "@/lib/agent/sessions/types";
+import type { BrowserBackend, ToolSelection } from "@/lib/agent/tools/types";
 import * as api from "./api";
-import {
-  resolveRuntimeSessionId,
-  runtimeCanHydrateCanonicalSession,
-  runtimeIsActiveForPiSession,
-} from "./engine-helpers";
-import { applyPiEventToSession } from "./pi-event-applier";
-import { drainQueuedTurnAfterAgentEnd } from "./queue-drain";
-import { claimRuntimePromptStream, releaseRuntimePromptStream } from "./stream-ownership";
-import { createTextDeltaCoalescer, type TextDeltaCoalescer } from "./text-delta-coalescer";
+import { resolveRuntimeSessionId, runtimeCanHydrateCanonicalSession } from "./engine-helpers";
+import { submitPromptTurn, type SubmitArgs } from "./prompt-stream";
 
 const EMPTY_PLUGINS: ComposerPluginRef[] = [];
 const EMPTY_SKILLS: ComposerSkillRef[] = [];
 const EMPTY_PROMPT_TEMPLATES: ComposerPromptTemplateRef[] = [];
-const EMPTY_EXTENSION_OVERRIDES: ComposerExtensionOverride[] = [];
-
-function mergeSkills(
-  existing: ComposerSkillRef[] | undefined,
-  next: ComposerSkillRef[],
-): ComposerSkillRef[] | undefined {
-  if (!existing?.length && next.length === 0) return existing;
-  const byId = new Map<string, ComposerSkillRef>();
-  for (const skill of existing ?? []) byId.set(skill.id || skill.path || skill.name, skill);
-  for (const skill of next) byId.set(skill.id || skill.path || skill.name, skill);
-  return [...byId.values()];
-}
 
 type UpdateSession = (sessionId: SessionId, patch: (session: Session) => Session) => void;
-
-type SubmitArgs = {
-  text: string;
-  /** Pre-resolved prompt text (with attachments / context already merged). */
-  prompt: string;
-  displayText: string;
-  userText: string;
-  images?: AgentImageInput[];
-  attachments?: ChatMessageAttachment[];
-  plugins?: ComposerPluginRef[];
-  skills?: ComposerSkillRef[];
-  promptTemplates?: ComposerPromptTemplateRef[];
-  extensionOverrides?: ComposerExtensionOverride[];
-  targetSessionId?: SessionId;
-};
 
 export type UseSessionEngineDeps = {
   /** Latest `tabs` snapshot — engine reads via a ref so it doesn't restart on every frame. */
@@ -86,6 +35,7 @@ export type UseSessionEngineDeps = {
   modelId: string;
   cwd: string;
   browserToolEnabled: boolean;
+  browserBackend: BrowserBackend;
   canvasEnabled: boolean;
   onPiSessionIdChange?: (piSessionId: string) => void;
   /** Mutate a single session record. */
@@ -105,7 +55,10 @@ export type SessionEngine = {
     sessionId: SessionId,
     piSessionId?: string | null,
   ) => Promise<{ ok: boolean; error?: string }>;
-  loadRuntimeStatus: (runtime: string) => Promise<api.RuntimeStatus | null>;
+  loadRuntimeStatus: (
+    runtime: string,
+    piSessionId?: string | null,
+  ) => Promise<api.RuntimeStatus | null>;
   abortTurn: (sessionId: SessionId) => Promise<void>;
   loadAndReplay: (piSessionId: string, sessionId: SessionId) => Promise<void>;
   compact: (sessionId: SessionId) => Promise<void>;
@@ -121,6 +74,7 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
     modelId,
     cwd,
     browserToolEnabled,
+    browserBackend,
     canvasEnabled,
     onPiSessionIdChange,
     updateSession,
@@ -132,109 +86,7 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
   const selectionForRef = useRef(selectionFor);
   selectionForRef.current = selectionFor;
 
-  // The "live" assistant message id we're currently appending to, per session.
-  // Pi can split a single user turn across multiple assistant messages (after
-  // a queue_update / message_start), and we need a stable id to patch.
-  const liveAssistantIdsRef = useRef<Map<SessionId, string>>(new Map());
-  const piEventBatchesRef = useRef<
-    Map<
-      SessionId,
-      {
-        assistantId: string;
-        events: Record<string, unknown>[];
-        timer: ReturnType<typeof setTimeout> | null;
-      }
-    >
-  >(new Map());
-  const promptStreamControllersRef = useRef<Map<string, AbortController>>(new Map());
-
-  const patchAssistant = useCallback(
-    (sessionId: SessionId, assistantId: string, patch: (msg: ChatMessage) => ChatMessage) => {
-      updateSession(sessionId, (session) => ({
-        ...session,
-        messages: session.messages.map((m) => (m.id === assistantId ? patch(m) : m)),
-      }));
-    },
-    [updateSession],
-  );
-
-  // Apply a single pi event to a session through a deep Module that owns Pi
-  // event routing while the hook owns React lifecycle and runtime streams.
-  const applyPiEvent = useCallback(
-    (sessionId: SessionId, assistantId: string, event: Record<string, unknown>) => {
-      applyPiEventToSession(
-        { liveAssistantIdsRef, patchAssistant, tabsRef, updateSession },
-        sessionId,
-        assistantId,
-        event,
-      );
-    },
-    [patchAssistant, updateSession],
-  );
-  const applyPiEventRef = useRef(applyPiEvent);
-  applyPiEventRef.current = applyPiEvent;
-  const textDeltaCoalescerRef = useRef<TextDeltaCoalescer | null>(null);
-  if (!textDeltaCoalescerRef.current) {
-    textDeltaCoalescerRef.current = createTextDeltaCoalescer({
-      applyPiEvent: (sessionId, assistantId, event) => {
-        applyPiEventRef.current(sessionId, assistantId, event);
-      },
-    });
-  }
-
-  useSessionEngineTextDeltaCleanupEffect({ textDeltaCoalescerRef });
-
-  const flushPiEventBatch = useCallback(
-    (sessionId: SessionId) => {
-      textDeltaCoalescerRef.current?.flushNow(sessionId);
-      const batch = piEventBatchesRef.current.get(sessionId);
-      if (!batch) return;
-      if (batch.timer) clearTimeout(batch.timer);
-      piEventBatchesRef.current.delete(sessionId);
-      for (const event of batch.events) {
-        applyPiEvent(sessionId, batch.assistantId, event);
-      }
-    },
-    [applyPiEvent],
-  );
-
-  const enqueuePiEvent = useCallback(
-    (
-      sessionId: SessionId,
-      assistantId: string,
-      event: Record<string, unknown>,
-      options: { flushNow?: boolean } = {},
-    ) => {
-      if (textDeltaCoalescerRef.current?.enqueuePiEvent(sessionId, assistantId, event, options)) {
-        return;
-      }
-      textDeltaCoalescerRef.current?.flushNow(sessionId);
-      if (options.flushNow) flushPiEventBatch(sessionId);
-      applyPiEvent(sessionId, assistantId, event);
-    },
-    [applyPiEvent, flushPiEventBatch],
-  );
-
-  useSessionEngineBatchCleanupEffect({ piEventBatchesRef });
-  useSessionEnginePromptStreamCleanupEffect({ promptStreamControllersRef });
-
   const loadRuntimeStatusCb = useCallback(api.loadRuntimeStatus, []);
-
-  const shouldApplyRuntimeSeq = useCallback(
-    (sessionId: SessionId, seq?: number): boolean => {
-      if (typeof seq !== "number") return true;
-      let shouldApply = true;
-      updateSession(sessionId, (session) => {
-        if (typeof session.lastEventSeq === "number" && seq <= session.lastEventSeq) {
-          shouldApply = false;
-          return session;
-        }
-        return { ...session, lastEventSeq: seq };
-      });
-      return shouldApply;
-    },
-    [updateSession],
-  );
 
   const sendControl = useCallback(
     async (
@@ -249,252 +101,65 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
       const plugins = activeComposerPlugins(selection.plugins ?? EMPTY_PLUGINS);
       const skills = selection.skills ?? EMPTY_SKILLS;
       const promptTemplates = selection.promptTemplates ?? EMPTY_PROMPT_TEMPLATES;
-      const extensionOverrides = selection.extensionOverrides ?? EMPTY_EXTENSION_OVERRIDES;
-      const browserEnabledForTurn = browserToolEnabled || promptRequestsBrowser(text);
+      const browserEnabledForTurn = browserToolEnabled;
       const message = selectedContextPrompt(text, plugins, skills);
-      const ensureAssistantId = () => {
-        const current = tabsRef.current.find((tab) => tab.id === sessionId);
-        const existing =
-          (current?.activeAssistantId &&
-            current.messages.some((entry) => entry.id === current.activeAssistantId) &&
-            current.activeAssistantId) ||
-          [...(current?.messages ?? [])].reverse().find((entry) => entry.role === "assistant")?.id;
-        if (existing) return existing;
-        const assistantId = newId("assistant");
+      try {
+        const result = await api.submitTurnCommand({
+          sessionId: runtime,
+          modelId,
+          message,
+          cwd: cwd.trim() || undefined,
+          piSessionId,
+          mode,
+          browserToolEnabled: browserEnabledForTurn,
+          browserSessionId: runtime,
+          browserBackend,
+          canvasEnabled,
+          plugins: plugins as ComposerPluginRef[],
+          skills,
+          promptTemplates,
+        });
         updateSession(sessionId, (session) => ({
           ...session,
-          activeAssistantId: assistantId,
-          messages: [
-            ...session.messages,
-            { id: assistantId, role: "assistant", text: "", blocks: [], timestamp: nowLabel() },
-          ],
+          piSessionId: result.piSessionId || session.piSessionId,
+          contextUsage: api.runtimeContextUsage(result.status, session.contextUsage),
+          status: "running",
         }));
-        return assistantId;
-      };
-      try {
-        let controlError = "";
-        let queuedControlAccepted = false;
-        const controller = new AbortController();
-        await api.submitTurnStream(
-          {
-            sessionId: runtime,
-            modelId,
-            message,
-            cwd: cwd.trim() || undefined,
-            piSessionId,
-            mode,
-            browserToolEnabled: browserEnabledForTurn,
-            browserSessionId: runtime,
-            canvasEnabled,
-            plugins: plugins as ComposerPluginRef[],
-            skills,
-            promptTemplates,
-            extensionOverrides,
-          },
-          (payload) => {
-            if (controller.signal.aborted) return;
-            if (payload.type === "error") controlError = payload.error;
-            if (payload.type === "status") {
-              if (payload.phase === "queued") queuedControlAccepted = true;
-              updateSession(sessionId, (session) => ({
-                ...session,
-                piSessionId: payload.piSessionId || session.piSessionId,
-                status: statusAfterControlPhase(session.status, payload.phase, {
-                  queuedControlAccepted,
-                }),
-              }));
-            }
-            if (payload.type === "pi") {
-              if (!shouldApplyRuntimeSeq(sessionId, payload.seq)) return;
-              const eventId = piSessionIdFromEvent(payload.event);
-              const assistantId = ensureAssistantId();
-              const agentEnded = isAgentEndEvent(payload.event);
-              updateSession(sessionId, (session) => ({
-                ...session,
-                piSessionId: eventId || session.piSessionId,
-                status: agentEnded ? "idle" : session.status,
-                activeAssistantId: agentEnded ? undefined : assistantId,
-              }));
-              if (eventId) onPiSessionIdChange?.(eventId);
-              enqueuePiEvent(sessionId, assistantId, payload.event, { flushNow: agentEnded });
-            }
-          },
-          { signal: controller.signal },
-        );
-        if (controlError) throw new Error(controlError);
+        if (result.piSessionId) onPiSessionIdChange?.(result.piSessionId);
         return { ok: true };
       } catch (error) {
-        flushPiEventBatch(sessionId);
         return { ok: false, error: error instanceof Error ? error.message : "Message failed" };
       }
     },
     [
       browserToolEnabled,
+      browserBackend,
       canvasEnabled,
       cwd,
-      enqueuePiEvent,
-      flushPiEventBatch,
       modelId,
       onPiSessionIdChange,
-      shouldApplyRuntimeSeq,
       updateSession,
     ],
   );
 
-  // Stable ref for the queue-drain self-call from inside submitPrompt and the
-  // resume-runtime SSE handler.
-  const submitPromptRef = useRef<(args: SubmitArgs) => Promise<void>>(() => Promise.resolve());
-
   const submitPrompt = useCallback(
     async (args: SubmitArgs) => {
-      const sessionId = args.targetSessionId ?? activeTabId;
-      const selected = tabsRef.current.find((tab) => tab.id === sessionId);
-      if (!selected || !modelId) return;
-
-      const userId = newId("user");
-      const assistantId = newId("assistant");
-      const runtime = selected.runtimeSessionId || runtimeSessionId;
-      const browserEnabledForTurn = browserToolEnabled || promptRequestsBrowser(args.userText);
-      const selection = selectionForRef.current(sessionId);
-      const plugins = args.plugins ?? activeComposerPlugins(selection.plugins ?? EMPTY_PLUGINS);
-      const skills = args.skills ?? selection.skills ?? EMPTY_SKILLS;
-      const promptTemplates =
-        args.promptTemplates ?? selection.promptTemplates ?? EMPTY_PROMPT_TEMPLATES;
-      const extensionOverrides =
-        args.extensionOverrides ?? selection.extensionOverrides ?? EMPTY_EXTENSION_OVERRIDES;
-
-      // Optimistic: push a user message + a blank assistant placeholder so the
-      // UI shows "we received it" even before the first SSE chunk lands.
-      updateSession(sessionId, (session) => ({
-        ...session,
-        cwd: session.cwd || cwd,
-        modelId: session.modelId || modelId,
-        startedAt: session.startedAt ?? new Date().toISOString(),
-        input: "",
-        error: "",
-        status: "starting",
-        usedSkills: mergeSkills(session.usedSkills, skills),
-        activeAssistantId: assistantId,
-        title:
-          session.messages.filter((m) => m.role === "user").length === 0
-            ? sessionTitleFromPrompt(args.userText)
-            : session.title,
-        messages: [
-          ...session.messages,
-          {
-            id: userId,
-            role: "user",
-            text: args.displayText,
-            attachments: args.attachments,
-            skills,
-            timestamp: nowLabel(),
-          },
-          { id: assistantId, role: "assistant", text: "", blocks: [], timestamp: nowLabel() },
-        ],
-      }));
-
-      let agentEnded = false;
-      let streamError = "";
-      const controller = new AbortController();
-      const streamOwnerId = `${sessionId}:${assistantId}`;
-      liveAssistantIdsRef.current.set(sessionId, assistantId);
-      promptStreamControllersRef.current.set(runtime, controller);
-      claimRuntimePromptStream(runtime, streamOwnerId, controller);
-      try {
-        await api.submitTurnStream(
-          {
-            sessionId: runtime,
-            modelId,
-            message: args.prompt,
-            images: args.images,
-            cwd: cwd.trim() || undefined,
-            piSessionId:
-              tabsRef.current.find((tab) => tab.id === sessionId)?.piSessionId ??
-              selected.piSessionId,
-            browserToolEnabled: browserEnabledForTurn,
-            browserSessionId: runtime,
-            canvasEnabled,
-            plugins: plugins as ComposerPluginRef[],
-            skills,
-            promptTemplates,
-            extensionOverrides,
-          },
-          (payload) => {
-            if (controller.signal.aborted) return;
-            if (payload.type === "status") {
-              const phase = payload.phase;
-              updateSession(sessionId, (session) => ({
-                ...session,
-                piSessionId: payload.piSessionId || session.piSessionId,
-                status: (phase === "done" ? "idle" : phase) as SessionStatus,
-                activeAssistantId: phase === "done" ? undefined : session.activeAssistantId,
-              }));
-              if (payload.piSessionId) onPiSessionIdChange?.(payload.piSessionId);
-            } else if (payload.type === "error") {
-              streamError = payload.error;
-              flushPiEventBatch(sessionId);
-              updateSession(sessionId, (session) => ({
-                ...session,
-                error: payload.error,
-                status: "idle",
-              }));
-            } else if (payload.type === "pi") {
-              if (!shouldApplyRuntimeSeq(sessionId, payload.seq)) return;
-              const piEvent = payload.event;
-              traceAgentReasoning("engine.pi", {
-                sessionId,
-                assistantId,
-                seq: payload.seq,
-                event: piEvent,
-              });
-              const eventId = piSessionIdFromEvent(piEvent);
-              if (eventId) {
-                updateSession(sessionId, (session) => ({ ...session, piSessionId: eventId }));
-                onPiSessionIdChange?.(eventId);
-              }
-              if (isAgentEndEvent(piEvent)) {
-                agentEnded = true;
-                const latestPiSessionId =
-                  eventId ??
-                  tabsRef.current.find((tab) => tab.id === sessionId)?.piSessionId ??
-                  selected.piSessionId ??
-                  "";
-                onPiSessionIdChange?.(latestPiSessionId);
-              }
-              enqueuePiEvent(sessionId, assistantId, piEvent, { flushNow: agentEnded });
-            }
-          },
-          { signal: controller.signal },
-        );
-      } catch (err) {
-        if (!controller.signal.aborted) {
-          streamError = err instanceof Error ? err.message : "Agent request failed";
-        }
-      } finally {
-        flushPiEventBatch(sessionId);
-        promptStreamControllersRef.current.delete(runtime);
-        releaseRuntimePromptStream(runtime, streamOwnerId);
-        liveAssistantIdsRef.current.delete(sessionId);
-        const currentPiSessionId =
-          tabsRef.current.find((tab) => tab.id === sessionId)?.piSessionId ??
-          selected.piSessionId ??
-          null;
-        const runtimeStatus = await api.loadRuntimeStatus(runtime, currentPiSessionId);
-        const runtimeStillActive =
-          !agentEnded && runtimeIsActiveForPiSession(runtimeStatus, currentPiSessionId);
-        updateSession(sessionId, (session) => ({
-          ...session,
-          status: runtimeStillActive ? "running" : "idle",
-          activeAssistantId: runtimeStillActive ? assistantId : undefined,
-          error: streamError && !runtimeStillActive ? streamError : session.error,
-          contextUsage: runtimeStatus?.contextUsage ?? session.contextUsage ?? null,
-        }));
-      }
-
-      // Drain the per-session queue once the agent finished its turn.
-      if (agentEnded) {
-        drainQueuedTurnAfterAgentEnd({ submitPromptRef, tabsRef, updateSession }, sessionId);
-      }
+      await submitPromptTurn(
+        {
+          activeTabId,
+          browserToolEnabled,
+          browserBackend,
+          canvasEnabled,
+          cwd,
+          modelId,
+          onPiSessionIdChange,
+          runtimeSessionId,
+          selectionFor: selectionForRef.current,
+          tabsRef,
+          updateSession,
+        },
+        args,
+      );
     },
     [
       activeTabId,
@@ -502,26 +167,21 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
       runtimeSessionId,
       cwd,
       browserToolEnabled,
+      browserBackend,
       canvasEnabled,
       onPiSessionIdChange,
-      enqueuePiEvent,
-      flushPiEventBatch,
       updateSession,
-      shouldApplyRuntimeSeq,
     ],
   );
-
-  submitPromptRef.current = submitPrompt;
 
   const abortTurn = useCallback(
     async (sessionId: SessionId) => {
       const session = tabsRef.current.find((tab) => tab.id === sessionId);
       const runtime = resolveRuntimeSessionId(session, runtimeSessionId);
       await api.abortSession(runtime);
-      flushPiEventBatch(sessionId);
       updateSession(sessionId, (s) => ({ ...s, status: "idle" }));
     },
-    [flushPiEventBatch, runtimeSessionId, updateSession],
+    [runtimeSessionId, updateSession],
   );
 
   const loadAndReplay = useCallback(
@@ -556,6 +216,7 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
           modelId: replayModelId,
         } = replaySessionEvents(replayEvents);
         const tokenStats = [...replayEvents]
+          .slice(latestCompactionBoundaryIndex(replayEvents) + 1)
           .reverse()
           .map(usageFromEvent)
           .find((stats): stats is TokenStats => Boolean(stats));
@@ -568,8 +229,8 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
           modelId: session.modelId || replayModelId || runtimeStatus?.modelId || modelId,
           title: title ?? session.title,
           startedAt: startedAt ?? session.startedAt,
-          tokenStats: tokenStats ?? session.tokenStats,
-          contextUsage: runtimeStatus?.contextUsage ?? session.contextUsage ?? null,
+          tokenStats: tokenStats ?? undefined,
+          contextUsage: api.runtimeContextUsage(runtimeStatus, session.contextUsage),
           status: runtimeActive ? "running" : "idle",
           activeAssistantId: undefined,
           lastEventSeq: replaySeq,
@@ -597,8 +258,9 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
           modelId,
           cwd: cwd.trim() || undefined,
           piSessionId: session.piSessionId,
-          browserToolEnabled: browserToolEnabled || promptRequestsBrowser(session.input),
+          browserToolEnabled,
           browserSessionId: session.runtimeSessionId || runtimeSessionId,
+          browserBackend,
           canvasEnabled,
           plugins: activeComposerPlugins(
             selectionForRef.current(sessionId).plugins ?? EMPTY_PLUGINS,
@@ -606,11 +268,14 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
           skills: selectionForRef.current(sessionId).skills ?? EMPTY_SKILLS,
           promptTemplates:
             selectionForRef.current(sessionId).promptTemplates ?? EMPTY_PROMPT_TEMPLATES,
-          extensionOverrides:
-            selectionForRef.current(sessionId).extensionOverrides ?? EMPTY_EXTENSION_OVERRIDES,
         });
         const nextSessionId = result.status?.piSessionId || session.piSessionId;
         if (nextSessionId) await loadAndReplay(nextSessionId, sessionId);
+        updateSession(sessionId, (s) => ({
+          ...s,
+          contextUsage: api.runtimeContextUsage(result.status ?? null, null),
+          tokenStats: undefined,
+        }));
       } catch (error) {
         updateSession(sessionId, (s) => ({
           ...s,
@@ -620,6 +285,7 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
     },
     [
       browserToolEnabled,
+      browserBackend,
       canvasEnabled,
       cwd,
       loadAndReplay,
@@ -641,4 +307,36 @@ export function useSessionEngine(deps: UseSessionEngineDeps): SessionEngine {
     }),
     [submitPrompt, sendControl, loadRuntimeStatusCb, abortTurn, loadAndReplay, compact],
   );
+}
+
+function latestCompactionBoundaryIndex(events: Record<string, unknown>[]): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    const type = typeof event?.type === "string" ? event.type.toLowerCase() : "";
+    if (isSuccessfulCompactionBoundary(event, type)) return index;
+  }
+  return -1;
+}
+
+function isSuccessfulCompactionBoundary(event: Record<string, unknown>, type: string): boolean {
+  if (!type.includes("compact") && !type.includes("compaction")) return false;
+  if (type.includes("start") || type.includes("begin")) return false;
+  if (
+    event.error ||
+    event.errorMessage ||
+    event.aborted ||
+    event.cancelled ||
+    event.canceled ||
+    event.failed
+  ) {
+    return false;
+  }
+  if (event.type === "compaction_end" && event.result == null) return false;
+  const status =
+    typeof event.status === "string"
+      ? event.status
+      : typeof (event.result as { status?: unknown } | undefined)?.status === "string"
+        ? (event.result as { status: string }).status
+        : "";
+  return !/abort|cancel|error|fail/.test(status.toLowerCase());
 }

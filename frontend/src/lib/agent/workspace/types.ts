@@ -102,6 +102,7 @@ export type WorkspaceAction =
       tab: Session;
     }
   | { type: "focusPane"; paneId: PaneId }
+  | { type: "focusPaneSession"; paneId: PaneId; sessionId: SessionId }
   | { type: "renameTab"; paneId: PaneId; tabId: SessionId; title: string }
   | {
       type: "splitTab";

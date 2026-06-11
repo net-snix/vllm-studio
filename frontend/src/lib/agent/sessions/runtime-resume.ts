@@ -1,8 +1,16 @@
 import { isAgentEndEvent } from "@/lib/agent/pi-events";
 import { newId, nowLabel, piSessionIdFromEvent } from "@/lib/agent/session";
-import type { RuntimeEventPayload, RuntimeEventSubscription, RuntimeStatus } from "./api";
+import {
+  runtimeContextUsage,
+  type RuntimeEventPayload,
+  type RuntimeEventSubscription,
+  type RuntimeStatus,
+} from "./api";
 import { drainQueuedTurnAfterAgentEnd, type QueuedTurnSubmitArgs } from "./queue-drain";
 import type { Session, SessionId } from "./types";
+
+const RESUME_IDLE_RECONNECT_MS = 15_000;
+const RESUME_RECONNECT_DELAY_MS = 1_000;
 
 type ReadonlyRef<T> = { readonly current: T };
 type UpdateSession = (sessionId: SessionId, patch: (session: Session) => Session) => void;
@@ -45,22 +53,51 @@ export type RuntimeResumeDeps = {
 
 export function subscribeResumeRuntimeSession(deps: RuntimeResumeDeps): RuntimeEventSubscription {
   let closed = false;
-  const sub = deps.api.subscribeRuntimeEvents(deps.runtime, deps.after, deps.piSessionId, {
-    onPayload: (payload) => {
-      if (closed) return;
-      applyRuntimePayload(deps, payload);
-    },
-    onError: () => {
-      if (closed) return;
-      void reconcileRuntimeLiveness(deps, () => closed, sub);
-    },
-  });
+  let reconnecting = false;
+  let sub: RuntimeEventSubscription | null = null;
+  let lastPayloadAt = Date.now();
+  let after = deps.after;
+
+  const reconnect = () => {
+    if (closed || reconnecting) return;
+    reconnecting = true;
+    sub?.close();
+    setTimeout(() => {
+      reconnecting = false;
+      if (!closed) connect();
+    }, RESUME_RECONNECT_DELAY_MS);
+  };
+
+  const connect = () => {
+    sub = deps.api.subscribeRuntimeEvents(deps.runtime, after, deps.piSessionId, {
+      onPayload: (payload) => {
+        if (closed) return;
+        lastPayloadAt = Date.now();
+        if (payload.type === "pi" && typeof payload.seq === "number" && payload.seq > after) {
+          after = payload.seq;
+        }
+        applyRuntimePayload(deps, payload);
+      },
+      onError: () => {
+        if (closed) return;
+        void reconcileRuntimeLiveness(deps, () => closed, sub, reconnect);
+      },
+    });
+  };
+
+  connect();
+
+  const watchdog = setInterval(() => {
+    if (closed || Date.now() - lastPayloadAt < RESUME_IDLE_RECONNECT_MS) return;
+    void reconcileRuntimeLiveness(deps, () => closed, sub, reconnect);
+  }, RESUME_IDLE_RECONNECT_MS);
 
   return {
     close: () => {
       closed = true;
+      clearInterval(watchdog);
       deps.flushPiEvents?.(deps.sessionId);
-      sub.close();
+      sub?.close();
     },
   };
 }
@@ -81,7 +118,7 @@ function applyRuntimeStatusPayload(
   deps.updateSession(deps.sessionId, (session) => ({
     ...session,
     piSessionId: payload.session?.piSessionId || session.piSessionId,
-    contextUsage: payload.session?.contextUsage ?? session.contextUsage ?? null,
+    contextUsage: runtimeContextUsage(payload.session, session.contextUsage),
     status: idle ? "idle" : "running",
     activeAssistantId: idle ? undefined : session.activeAssistantId,
   }));
@@ -140,7 +177,8 @@ function ensureAssistantId(deps: RuntimeResumeDeps): string {
 async function reconcileRuntimeLiveness(
   deps: RuntimeResumeDeps,
   isClosed: () => boolean,
-  sub: RuntimeEventSubscription,
+  sub: RuntimeEventSubscription | null,
+  reconnect?: () => void,
 ): Promise<void> {
   const status = await deps.api.loadRuntimeStatus(deps.runtime, deps.piSessionId);
   if (isClosed()) return;
@@ -150,22 +188,31 @@ async function reconcileRuntimeLiveness(
   // status and let the native EventSource keep auto-reconnecting. A genuinely
   // finished runtime is caught by the definitive `active: false` branch below
   // and by the 5s reconcile poll.
-  if (!status) return;
+  if (!status) {
+    reconnect?.();
+    return;
+  }
   if (status.active) {
     deps.updateSession(deps.sessionId, (session) => ({
       ...session,
       piSessionId: status.piSessionId || session.piSessionId,
-      contextUsage: status.contextUsage ?? session.contextUsage ?? null,
+      contextUsage: runtimeContextUsage(status, session.contextUsage),
       status: "running",
     }));
+    reconnect?.();
     return;
   }
   // Definitively idle — the runtime reported it is no longer active.
-  sub.close();
+  sub?.close();
   deps.flushPiEvents?.(deps.sessionId);
   deps.updateSession(deps.sessionId, (session) =>
     session.status === "running" || session.status === "starting"
-      ? { ...session, status: "idle", activeAssistantId: undefined }
+      ? {
+          ...session,
+          status: "idle",
+          activeAssistantId: undefined,
+          contextUsage: runtimeContextUsage(status, session.contextUsage),
+        }
       : session,
   );
 }

@@ -40,13 +40,13 @@ import { runBrowserPanelCommand, type BrowserCommandResult } from "@/lib/agent/b
 import type { ChatPaneHandle, SessionTab } from "./chat-pane";
 import type { AgentBrowserHandle } from "./agent-browser";
 import type { SessionDropPayload } from "./pane-grid";
-
-type BrowserCommand = {
-  id: string;
-  verb: string;
-  sessionId?: string;
-  payload: Record<string, unknown>;
-};
+import {
+  browserHostIsReady,
+  browserSessionIsKnown,
+  createBrowserEvents,
+  focusedBrowserSessionId,
+  waitForBrowserHost,
+} from "./use-workspace-browser-events";
 
 export type WorkspaceHandles = {
   registerBrowserHandle: (handle: AgentBrowserHandle | null) => void;
@@ -90,56 +90,6 @@ export type UseWorkspaceResult = {
   handles: WorkspaceHandles;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function parseBrowserCommand(raw: string): BrowserCommand | null {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isRecord(parsed)) return null;
-    const id = parsed.id;
-    const verb = parsed.verb;
-    const payload = parsed.payload;
-    const sessionId = parsed.sessionId;
-    if (typeof id !== "string" || typeof verb !== "string" || !isRecord(payload)) return null;
-    return {
-      id,
-      verb,
-      payload,
-      ...(typeof sessionId === "string" && sessionId.trim() ? { sessionId: sessionId.trim() } : {}),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function focusedBrowserSessionId(state: WorkspaceState): string | null {
-  const pane = state.panesById.get(state.focusedPaneId);
-  if (!pane) return null;
-  const activeSession = state.sessions.get(pane.sessionId);
-  return activeSession?.runtimeSessionId || pane.runtimeSessionId || null;
-}
-
-function browserSessionIsKnown(state: WorkspaceState, sessionId: string): boolean {
-  if (!sessionId) return false;
-  for (const pane of state.panesById.values()) {
-    if (pane.runtimeSessionId === sessionId) return true;
-  }
-  for (const session of state.sessions.values()) {
-    if (session.runtimeSessionId === sessionId) return true;
-  }
-  return false;
-}
-
-function postBrowserResult(id: string, result: BrowserCommandResult) {
-  return fetch("/api/agent/browser/result", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, ...result }),
-  });
-}
-
 function createWorkspaceWindow(source: Window): WorkspaceWindow {
   return {
     Event,
@@ -148,83 +98,6 @@ function createWorkspaceWindow(source: Window): WorkspaceWindow {
     addEventListener: source.addEventListener.bind(source),
     removeEventListener: source.removeEventListener.bind(source),
     setTimeout: source.setTimeout.bind(source),
-  };
-}
-
-function browserHostIsReady(handle: AgentBrowserHandle | null, isElectron: boolean): boolean {
-  return isElectron ? Boolean(handle?.webview) : Boolean(handle?.iframe);
-}
-
-function waitForBrowserHost(
-  getHandle: () => AgentBrowserHandle | null,
-  isElectron: boolean,
-  timeoutMs = 2_500,
-): Promise<void> {
-  if (browserHostIsReady(getHandle(), isElectron) || typeof window === "undefined") {
-    return Promise.resolve();
-  }
-  const startedAt = Date.now();
-  return new Promise((resolve) => {
-    const tick = () => {
-      if (browserHostIsReady(getHandle(), isElectron) || Date.now() - startedAt >= timeoutMs) {
-        resolve();
-        return;
-      }
-      window.setTimeout(tick, 40);
-    };
-    tick();
-  });
-}
-
-function createBrowserEvents(
-  runBrowserCommand: (
-    verb: string,
-    payload: Record<string, unknown>,
-  ) => Promise<BrowserCommandResult>,
-  resolveSession: (sessionId: string) => { focused: string | null; known: boolean },
-): BrowserEventsSubscription {
-  let source: EventSource | null = null;
-  let enabled = false;
-
-  const close = () => {
-    source?.close();
-    source = null;
-  };
-
-  return {
-    setEnabled(nextEnabled) {
-      if (enabled === nextEnabled && source) return;
-      enabled = nextEnabled;
-      close();
-      if (!enabled || typeof EventSource === "undefined") return;
-      source = new EventSource("/api/agent/browser/events");
-      source.onmessage = (event: MessageEvent<unknown>) => {
-        if (typeof event.data !== "string") return;
-        const command = parseBrowserCommand(event.data);
-        if (!command || typeof fetch !== "function") return;
-        const session = command.sessionId
-          ? resolveSession(command.sessionId)
-          : { focused: null, known: true };
-        if (command.sessionId && !session.known) {
-          void postBrowserResult(command.id, {
-            ok: false,
-            error: session.focused
-              ? `Browser is connected to ${session.focused}; the requesting session ${command.sessionId} is no longer open.`
-              : `Browser is not connected to the requesting session (${command.sessionId}).`,
-          });
-          return;
-        }
-        void runBrowserCommand(command.verb, command.payload)
-          .then((result) => postBrowserResult(command.id, result))
-          .catch((error) => {
-            console.warn("[agent] browser bridge dispatch failed", error);
-          });
-      };
-    },
-    close() {
-      enabled = false;
-      close();
-    },
   };
 }
 
@@ -296,13 +169,36 @@ export function useWorkspace(): UseWorkspaceResult {
   const queueSessionReplay = useMemo(
     () => (paneId: PaneId, sessionId: string) => {
       pendingSessionReplaysRef.current.set(paneId, sessionId);
-      window.setTimeout(() => {
+      const drain = (attempt: number) => {
         const pendingSessionId = pendingSessionReplaysRef.current.get(paneId);
         const handle = paneHandlesRef.current.get(paneId);
-        if (!pendingSessionId || !handle) return;
+        if (!pendingSessionId) return;
+        if (!handle) {
+          if (attempt < SESSION_REPLAY_MAX_ATTEMPTS) {
+            window.setTimeout(() => drain(attempt + 1), SESSION_REPLAY_RETRY_DELAY_MS);
+          }
+          return;
+        }
+        // Only replay onto the session this replay was queued for. A "+" click
+        // (or any swap) replaces a pane's session in place under the same paneId;
+        // a fresh empty starter has nothing to replay, so a stale pending replay
+        // landing here would overwrite the new chat with the old transcript —
+        // the "+ opens the old chat" bug. Drop the replay in that case.
+        const pane = stateRef.current.panesById.get(paneId);
+        const current = pane ? stateRef.current.sessions.get(pane.sessionId) : undefined;
+        const isFreshStarter =
+          !!current &&
+          current.piSessionId == null &&
+          current.messages.length === 0 &&
+          current.status === "idle";
+        if (!current || isFreshStarter) {
+          pendingSessionReplaysRef.current.delete(paneId);
+          return;
+        }
         pendingSessionReplaysRef.current.delete(paneId);
         void handle.loadAndReplay(pendingSessionId);
-      }, 0);
+      };
+      window.setTimeout(() => drain(0), 0);
     },
     [],
   );
@@ -350,11 +246,20 @@ export function useWorkspace(): UseWorkspaceResult {
     ): Promise<BrowserCommandResult> => {
       const isElectron = typeof navigator !== "undefined" && /electron/i.test(navigator.userAgent);
       const currentTools = toolsRef.current;
-      currentTools.setComputerTab("browser");
+      const hadBrowserHost = browserHostIsReady(browserRef.current, isElectron);
+      // A `navigate` is real, intentional browser use: open the panel so the
+      // webview host mounts and the user can watch. Passive verbs (get-url,
+      // get-text, screenshot, etc.) only register/select the browser tab without
+      // popping the panel — that combination fixes both the "browser opens on
+      // every prompt" annoyance and the model losing browser access when the
+      // panel is closed.
       currentTools.setBrowserEnabled(true);
       if (verb === "navigate") {
+        currentTools.setComputerTab("browser");
         const nextUrl = sanitizePublicBrowserUrl(String(payload.url || ""));
-        if (nextUrl) currentTools.setBrowserUrl(nextUrl, nextUrl);
+        if (nextUrl && !hadBrowserHost) currentTools.setBrowserUrl(nextUrl, nextUrl);
+      } else {
+        currentTools.selectComputerTabWithoutOpening("browser");
       }
       if (verb !== "get-url") {
         await waitForBrowserHost(() => browserRef.current, isElectron);
@@ -371,7 +276,10 @@ export function useWorkspace(): UseWorkspaceResult {
 
   const { browserEvents, dispatch, runBrowserCommand } = controller;
 
-  useBrowserEventsEffects({ browserEvents, enabled: tools.browser.enabled });
+  useBrowserEventsEffects({
+    browserEvents,
+    enabled: tools.browser.enabled && tools.computer.open && tools.computer.tab === "browser",
+  });
 
   const subscribeWorkspaceModelStorage = useCallback(
     (_notify: () => void) => {
@@ -567,3 +475,5 @@ export function useWorkspace(): UseWorkspaceResult {
 }
 
 const getWorkspaceModelStorageSnapshot = (): number => 0;
+const SESSION_REPLAY_RETRY_DELAY_MS = 50;
+const SESSION_REPLAY_MAX_ATTEMPTS = 100;

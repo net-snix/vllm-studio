@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { Button, UiModal, UiModalHeader } from "@/ui";
 import { ChevronDownIcon, PlusIcon } from "@/ui/icons";
 import {
   useActiveAgentSessionsEffect,
@@ -21,7 +22,7 @@ import {
   SessionRow,
 } from "./projects-nav/session-rows";
 import { activeSessionPref } from "./projects-nav/helpers";
-import type { ActiveAgentSession, PinnedSession } from "./projects-nav/types";
+import type { ActiveAgentSession, PinnedActiveSession, PinnedSession } from "./projects-nav/types";
 
 export {
   consumeAgentSessionNavTitle,
@@ -46,7 +47,11 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
   );
   const [addError, setAddError] = useState("");
   const [directoryModalOpen, setDirectoryModalOpen] = useState(false);
-  const [pinnedSessions, setPinnedSessions] = useState<PinnedSession[]>([]);
+  const [projectRemoveConfirm, setProjectRemoveConfirm] = useState<ProjectEntry | null>(null);
+  const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
+  const [pinnedSessions, setPinnedSessions] = useState<Array<PinnedSession | PinnedActiveSession>>(
+    [],
+  );
   const prefs = useSessionPrefs();
   const pinnedPrefIds = useMemo(
     () =>
@@ -95,9 +100,9 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
   const pinnedActiveSessionIds = useMemo(
     () =>
       new Set(
-        pinnedActiveSessions
-          .map(({ session }) => session.piSessionId)
-          .filter((id): id is string => Boolean(id)),
+        pinnedActiveSessions.map(
+          ({ session }) => session.piSessionId ?? `tab:${session.paneId}:${session.tabId}`,
+        ),
       ),
     [pinnedActiveSessions],
   );
@@ -143,6 +148,19 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
       setAddError(error instanceof Error ? error.message : "Failed to add project");
     }
   };
+  const confirmProjectRemove = useCallback(async () => {
+    if (!projectRemoveConfirm) return;
+    setAddError("");
+    setRemovingProjectId(projectRemoveConfirm.id);
+    try {
+      await removeProjectAndCloseRow(projectRemoveConfirm.id);
+      setProjectRemoveConfirm(null);
+    } catch (error) {
+      setAddError(error instanceof Error ? error.message : "Failed to remove project");
+    } finally {
+      setRemovingProjectId(null);
+    }
+  }, [projectRemoveConfirm, removeProjectAndCloseRow]);
   const toggle = (id: string) =>
     setOpenIds((current) => {
       const next = new Set(current);
@@ -158,6 +176,7 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
   useActiveAgentSessionsEffect({ setActiveSessions });
   usePinnedSessionsEffect({
     activePiSessionIdsKey,
+    activeSessions,
     expanded,
     hiddenPrefIdsKey,
     pinnedPrefIdsKey,
@@ -176,9 +195,15 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
         onClose={() => setDirectoryModalOpen(false)}
         onSelect={(directoryPath) => void handleDirectoryPicked(directoryPath)}
       />
+      <ProjectRemoveConfirmModal
+        project={projectRemoveConfirm}
+        removing={Boolean(projectRemoveConfirm && removingProjectId === projectRemoveConfirm.id)}
+        onCancel={() => setProjectRemoveConfirm(null)}
+        onConfirm={() => void confirmProjectRemove()}
+      />
       {pinnedSessions.length > 0 || pinnedActiveSessions.length > 0 ? (
         <div className="flex flex-col">
-          <div className="mt-3 flex h-5 items-center px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-(--dim)">
+          <div className="mt-3 flex h-5 items-center px-2 text-[length:var(--fs-xs)] font-semibold uppercase tracking-[0.14em] text-(--dim)">
             Pinned
           </div>{" "}
           {pinnedActiveSessions.map(({ session, project }) => (
@@ -191,14 +216,23 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
           ))}
           {pinnedSessions
             .filter((session) => !pinnedActiveSessionIds.has(session.id))
-            .map((session) => (
-              <SessionRow
-                key={`${session.project.id}:${session.id}`}
-                project={session.project}
-                session={session}
-                pref={prefs[session.id] ?? {}}
-              />
-            ))}{" "}
+            .map((session) =>
+              "paneId" in session ? (
+                <ActiveSessionRow
+                  key={`${session.paneId}:${session.tabId}`}
+                  project={session.project}
+                  session={session}
+                  pref={activeSessionPref(session, prefs)}
+                />
+              ) : (
+                <SessionRow
+                  key={`${session.project.id}:${session.id}`}
+                  project={session.project}
+                  session={session}
+                  pref={prefs[session.id] ?? {}}
+                />
+              ),
+            )}{" "}
         </div>
       ) : null}{" "}
       {chatProject ? (
@@ -246,7 +280,7 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
           <button
             type="button"
             onClick={handleAddProject}
-            className="px-2 py-1 text-left text-[12px] text-(--dim) hover:text-(--fg)"
+            className="px-2 py-1 text-left text-[length:var(--fs-md)] text-(--dim) hover:text-(--fg)"
           >
             {" "}
             No projects yet — pick a folder to get started.
@@ -261,18 +295,66 @@ export function ProjectsNavSection({ expanded }: { expanded: boolean }) {
               prefs={prefs}
               excludedIds={pinnedRenderedIds}
               onToggle={() => toggle(project.id)}
+              onNewChatStart={() => {
+                setProjectsExpanded(true);
+                setOpenIds((current) => {
+                  if (current.has(project.id)) return current;
+                  const next = new Set(current);
+                  next.add(project.id);
+                  return next;
+                });
+              }}
               onRemove={() => {
                 setAddError("");
-                void removeProjectAndCloseRow(project.id).catch((error) => {
-                  setAddError(error instanceof Error ? error.message : "Failed to remove project");
-                });
+                setProjectRemoveConfirm(project);
               }}
             />
           ))
         )
       ) : null}
-      {addError ? <div className="px-2 py-1 text-[11px] text-red-400">{addError}</div> : null}{" "}
+      {addError ? (
+        <div className="px-2 py-1 text-[length:var(--fs-sm)] text-red-400">{addError}</div>
+      ) : null}{" "}
     </div>
+  );
+}
+
+function ProjectRemoveConfirmModal({
+  project,
+  removing,
+  onCancel,
+  onConfirm,
+}: {
+  project: ProjectEntry | null;
+  removing: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!project) return null;
+  return (
+    <UiModal isOpen onClose={removing ? () => {} : onCancel} maxWidth="max-w-md">
+      <UiModalHeader title="Remove project" onClose={removing ? undefined : onCancel} />
+      <div className="space-y-5 p-6">
+        <div className="space-y-2 text-[length:var(--fs-sm)] text-(--ui-muted)">
+          <p>
+            Remove <span className="font-medium text-(--ui-fg)">{project.name}</span> from the
+            sidebar?
+          </p>
+          <p className="break-all font-mono text-[length:var(--fs-xs)] text-(--dim)">
+            {project.path}
+          </p>
+          <p>This does not delete files from disk or archive existing sessions.</p>
+        </div>
+        <div className="flex justify-end gap-3">
+          <Button variant="secondary" onClick={onCancel} disabled={removing}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={onConfirm} disabled={removing}>
+            {removing ? "Removing..." : "Remove"}
+          </Button>
+        </div>
+      </div>
+    </UiModal>
   );
 }
 function SidebarSectionHeader({
@@ -287,7 +369,7 @@ function SidebarSectionHeader({
   action?: ReactNode;
 }) {
   return (
-    <div className="group mt-3 flex h-5 items-center justify-between px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-(--dim)">
+    <div className="group mt-3 flex h-5 items-center justify-between px-2 text-[length:var(--fs-xs)] font-semibold uppercase tracking-[0.14em] text-(--dim)">
       <button
         type="button"
         onClick={onToggle}

@@ -3,18 +3,17 @@
 
 import { safeJson } from "@/lib/agent/safe-json";
 import {
-  parseAgentTurnSsePayload,
-  type AgentTurnSsePayload,
+  parseAgentTurnCommandResult,
+  type AgentTurnCommandResult,
   type RuntimeLoggedEvent,
 } from "@/lib/agent/session";
 import type { AgentImageInput } from "@/lib/agent/contracts/turn";
+import type { BrowserBackend } from "@/lib/agent/tools/types";
 import type {
-  ComposerExtensionOverride,
   ComposerPluginRef,
   ComposerPromptTemplateRef,
   ComposerSkillRef,
 } from "@/lib/agent/composer-context";
-import { traceAgentReasoning } from "@/lib/agent/trace-reasoning";
 
 export type RuntimeContextUsage = {
   tokens: number | null;
@@ -32,6 +31,14 @@ export type RuntimeStatus = {
   events?: RuntimeLoggedEvent[];
   contextUsage?: RuntimeContextUsage | null;
 };
+
+export function runtimeContextUsage(
+  status: RuntimeStatus | null | undefined,
+  fallback: RuntimeContextUsage | null | undefined,
+): RuntimeContextUsage | null {
+  if (status) return status.contextUsage ?? null;
+  return fallback ?? null;
+}
 
 export type RuntimeSessionSummary = {
   sessionId: string;
@@ -107,15 +114,15 @@ export type CompactSessionArgs = {
   piSessionId?: string | null;
   browserToolEnabled: boolean;
   browserSessionId?: string;
+  browserBackend?: BrowserBackend;
   canvasEnabled?: boolean;
   plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
   promptTemplates?: ComposerPromptTemplateRef[];
-  extensionOverrides?: ComposerExtensionOverride[];
 };
 
 export type CompactSessionResult = {
-  status?: { piSessionId?: string | null };
+  status?: RuntimeStatus;
 };
 
 export async function compactSession(args: CompactSessionArgs): Promise<CompactSessionResult> {
@@ -126,7 +133,7 @@ export async function compactSession(args: CompactSessionArgs): Promise<CompactS
   });
   const payload = await safeJson<{
     error?: string;
-    status?: { piSessionId?: string | null };
+    status?: RuntimeStatus;
   }>(response);
   if (!response.ok) throw new Error(payload.error || "Compaction failed");
   return payload;
@@ -143,54 +150,28 @@ export type SubmitTurnArgs = {
   mode?: "steer" | "follow_up";
   browserToolEnabled: boolean;
   browserSessionId?: string;
+  browserBackend?: BrowserBackend;
   canvasEnabled?: boolean;
   plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
   promptTemplates?: ComposerPromptTemplateRef[];
-  extensionOverrides?: ComposerExtensionOverride[];
 };
 
-/**
- * POST /api/agent/turn and stream the SSE response, invoking `onPayload` for
- * each parsed chunk. Resolves when the stream completes; throws on transport
- * or HTTP errors. Caller is responsible for status updates / error rendering.
- */
-export async function submitTurnStream(
-  args: SubmitTurnArgs,
-  onPayload: (payload: AgentTurnSsePayload) => void,
-  options: { signal?: AbortSignal } = {},
-): Promise<void> {
+export async function submitTurnCommand(args: SubmitTurnArgs): Promise<AgentTurnCommandResult> {
   const response = await fetch("/api/agent/turn", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(args),
-    signal: options.signal,
   });
-  if (!response.ok || !response.body) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  const payload = await safeJson<{ error?: string } & Partial<AgentTurnCommandResult>>(response);
+  const parsed = parseAgentTurnCommandResult(payload);
+  if (!response.ok || !parsed) {
     throw new Error(payload.error || `Agent request failed: ${response.status}`);
   }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    if (options.signal?.aborted) break;
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() || "";
-    for (const chunk of chunks) {
-      const line = chunk.split("\n").find((entry) => entry.startsWith("data: "));
-      if (!line) continue;
-      const payload = parseAgentTurnSsePayload(line);
-      if (options.signal?.aborted) break;
-      if (payload) {
-        traceAgentReasoning("client.sse.payload", payload);
-        onPayload(payload);
-      }
-    }
+  if (parsed.outcome === "rejected") {
+    throw new Error(parsed.error || "Agent request was rejected");
   }
+  return parsed;
 }
 
 /**

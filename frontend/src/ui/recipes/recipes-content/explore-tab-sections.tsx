@@ -1,9 +1,10 @@
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
 import { ModelButton, ModelSection, ModelInput, ModelRow, ModelValue, ModelStatus } from "@/ui";
-import type { ModelDownload } from "@/lib/types";
+import type { HuggingFaceModel } from "@/lib/types";
 import { ExploreModelRow } from "./explore-model-row";
 import { estimateRoughWeightsGb } from "./explore-model-stats";
-import type { ModelGroup } from "./use-explore";
+import type { ModelFit } from "./hardware-profile";
+import type { HardwareProfile, ModelGroup } from "./use-explore";
 
 const FALLBACK_MODELS = [
   [
@@ -28,7 +29,7 @@ export function ExploreControls({
   maxVramGb,
   detectedPoolGb,
   poolOverrideGb,
-  gpuCount,
+  hardwareProfile,
   loading,
   error,
   search,
@@ -40,7 +41,7 @@ export function ExploreControls({
   maxVramGb: number;
   detectedPoolGb: number;
   poolOverrideGb: number | null;
-  gpuCount: number;
+  hardwareProfile: HardwareProfile;
   loading: boolean;
   error: string | null;
   search: string;
@@ -71,11 +72,7 @@ export function ExploreControls({
         poolOverrideGb={poolOverrideGb}
         setPoolOverrideGb={setPoolOverrideGb}
       />
-      <ExploreHardwareHintRow
-        gpuCount={gpuCount}
-        detectedPoolGb={detectedPoolGb}
-        poolOverrideGb={poolOverrideGb}
-      />
+      <ExploreHardwareHintRow hardwareProfile={hardwareProfile} poolOverrideGb={poolOverrideGb} />
     </ModelSection>
   );
 }
@@ -173,26 +170,24 @@ function VramPoolInput({
       placeholder={detectedPoolGb > 0 ? String(Math.round(detectedPoolGb)) : "Auto"}
       defaultValue={poolOverrideGb === null ? "" : String(poolOverrideGb)}
       onBlur={(event) => updatePoolOverride(event.currentTarget, poolOverrideGb, setPoolOverrideGb)}
-      className="h-7 w-full rounded-md border border-transparent bg-(--surface) px-2.5 text-[12px] text-(--fg) outline-none transition placeholder:text-(--dim)/65 focus:bg-(--bg) focus:ring-1 focus:ring-(--hl1)/60"
+      className="h-7 w-full rounded-md border border-transparent bg-(--surface) px-2.5 text-[length:var(--fs-md)] text-(--fg) outline-none transition placeholder:text-(--dim)/65 focus:bg-(--bg) focus:ring-1 focus:ring-(--hl1)/60"
       title="Override total VRAM pool for Explore."
     />
   );
 }
 
 function ExploreHardwareHintRow({
-  gpuCount,
-  detectedPoolGb,
+  hardwareProfile,
   poolOverrideGb,
 }: {
-  gpuCount: number;
-  detectedPoolGb: number;
+  hardwareProfile: HardwareProfile;
   poolOverrideGb: number | null;
 }) {
   return (
     <ModelRow
-      label="Hardware hint"
-      description="Detected GPU pool from the controller, plus manual override state."
-      value={<ModelValue>{hardwareHintText(gpuCount, detectedPoolGb)}</ModelValue>}
+      label="Hardware profile"
+      description={hardwareProfile.detail}
+      value={<ModelValue>{hardwareProfile.label}</ModelValue>}
       status={<ModelStatus>{poolOverrideGb != null ? "manual" : "detected"}</ModelStatus>}
     />
   );
@@ -231,6 +226,7 @@ export function ExploreResultsSection({
   pauseDownload,
   resumeDownload,
   loadMore,
+  openModelCard,
 }: {
   groups: ModelGroup[];
   expandedKeys: Set<string>;
@@ -247,11 +243,12 @@ export function ExploreResultsSection({
   pauseDownload: (id: string) => void;
   resumeDownload: (id: string) => void;
   loadMore: () => void;
+  openModelCard: (model: HuggingFaceModel, variants: HuggingFaceModel[], fit?: ModelFit) => void;
 }) {
   return (
     <ModelSection
       title="Model results"
-      description="Rows preserve provider, format, VRAM fit, engagement, download state, and source link."
+      description="Original models stay at the top level; quantized derivatives appear only after expanding an original. Click any row for the model card."
       actions={
         <ModelStatus tone={groups.length ? "good" : error ? "warning" : "default"}>
           {groups.length ? `${groups.length} models` : "defaults"}
@@ -272,6 +269,7 @@ export function ExploreResultsSection({
               startDownload,
               pauseDownload,
               resumeDownload,
+              openModelCard,
             }),
           )
         : fallbackRows(search, loading)}
@@ -320,6 +318,7 @@ function exploreGroupRows({
   startDownload,
   pauseDownload,
   resumeDownload,
+  openModelCard,
 }: {
   group: ModelGroup;
   expanded: boolean;
@@ -331,6 +330,7 @@ function exploreGroupRows({
   startDownload: (modelId: string) => void;
   pauseDownload: (id: string) => void;
   resumeDownload: (id: string) => void;
+  openModelCard: (model: HuggingFaceModel, variants: HuggingFaceModel[], fit?: ModelFit) => void;
 }) {
   const rows = [
     <ExploreModelRow
@@ -349,6 +349,8 @@ function exploreGroupRows({
       displayLikes={group.maxLikes}
       weightEstimateGb={group.needGb}
       pooledVramGb={maxVramGb}
+      fit={group.fit}
+      onOpenModelCard={() => openModelCard(group.lead, group.variants, group.fit)}
     />,
   ];
   if (!expanded) return rows;
@@ -370,6 +372,8 @@ function exploreGroupRows({
           child
           weightEstimateGb={estimateRoughWeightsGb(variant)}
           pooledVramGb={maxVramGb}
+          fit={group.fit}
+          onOpenModelCard={() => openModelCard(variant, group.variants, group.fit)}
         />
       )),
   );
@@ -388,7 +392,7 @@ function fallbackRows(search: string, loading: boolean) {
           href={`https://huggingface.co/${label}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex h-7 items-center justify-center rounded-md px-2 text-[11px] text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
+          className="inline-flex h-7 items-center justify-center rounded-md px-2 text-[length:var(--fs-sm)] text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
         >
           <ExternalLink className="h-3 w-3" />
         </a>
@@ -400,12 +404,6 @@ function fallbackRows(search: string, loading: boolean) {
 function fallbackDescription(search: string, description: string) {
   const query = search.trim();
   return query ? `No exact match yet for "${query}". ${description}` : description;
-}
-
-function hardwareHintText(gpuCount: number, detectedPoolGb: number) {
-  if (gpuCount > 0) return `${gpuCount} GPU${gpuCount === 1 ? "" : "s"} detected`;
-  if (detectedPoolGb > 0) return `${Math.round(detectedPoolGb)} GB reported`;
-  return "No live GPU hint; estimates remain visible";
 }
 
 function updatePoolOverride(

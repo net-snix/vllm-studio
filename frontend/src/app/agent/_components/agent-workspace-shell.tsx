@@ -1,17 +1,15 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { loadSavedControllers } from "@/lib/controllers";
-import { getStoredBackendUrl } from "@/lib/backend-url";
+import type { ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import { triggerAddProjectFlow } from "@/ui/projects-nav-section";
-import { ChevronDownIcon, CloseIcon, PlusIcon } from "@/ui/icons";
+import { AgentModelPicker } from "@/ui/agent-model-picker";
+import { CloseIcon, PlusIcon } from "@/ui/icons";
 import type { WorkspaceDispatch } from "@/lib/agent/workspace/effects";
 import type { AgentModel, PaneId, PaneState, WorkspaceState } from "@/lib/agent/workspace/types";
 import { useProjects, type ProjectsContextValue } from "@/lib/agent/projects/context";
 import { useTools } from "@/lib/agent/tools/context";
 import type { Project } from "@/lib/agent/projects/types";
-import { useClickOutside } from "@/hooks/use-click-outside";
 import { useAgentWorkspaceNavigationEffects } from "@/hooks/agent/use-agent-workspace-navigation-effects";
 import { useActiveCanvasSessionEffects } from "@/hooks/agent/use-active-canvas-session-effects";
 import { activeSession, focusedSession } from "@/lib/agent/sessions/selectors";
@@ -276,6 +274,11 @@ function renderWorkspacePane({
 }: WorkspacePaneRenderContext) {
   const view = selectWorkspacePaneView(paneId, state, projects);
   if (!view) return null;
+  const browserPanelOpen =
+    view.isFocused &&
+    tools.browser.enabled &&
+    tools.computer.open &&
+    tools.computer.tab === "browser";
 
   return (
     <ChatPane
@@ -284,6 +287,7 @@ function renderWorkspacePane({
       runtimeSessionId={view.pane.runtimeSessionId}
       modelId={view.modelId}
       modelName={view.model?.name ?? view.modelId ?? null}
+      modelSupportsVision={view.model?.vision ?? false}
       modelsLoading={state.modelsLoading}
       contextWindow={view.model?.contextWindow ?? 0}
       cwd={view.cwd}
@@ -292,17 +296,24 @@ function renderWorkspacePane({
       gitSummary={view.gitSummary}
       onInitGit={handles.initGitForActiveProject}
       modelSelector={
-        <ModelPicker
+        <AgentModelPicker
           models={state.models}
           selectedModel={view.modelId}
           onSelect={(modelId) => handles.selectPaneModel(view.paneId, modelId)}
           loading={state.modelsLoading}
         />
       }
-      browserToolEnabled={view.isFocused && tools.browser.enabled}
+      browserToolEnabled={browserPanelOpen}
+      browserBackend={tools.browser.backend}
+      onToggleBrowserBackend={tools.toggleBrowserBackend}
       onToggleBrowserTool={() => {
+        if (browserPanelOpen) {
+          tools.closeComputerTab("browser");
+          tools.setBrowserEnabled(false);
+          return;
+        }
         tools.setComputerTab("browser");
-        tools.setBrowserEnabled(!tools.browser.enabled);
+        tools.setBrowserEnabled(true);
       }}
       canvasEnabled={view.isFocused && tools.computer.canvasEnabled}
       onToggleCanvas={tools.toggleCanvas}
@@ -320,133 +331,4 @@ function renderWorkspacePane({
       onRegisterHandle={(handle) => handles.registerPaneHandle(view.paneId, handle)}
     />
   );
-}
-
-function ModelPicker({
-  models,
-  selectedModel,
-  onSelect,
-  loading,
-}: {
-  models: AgentModel[];
-  selectedModel: string;
-  onSelect: (id: string) => void;
-  loading: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const controllerLabel = useActiveControllerLabel();
-  const active = models.find((model) => model.id === selectedModel) || null;
-  const fallbackLabel = selectedModel || "";
-  const triggerLabel = loading
-    ? active?.name || fallbackLabel || "Loading…"
-    : active?.name || fallbackLabel || (models.length === 0 ? "No models" : "Select model");
-  const disabled = loading || models.length === 0;
-
-  return (
-    <div
-      className="relative shrink-0"
-      onBlur={(event) => {
-        const nextTarget = event.relatedTarget;
-        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
-        setOpen(false);
-      }}
-      onPointerDown={(event) => event.stopPropagation()}
-      onMouseDown={(event) => event.stopPropagation()}
-    >
-      <button
-        type="button"
-        onPointerDown={(event) => event.stopPropagation()}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={() => {
-          if (disabled) return;
-          setOpen((value) => !value);
-        }}
-        disabled={disabled}
-        className="inline-flex !h-7 !min-h-7 !min-w-0 max-w-[168px] items-center gap-1.5 rounded-md bg-transparent px-2 !text-xs text-(--fg) hover:bg-(--hover) disabled:opacity-60"
-        title={active?.name || triggerLabel}
-      >
-        <span className="min-w-0 max-w-[136px] truncate">{triggerLabel}</span>
-        <ChevronDownIcon className="h-3 w-3 shrink-0 text-(--dim)" />
-      </button>
-      {open ? (
-        <div
-          className="absolute bottom-9 right-0 z-[80] w-80 overflow-hidden rounded-md border border-(--border) bg-[#151515] shadow-[0_12px_36px_rgba(0,0,0,0.65)]"
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <div className="max-h-72 overflow-y-auto p-1.5">
-            {models.map((model) => {
-              const isActive = model.id === selectedModel;
-              return (
-                <button
-                  key={model.id}
-                  type="button"
-                  onClick={() => {
-                    onSelect(model.id);
-                    setOpen(false);
-                  }}
-                  className={`flex w-full min-w-0 items-center gap-2 rounded px-2 py-2 text-left hover:bg-(--hover) ${
-                    isActive ? "bg-(--hover)" : ""
-                  }`}
-                >
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      isActive ? "bg-(--accent)" : "bg-(--dim)/35"
-                    }`}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs text-(--fg)">{model.name}</span>
-                    <span className="mt-0.5 block truncate font-mono text-[10px] text-(--dim)">
-                      {model.controllerName ?? controllerLabel ?? model.provider} ·{" "}
-                      {formatCompactNumber(model.contextWindow)} context
-                      {model.reasoning ? " · reasoning" : ""}
-                    </span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function formatCompactNumber(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "unknown";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
-  return String(value);
-}
-
-function subscribeToControllerStorage(callback: () => void): () => void {
-  if (typeof window === "undefined") return () => undefined;
-  window.addEventListener("storage", callback);
-  return () => window.removeEventListener("storage", callback);
-}
-
-function computeActiveControllerLabel(): string | null {
-  const url = getStoredBackendUrl();
-  if (!url) return null;
-  const saved = loadSavedControllers();
-  if (saved.length === 0) return null;
-  const match = saved.find((entry) => entry.url === url);
-  return match?.name?.trim() || shortHost(url);
-}
-
-function useActiveControllerLabel(): string | null {
-  return useSyncExternalStore(
-    subscribeToControllerStorage,
-    computeActiveControllerLabel,
-    () => null,
-  );
-}
-
-function shortHost(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return parsed.host || url;
-  } catch {
-    return url;
-  }
 }

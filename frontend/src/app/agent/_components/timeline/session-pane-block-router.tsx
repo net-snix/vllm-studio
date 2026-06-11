@@ -1,5 +1,5 @@
-import { memo, useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { memo, useMemo, useState, type ReactNode } from "react";
+import { Copy, GitFork, Search } from "lucide-react";
 import type {
   AssistantBlock,
   ChatMessage,
@@ -35,14 +35,13 @@ export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
   let reasoningGroup: ThinkingBlock[] = [];
   let toolGroup: ToolBlock[] = [];
 
-  // Positional ids keep React keys stable across streaming frames: blocks only
-  // ever append (their ids are derived from call+content index), so the routed
-  // sequence is a stable growing prefix and these positional ids never churn.
+  // Segment ids come from underlying block ids so collapsed reasoning state
+  // survives snapshot rebuilds and ordering normalization during long streams.
   const flushReasoningSegment = () => {
     if (reasoningGroup.length === 0) return;
     activitySegments.push({
       kind: "reasoning",
-      id: `reasoning-${activitySegments.length}`,
+      id: `reasoning-${reasoningGroup[0]?.id ?? activitySegments.length}`,
       blocks: reasoningGroup,
     });
     reasoningGroup = [];
@@ -52,7 +51,7 @@ export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
     if (toolGroup.length === 0) return;
     activitySegments.push({
       kind: "tools",
-      id: `tools-${activitySegments.length}`,
+      id: `tools-${toolGroup[0]?.id ?? activitySegments.length}`,
       blocks: toolGroup,
     });
     toolGroup = [];
@@ -64,7 +63,7 @@ export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
     if (activitySegments.length === 0) return;
     routed.push({
       kind: "activity-group",
-      id: `activity-${routed.length}`,
+      id: `activity-${activitySegments[0]?.id ?? routed.length}`,
       segments: activitySegments.splice(0),
     });
   };
@@ -107,11 +106,21 @@ const MemoEventBlock = memo(function MemoEventBlock({ block }: { block: EventBlo
   return <EventBlockView block={block} />;
 });
 
-function SessionPaneBlockRouterInner({ message, live }: { message: ChatMessage; live: boolean }) {
+function SessionPaneBlockRouterInner({
+  message,
+  live,
+  running,
+  onForkSession,
+}: {
+  message: ChatMessage;
+  live: boolean;
+  running: boolean;
+  onForkSession?: () => void;
+}) {
   if (message.role === "user") {
     return (
       <article className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl bg-(--surface-2)/70 px-3.5 py-2 text-[10.4px] leading-[1.55] tracking-normal text-(--fg)/95">
+        <div className="max-w-[80%] rounded-2xl bg-(--surface-2)/70 px-3.5 py-2 text-[length:var(--fs-xs)] leading-[1.55] tracking-normal text-(--fg)/95">
           <div className="whitespace-pre-wrap break-words">{message.text}</div>
           {message.attachments?.length ? (
             <div className="mt-2 grid gap-2">
@@ -125,7 +134,14 @@ function SessionPaneBlockRouterInner({ message, live }: { message: ChatMessage; 
     );
   }
 
-  return <AssistantBlocks blocks={message.blocks ?? EMPTY_BLOCKS} live={live} />;
+  return (
+    <AssistantBlocks
+      blocks={message.blocks ?? EMPTY_BLOCKS}
+      live={live}
+      running={running}
+      onForkSession={onForkSession}
+    />
+  );
 }
 
 const EMPTY_BLOCKS: AssistantBlock[] = [];
@@ -138,23 +154,40 @@ const EMPTY_BLOCKS: AssistantBlock[] = [];
 const AssistantBlocks = memo(function AssistantBlocks({
   blocks,
   live,
+  running,
+  onForkSession,
 }: {
   blocks: AssistantBlock[];
   live: boolean;
+  running: boolean;
+  onForkSession?: () => void;
 }) {
   const routedBlocks = useMemo(() => groupAssistantBlocks(blocks), [blocks]);
   traceAgentReasoning("render.blocks", { blocks, routedBlocks });
+  const copyText = useMemo(() => assistantContentCopyText(blocks), [blocks]);
+  const lastContentIndex = useMemo(
+    () => routedBlocks.findLastIndex((item) => item.kind === "content"),
+    [routedBlocks],
+  );
+  const showActions = !running && copyText.trim().length > 0 && lastContentIndex >= 0;
 
   return (
     <article className="min-w-0">
       {routedBlocks.length === 0 ? null : (
         <div className="flex flex-col gap-3.5">
-          {routedBlocks.map((item) => {
+          {routedBlocks.map((item, index) => {
             if (item.kind === "activity-group") {
               return <AssistantActivityGroup key={item.id} segments={item.segments} live={live} />;
             }
             if (item.kind === "content") {
-              return <MemoContentBlock key={item.block.id} block={item.block} />;
+              return (
+                <div key={item.block.id} className="min-w-0">
+                  <MemoContentBlock block={item.block} />
+                  {showActions && index === lastContentIndex ? (
+                    <AssistantMessageActions copyText={copyText} onForkSession={onForkSession} />
+                  ) : null}
+                </div>
+              );
             }
             return <MemoEventBlock key={item.block.id} block={item.block} />;
           })}
@@ -181,7 +214,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
           alt={attachment.name}
           className="max-h-72 w-full object-contain"
         />
-        <figcaption className="truncate px-2 py-1 font-mono text-[10px] text-(--dim)">
+        <figcaption className="truncate px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
           {attachment.name} · {size}
         </figcaption>
       </figure>
@@ -194,7 +227,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
         title={title}
       >
         <video src={attachment.previewUrl} className="max-h-72 w-full" controls />
-        <figcaption className="truncate px-2 py-1 font-mono text-[10px] text-(--dim)">
+        <figcaption className="truncate px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
           {attachment.name} · {size}
         </figcaption>
       </figure>
@@ -211,7 +244,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
           title={attachment.name}
           className="h-72 w-full border-0 bg-(--bg)"
         />
-        <div className="truncate px-2 py-1 font-mono text-[10px] text-(--dim)">
+        <div className="truncate px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
           {attachment.name} · {size}
         </div>
       </div>
@@ -219,7 +252,7 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
   }
   return (
     <div
-      className="flex min-w-0 items-center gap-2 rounded-md border border-(--border) bg-black/30 px-2 py-1 font-mono text-[10px] text-(--dim)"
+      className="flex min-w-0 items-center gap-2 rounded-md border border-(--border) bg-black/30 px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--dim)"
       title={title}
     >
       <span className="truncate">{attachment.name}</span>
@@ -260,7 +293,7 @@ const AssistantActivityGroup = memo(function AssistantActivityGroup({
   return (
     <details className="group min-w-0 overflow-hidden" open={expanded}>
       <summary
-        className="flex min-h-7 min-w-0 cursor-pointer list-none items-center gap-2 rounded-lg px-2 py-1 text-[9.6px] leading-4 text-(--dim)/75 transition-colors hover:bg-(--hover) hover:text-(--fg)/80 [&::-webkit-details-marker]:hidden"
+        className="flex min-h-7 min-w-0 cursor-pointer list-none items-center gap-2 rounded-lg px-2 py-1 text-[length:var(--fs-xs)] leading-4 text-(--dim)/75 transition-colors hover:bg-(--hover) hover:text-(--fg)/80 [&::-webkit-details-marker]:hidden"
         onClick={(event) => {
           event.preventDefault();
           setExpanded((value) => !value);
@@ -279,11 +312,23 @@ const AssistantActivityGroup = memo(function AssistantActivityGroup({
           <span className="min-w-0 flex-1" />
         )}
         {hasActiveTool ? (
-          <span className="shrink-0 text-[8.8px] font-medium text-(--accent)/60">running</span>
+          <span className="shrink-0 text-[length:var(--fs-2xs)] font-medium text-(--accent)/60">
+            running
+          </span>
         ) : null}
       </summary>
       {expanded ? (
-        <div className="ml-3 mt-2 flex min-w-0 flex-col gap-1.5 border-l border-(--border)/50 pl-3">
+        <div
+          className="ml-3 mt-2 flex min-w-0 cursor-pointer flex-col gap-1.5 border-l border-(--border)/50 pl-3"
+          onClick={(event) => {
+            // Collapse when the user clicks anywhere in the reasoning area, but
+            // not when clicking a tool section (kept interactive) or when they
+            // were selecting text.
+            if (window.getSelection()?.toString()) return;
+            if ((event.target as HTMLElement).closest("[data-activity-tool]")) return;
+            setExpanded(false);
+          }}
+        >
           {segments.flatMap(activitySegmentItems).map((item) => (
             <ActivityTreeItem key={item.id} item={item} />
           ))}
@@ -306,20 +351,91 @@ function activitySegmentItems(segment: ActivitySegment): ActivityTreeItem[] {
 
 function ActivityTreeItem({ item }: { item: ActivityTreeItem }) {
   if (item.kind === "reasoning") return <ReasoningLeaf block={item.block} />;
-  return <ToolBlockView block={item.block} />;
+  // Tool sections stay interactive: clicks here must not collapse the group.
+  return (
+    <div data-activity-tool onClick={(event) => event.stopPropagation()}>
+      <ToolBlockView block={item.block} />
+    </div>
+  );
 }
 
 function ReasoningLeaf({ block }: { block: ThinkingBlock }) {
   return (
-    <pre className="max-w-full overflow-x-auto whitespace-pre-wrap rounded-lg bg-(--surface)/40 px-3 py-2 font-mono text-[9.6px] leading-[1.6] text-(--dim)/80">
+    <pre className="max-w-full overflow-x-auto whitespace-pre-wrap rounded-lg bg-(--surface)/40 px-3 py-2 font-mono text-[length:var(--fs-xs)] leading-[1.6] text-(--dim)/80">
       {block.text}
     </pre>
   );
 }
 
+function assistantContentCopyText(blocks: AssistantBlock[]): string {
+  return blocks
+    .map((block) => (block.kind === "text" ? block.text : ""))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function AssistantMessageActions({
+  copyText,
+  onForkSession,
+}: {
+  copyText: string;
+  onForkSession?: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (!copyText.trim()) return;
+    await navigator.clipboard.writeText(copyText);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_200);
+  };
+  return (
+    <div className="mt-2 flex items-center gap-1 text-(--dim)/65">
+      <AssistantActionButton
+        label={copied ? "Copied" : "Copy response"}
+        onClick={() => void copy()}
+        disabled={!copyText.trim()}
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </AssistantActionButton>
+      <AssistantActionButton
+        label="Fork session"
+        onClick={() => onForkSession?.()}
+        disabled={!onForkSession}
+      >
+        <GitFork className="h-3.5 w-3.5" />
+      </AssistantActionButton>
+    </div>
+  );
+}
+
+function AssistantActionButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex h-6 w-6 items-center justify-center rounded-md text-(--dim)/65 transition-colors hover:bg-(--surface) hover:text-(--fg)/85 disabled:pointer-events-none disabled:opacity-30"
+      aria-label={label}
+      title={label}
+    >
+      {children}
+    </button>
+  );
+}
+
 function EventBlockView({ block }: { block: EventBlock }) {
   return (
-    <div className="flex items-center gap-3 py-2 text-[8.8px] text-(--dim)/70">
+    <div className="flex items-center gap-3 py-2 text-[length:var(--fs-2xs)] text-(--dim)/70">
       <span className="h-px flex-1 bg-(--border)/50" />
       <span className="font-medium">{block.text}</span>
       <span className="h-px flex-1 bg-(--border)/50" />

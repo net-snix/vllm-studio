@@ -4,13 +4,17 @@ import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import api from "@/lib/api";
 import type {
+  EngineBackend,
+  EngineJob,
   ModelRecommendation,
+  RuntimeTarget,
   StudioDiagnostics,
   StudioSettings,
-  VllmUpgradeResult,
 } from "@/lib/types";
 import { useDownloads } from "@/hooks/use-downloads";
 import { buildStarterRecipe } from "./setup-helpers";
+
+type ManagedSetupBackend = Extract<EngineBackend, "vllm" | "sglang" | "mlx">;
 
 interface SetupBenchmarkResult {
   prompt_tokens: number;
@@ -24,16 +28,18 @@ export function useSetup() {
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadWarning, setLoadWarning] = useState<string | null>(null);
   const [settings, setSettings] = useState<StudioSettings | null>(null);
   const [modelsDir, setModelsDir] = useState("");
   const [diagnostics, setDiagnostics] = useState<StudioDiagnostics | null>(null);
   const [recommendations, setRecommendations] = useState<ModelRecommendation[]>([]);
+  const [runtimeTargets, setRuntimeTargets] = useState<RuntimeTarget[]>([]);
+  const [runtimeJobs, setRuntimeJobs] = useState<EngineJob[]>([]);
   const [maxVram, setMaxVram] = useState(0);
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [manualModelId, setManualModelId] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
-  const [upgradeResult, setUpgradeResult] = useState<VllmUpgradeResult | null>(null);
   const [hardwareConfirmed, setHardwareConfirmed] = useState(false);
   const [configuringRecipe, setConfiguringRecipe] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
@@ -49,26 +55,89 @@ export function useSetup() {
     return downloadsState.downloads.find((download) => download.model_id === selectedModel) ?? null;
   }, [downloadsState.downloads, selectedModel]);
 
+  const refreshRuntimeState = useCallback(async () => {
+    const [targetPayload, jobPayload] = await Promise.all([
+      api.getRuntimeTargets().catch(() => ({ targets: [] })),
+      api.getRuntimeJobs().catch(() => ({ jobs: [] })),
+    ]);
+    setRuntimeTargets(targetPayload.targets);
+    setRuntimeJobs(jobPayload.jobs);
+  }, []);
+
+  const loadSecondarySetupData = useCallback(async (initialWarnings: string[]) => {
+    const warnings = [...initialWarnings];
+    const [recommendationsResult, targetResult, jobResult] = await Promise.allSettled([
+      withSetupTimeout(api.getModelRecommendations(), "model recommendations"),
+      withSetupTimeout(api.getRuntimeTargets(), "runtime targets"),
+      withSetupTimeout(api.getRuntimeJobs(), "runtime jobs"),
+    ]);
+
+    if (recommendationsResult.status === "fulfilled") {
+      setRecommendations(recommendationsResult.value.recommendations || []);
+      setMaxVram(recommendationsResult.value.max_vram_gb ?? 0);
+    } else {
+      setRecommendations([]);
+      setMaxVram(0);
+      warnings.push(`model recommendations: ${setupErrorMessage(recommendationsResult.reason)}`);
+    }
+
+    if (targetResult.status === "fulfilled") {
+      setRuntimeTargets(targetResult.value.targets);
+    } else {
+      setRuntimeTargets([]);
+      warnings.push(`runtime targets: ${setupErrorMessage(targetResult.reason)}`);
+    }
+
+    if (jobResult.status === "fulfilled") {
+      setRuntimeJobs(jobResult.value.jobs);
+    } else {
+      setRuntimeJobs([]);
+      warnings.push(`runtime jobs: ${setupErrorMessage(jobResult.reason)}`);
+    }
+
+    setLoadWarning(formatLoadWarning(warnings));
+  }, []);
+
   const loadSetupData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const [settingsRes, diagnosticsRes, recommendationsRes] = await Promise.all([
-        api.getStudioSettings(),
-        api.getStudioDiagnostics(),
-        api.getModelRecommendations(),
+      setLoadWarning(null);
+      const warnings: string[] = [];
+      const [settingsResult, diagnosticsResult] = await Promise.allSettled([
+        withSetupTimeout(api.getStudioSettings(), "settings"),
+        withSetupTimeout(api.getStudioDiagnostics(), "controller diagnostics"),
       ]);
-      setSettings(settingsRes);
-      setModelsDir(settingsRes.effective.models_dir);
-      setDiagnostics(diagnosticsRes);
-      setRecommendations(recommendationsRes.recommendations || []);
-      setMaxVram(recommendationsRes.max_vram_gb ?? 0);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load setup data");
+
+      if (settingsResult.status === "fulfilled") {
+        setSettings(settingsResult.value);
+        setModelsDir(settingsResult.value.effective.models_dir);
+      } else {
+        setSettings(null);
+        warnings.push(`settings: ${setupErrorMessage(settingsResult.reason)}`);
+      }
+
+      if (diagnosticsResult.status === "fulfilled") {
+        setDiagnostics(diagnosticsResult.value);
+        if (settingsResult.status === "rejected") {
+          setModelsDir(diagnosticsResult.value.config.models_dir || "");
+        }
+      } else {
+        setDiagnostics(null);
+        warnings.push(`controller diagnostics: ${setupErrorMessage(diagnosticsResult.reason)}`);
+      }
+
+      setRecommendations([]);
+      setMaxVram(0);
+      setRuntimeTargets([]);
+      setRuntimeJobs([]);
+      setLoadWarning(formatLoadWarning(warnings));
+
+      void loadSecondarySetupData(warnings);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadSecondarySetupData]);
 
   const subscribeSetupData = useCallback(
     (_notify: () => void) => {
@@ -99,43 +168,63 @@ export function useSetup() {
     }
   }, [modelsDir]);
 
-  const upgradeRuntime = useCallback(async () => {
-    setUpgrading(true);
-    setUpgradeResult(null);
-    try {
-      const { job_id: jobId } = await api.upgradeVllmRuntime({ preferBundled: true });
-      let finalJob = (await api.getRuntimeJob(jobId)).job;
-      for (
-        let attempt = 0;
-        attempt < 120 && (finalJob.status === "queued" || finalJob.status === "running");
-        attempt += 1
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        finalJob = (await api.getRuntimeJob(jobId)).job;
-      }
-      setUpgradeResult({
-        success: finalJob.status === "success",
-        version: null,
-        output: finalJob.outputTail ?? null,
-        error: finalJob.status === "error" ? (finalJob.error ?? finalJob.message) : null,
-        used_wheel: null,
-        used_command: finalJob.command ?? null,
-      });
-      const refreshed = await api.getStudioDiagnostics();
-      setDiagnostics(refreshed);
-    } catch (err) {
-      setUpgradeResult({
-        success: false,
-        version: null,
-        output: null,
-        error: err instanceof Error ? err.message : "Upgrade failed",
-        used_wheel: null,
-        used_command: null,
-      });
-    } finally {
-      setUpgrading(false);
+  const finishRuntimeJob = useCallback(async (jobId: string): Promise<EngineJob> => {
+    let finalJob = (await api.getRuntimeJob(jobId)).job;
+    for (
+      let attempt = 0;
+      attempt < 120 && (finalJob.status === "queued" || finalJob.status === "running");
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      finalJob = (await api.getRuntimeJob(jobId)).job;
+      setRuntimeJobs((current) => [
+        finalJob,
+        ...current.filter((candidate) => candidate.id !== finalJob.id),
+      ]);
     }
+    return finalJob;
   }, []);
+
+  const runRuntimeJob = useCallback(
+    async (payload: { backend: EngineBackend; targetId?: string; type: "install" | "update" }) => {
+      setUpgrading(true);
+      setError(null);
+      try {
+        const { job } = await api.createRuntimeJob(payload);
+        setRuntimeJobs((current) => [
+          job,
+          ...current.filter((candidate) => candidate.id !== job.id),
+        ]);
+        await finishRuntimeJob(job.id);
+        await refreshRuntimeState();
+        const refreshed = await api.getStudioDiagnostics();
+        setDiagnostics(refreshed);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Runtime job failed");
+      } finally {
+        setUpgrading(false);
+      }
+    },
+    [finishRuntimeJob, refreshRuntimeState],
+  );
+
+  const installRuntime = useCallback(
+    async (backend: ManagedSetupBackend) => {
+      await runRuntimeJob({ backend, type: "install" });
+    },
+    [runRuntimeJob],
+  );
+
+  const updateRuntimeTarget = useCallback(
+    async (target: RuntimeTarget) => {
+      await runRuntimeJob({
+        backend: target.backend,
+        targetId: target.id,
+        type: target.installed ? "update" : "install",
+      });
+    },
+    [runRuntimeJob],
+  );
 
   const beginDownload = useCallback(
     async (modelId: string) => {
@@ -247,18 +336,20 @@ export function useSetup() {
     setStep,
     loading,
     error,
+    loadWarning,
     settings,
     modelsDir,
     setModelsDir,
     diagnostics,
     recommendations,
+    runtimeTargets,
+    runtimeJobs,
     maxVram,
     selectedModel,
     manualModelId,
     setManualModelId,
     savingSettings,
     upgrading,
-    upgradeResult,
     hardwareConfirmed,
     setHardwareConfirmed,
     downloads: downloadsState.downloads,
@@ -267,7 +358,8 @@ export function useSetup() {
     resumeDownload: downloadsState.resumeDownload,
     cancelDownload: downloadsState.cancelDownload,
     saveSettings,
-    upgradeRuntime,
+    installRuntime,
+    updateRuntimeTarget,
     beginDownload,
     submitManualModel,
     continueFromHardware,
@@ -286,3 +378,20 @@ export function useSetup() {
 }
 
 const getSetupSnapshot = (): number => 0;
+
+function withSetupTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 8_000): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+    }),
+  ]);
+}
+
+function formatLoadWarning(warnings: string[]): string | null {
+  return warnings.length ? `Some setup data could not load: ${warnings.join("; ")}` : null;
+}
+
+function setupErrorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "unavailable";
+}

@@ -26,8 +26,6 @@ export interface EnvironmentInfo {
   controller_url: string;
   inference_url: string;
   frontend_url: string;
-  /** @deprecated No longer served. */
-  litellm_url?: string;
 }
 
 export interface RuntimeBackendInfo {
@@ -93,7 +91,7 @@ export type RuntimePlatformKind = "cuda" | "rocm" | "unknown";
 
 export type RuntimeRocmSmiTool = "amd-smi" | "rocm-smi";
 
-export type RuntimeGpuMonitoringTool = "nvidia-smi" | RuntimeRocmSmiTool;
+export type RuntimeGpuMonitoringTool = "nvidia-smi" | "intel-sysfs" | RuntimeRocmSmiTool;
 
 export interface RuntimeCudaInfo {
   driver_version: string | null;

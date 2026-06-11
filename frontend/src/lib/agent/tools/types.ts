@@ -7,7 +7,6 @@
 //    sessions stay independent of tool choice.
 
 import type {
-  ComposerExtensionOverride,
   ComposerPluginRef,
   ComposerPromptTemplateRef,
   ComposerSkillRef,
@@ -22,11 +21,13 @@ export type ComputerTab =
   | "browser"
   | "files"
   | "diff"
-  | "terminal"
-  | "plugins";
+  | "terminal";
+
+export type BrowserBackend = "embedded" | "parchi";
 
 export type BrowserState = {
   enabled: boolean;
+  backend: BrowserBackend;
   url: string;
   input: string;
 };
@@ -45,17 +46,20 @@ export type FileOpenRequest = {
   path: string;
 };
 
+export type ContextAttachRequest = {
+  id: number;
+  /** Short label shown on the composer chip (e.g. the file name). */
+  label: string;
+  /** Optional disk path so the attachment dedupes/links to the file. */
+  path?: string;
+  /** The text injected into the model context. */
+  content: string;
+};
+
 export type ToolSelection = {
   plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
   promptTemplates: ComposerPromptTemplateRef[];
-  /**
-   * Per-turn Pi extension on/off overrides selected via the composer's
-   * `/plugins` slash command. These layer on top of the persistent
-   * `<agentDir>/extension-config/enabled.json` overrides — they do not write
-   * to disk and only affect the next session start.
-   */
-  extensionOverrides: ComposerExtensionOverride[];
 };
 
 export type ToolSelectionMap = ReadonlyMap<SessionId, ToolSelection>;
@@ -64,5 +68,4 @@ export const EMPTY_SELECTION: ToolSelection = {
   plugins: [],
   skills: [],
   promptTemplates: [],
-  extensionOverrides: [],
 };

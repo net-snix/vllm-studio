@@ -10,7 +10,6 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  ComposerExtensionRef,
   ComposerPluginRef,
   ComposerPromptTemplateRef,
   ComposerSkillRef,
@@ -20,9 +19,11 @@ import { useToolsCatalogueEffects } from "@/hooks/agent/use-tools-catalogue-effe
 import type { SessionId } from "@/lib/agent/sessions/types";
 import {
   EMPTY_SELECTION,
+  type BrowserBackend,
   type BrowserState,
   type ComputerState,
   type ComputerTab,
+  type ContextAttachRequest,
   type FileOpenRequest,
   type ToolSelection,
   type ToolSelectionMap,
@@ -33,6 +34,7 @@ import {
   loadComputerState,
   migrateToolStorage,
   uniqueComputerTabs,
+  writeBrowserBackend,
   writeBrowserEnabled,
   writeComputerCanvasEnabled,
   writeComputerCanvasText,
@@ -45,24 +47,21 @@ export type ToolsContextValue = {
   browser: BrowserState;
   computer: ComputerState;
   fileOpenRequest: FileOpenRequest | null;
+  contextAttachRequest: ContextAttachRequest | null;
   pluginCatalogue: ComposerPluginRef[];
   skillCatalogue: ComposerSkillRef[];
   promptTemplateCatalogue: ComposerPromptTemplateRef[];
-  /**
-   * Workspace-global Pi extension catalogue (installed packages + auto-
-   * discovered drop-ins). Hydrated lazily — empty until the user opens the
-   * `/plugins` slash menu or the plugins panel.
-   */
-  extensionCatalogue: ComposerExtensionRef[];
-  refreshExtensionCatalogue: () => Promise<void>;
   selectionFor: (sessionId: SessionId | null | undefined) => ToolSelection;
   setBrowserEnabled: (enabled: boolean) => void;
+  setBrowserBackend: (backend: BrowserBackend) => void;
+  toggleBrowserBackend: () => void;
   toggleBrowser: () => void;
   setBrowserUrl: (url: string, input?: string) => void;
   setBrowserInput: (input: string) => void;
   setComputerOpen: (open: boolean) => void;
   toggleComputerOpen: () => void;
   setComputerTab: (tab: ComputerTab) => void;
+  selectComputerTabWithoutOpening: (tab: ComputerTab) => void;
   closeComputerTab: (tab: ComputerTab) => void;
   setComputerWidth: (width: number) => void;
   setCanvasEnabled: (enabled: boolean) => void;
@@ -70,6 +69,7 @@ export type ToolsContextValue = {
   setCanvasText: (text: string) => void;
   setActiveCanvasSession: (sessionId: SessionId | null) => void;
   requestFileOpen: (path: string) => void;
+  requestContextAttach: (request: { label: string; path?: string; content: string }) => void;
   /**
    * Replace the entire selection for a session. Pass `null` to clear it (used
    * when a session is closed / pruned).
@@ -82,7 +82,7 @@ const ToolsContext = createContext<ToolsContextValue | null>(null);
 
 function buildInitialBrowser(): BrowserState {
   if (typeof window === "undefined") {
-    return { enabled: false, url: "", input: "" };
+    return { enabled: false, backend: "parchi", url: "", input: "" };
   }
   migrateToolStorage();
   return loadBrowserState();
@@ -106,12 +106,14 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
   const [browser, setBrowser] = useState<BrowserState>(() => buildInitialBrowser());
   const [computer, setComputer] = useState<ComputerState>(() => buildInitialComputer());
   const [fileOpenRequest, setFileOpenRequest] = useState<FileOpenRequest | null>(null);
+  const [contextAttachRequest, setContextAttachRequest] = useState<ContextAttachRequest | null>(
+    null,
+  );
   const [pluginCatalogue, setPluginCatalogue] = useState<ComposerPluginRef[]>([]);
   const [skillCatalogue, setSkillCatalogue] = useState<ComposerSkillRef[]>([]);
   const [promptTemplateCatalogue, setPromptTemplateCatalogue] = useState<
     ComposerPromptTemplateRef[]
   >([]);
-  const [extensionCatalogue, setExtensionCatalogue] = useState<ComposerExtensionRef[]>([]);
   const selectionsRef = useRef<Map<SessionId, ToolSelection>>(new Map());
   // Bump on every selection mutation so consumers re-render.
   const [selectionVersion, setSelectionVersion] = useState(0);
@@ -123,11 +125,10 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
   // Discover the workspace-global plugin / skill catalogue once on mount.
   // The lifecycle bridge lives in `use-tools-catalogue-effects.ts`.
   useToolsCatalogueEffects({
-    onLoaded: ({ plugins, skills, promptTemplates, extensions }) => {
+    onLoaded: ({ plugins, skills, promptTemplates }) => {
       setPluginCatalogue(plugins);
       setSkillCatalogue(skills);
       setPromptTemplateCatalogue(promptTemplates);
-      setExtensionCatalogue(extensions);
     },
   });
   useCanvasEffects({ setComputer, sessionId: activeCanvasSessionId });
@@ -140,6 +141,19 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
   const setBrowserEnabled = useCallback((enabled: boolean) => {
     setBrowser((current) => (current.enabled === enabled ? current : { ...current, enabled }));
     writeBrowserEnabled(enabled);
+  }, []);
+
+  const setBrowserBackend = useCallback((backend: BrowserBackend) => {
+    setBrowser((current) => (current.backend === backend ? current : { ...current, backend }));
+    writeBrowserBackend(backend);
+  }, []);
+
+  const toggleBrowserBackend = useCallback(() => {
+    setBrowser((current) => {
+      const backend = current.backend === "parchi" ? "embedded" : "parchi";
+      writeBrowserBackend(backend);
+      return { ...current, backend };
+    });
   }, []);
 
   const toggleBrowser = useCallback(() => {
@@ -165,6 +179,13 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setComputerOpen = useCallback((open: boolean) => {
+    if (!open) {
+      setBrowser((current) => {
+        if (!current.enabled) return current;
+        writeBrowserEnabled(false);
+        return { ...current, enabled: false };
+      });
+    }
     setComputer((current) =>
       current.open === open
         ? current
@@ -178,13 +199,23 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const toggleComputerOpen = useCallback(() => {
-    setComputer((current) => ({
-      ...current,
-      open: !current.open,
-      tab: !current.open ? current.tab || "status" : current.tab,
-      tabs: uniqueComputerTabs(current.tabs.length ? current.tabs : ["status"]),
-    }));
-  }, []);
+    if (computer.open) {
+      setBrowser((current) => {
+        if (!current.enabled) return current;
+        writeBrowserEnabled(false);
+        return { ...current, enabled: false };
+      });
+    }
+    setComputer((current) => {
+      const nextOpen = !current.open;
+      return {
+        ...current,
+        open: nextOpen,
+        tab: nextOpen ? current.tab || "status" : current.tab,
+        tabs: uniqueComputerTabs(current.tabs.length ? current.tabs : ["status"]),
+      };
+    });
+  }, [computer.open]);
 
   const setComputerTab = useCallback((tab: ComputerTab) => {
     setComputer((current) => {
@@ -195,6 +226,25 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
         : { ...current, open: true, tab, tabs };
     });
     writeComputerTab(tab);
+    setBrowser((current) => {
+      const enabled = tab === "browser";
+      if (current.enabled === enabled) return current;
+      writeBrowserEnabled(enabled);
+      return { ...current, enabled };
+    });
+  }, []);
+
+  // Register + select a tab WITHOUT force-opening the computer panel. Used when
+  // the model drives a background tool (e.g. the browser): it should route to the
+  // right tab and pre-select it, but must not pop the panel open on every prompt
+  // — the user controls whether the panel is visible.
+  const selectComputerTabWithoutOpening = useCallback((tab: ComputerTab) => {
+    setComputer((current) => {
+      const tabs = uniqueComputerTabs([...current.tabs, tab]);
+      writeComputerTabs(tabs);
+      writeComputerTab(tab);
+      return current.tab === tab && current.tabs === tabs ? current : { ...current, tab, tabs };
+    });
     if (tab === "browser") {
       setBrowser((current) => {
         if (current.enabled) return current;
@@ -206,6 +256,13 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
 
   const closeComputerTab = useCallback((tab: ComputerTab) => {
     if (tab === "status" || tab === "tools") return;
+    if (tab === "browser") {
+      setBrowser((current) => {
+        if (!current.enabled) return current;
+        writeBrowserEnabled(false);
+        return { ...current, enabled: false };
+      });
+    }
     setComputer((current) => {
       const tabs = uniqueComputerTabs(current.tabs.filter((item) => item !== tab));
       const activeTab = current.tab === tab ? (tabs[tabs.length - 1] ?? "status") : current.tab;
@@ -284,6 +341,20 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const requestContextAttach = useCallback(
+    (request: { label: string; path?: string; content: string }) => {
+      const content = request.content.trim();
+      if (!content) return;
+      setContextAttachRequest((current) => ({
+        id: (current?.id ?? 0) + 1,
+        label: request.label.trim() || "context",
+        ...(request.path ? { path: request.path } : {}),
+        content,
+      }));
+    },
+    [],
+  );
+
   const selectionFor = useCallback(
     (sessionId: SessionId | null | undefined): ToolSelection => {
       if (!sessionId) return EMPTY_SELECTION;
@@ -304,8 +375,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
         current &&
         current.plugins === selection.plugins &&
         current.skills === selection.skills &&
-        current.promptTemplates === selection.promptTemplates &&
-        current.extensionOverrides === selection.extensionOverrides
+        current.promptTemplates === selection.promptTemplates
       ) {
         return;
       }
@@ -324,8 +394,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
         existing &&
         existing.plugins === selection.plugins &&
         existing.skills === selection.skills &&
-        existing.promptTemplates === selection.promptTemplates &&
-        existing.extensionOverrides === selection.extensionOverrides
+        existing.promptTemplates === selection.promptTemplates
       ) {
         continue;
       }
@@ -335,60 +404,26 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
     if (changed) setSelectionVersion((v) => v + 1);
   }, []);
 
-  const refreshExtensionCatalogue = useCallback(async () => {
-    try {
-      const response = await fetch("/api/agent/extensions", { cache: "no-store" });
-      if (!response.ok) return;
-      const payload = (await response.json()) as {
-        resources?: {
-          extensions?: Array<{
-            path: string;
-            source: string;
-            enabled: boolean;
-            origin: "package" | "top-level";
-            scope: "user" | "project" | "temporary";
-          }>;
-        };
-      };
-      const extensions = payload.resources?.extensions ?? [];
-      setExtensionCatalogue(
-        extensions.map((ext) => {
-          const id = ext.source && ext.source !== "auto" ? ext.source : ext.path;
-          const name = deriveExtensionName(ext.source, ext.path);
-          return {
-            id,
-            name,
-            source: ext.source,
-            path: ext.path,
-            scope: ext.scope,
-            origin: ext.origin,
-            enabled: ext.enabled,
-          };
-        }),
-      );
-    } catch {
-      // Best-effort; leave previous catalogue in place.
-    }
-  }, []);
-
   const value = useMemo<ToolsContextValue>(
     () => ({
       browser,
       computer,
       fileOpenRequest,
+      contextAttachRequest,
       pluginCatalogue,
       skillCatalogue,
       promptTemplateCatalogue,
-      extensionCatalogue,
-      refreshExtensionCatalogue,
       selectionFor,
       setBrowserEnabled,
+      setBrowserBackend,
+      toggleBrowserBackend,
       toggleBrowser,
       setBrowserUrl,
       setBrowserInput,
       setComputerOpen,
       toggleComputerOpen,
       setComputerTab,
+      selectComputerTabWithoutOpening,
       closeComputerTab,
       setComputerWidth,
       setCanvasEnabled,
@@ -396,6 +431,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       setCanvasText,
       setActiveCanvasSession,
       requestFileOpen,
+      requestContextAttach,
       setSelection,
       hydrateSelections,
     }),
@@ -403,19 +439,21 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       browser,
       computer,
       fileOpenRequest,
+      contextAttachRequest,
       pluginCatalogue,
       skillCatalogue,
       promptTemplateCatalogue,
-      extensionCatalogue,
-      refreshExtensionCatalogue,
       selectionFor,
       setBrowserEnabled,
+      setBrowserBackend,
+      toggleBrowserBackend,
       toggleBrowser,
       setBrowserUrl,
       setBrowserInput,
       setComputerOpen,
       toggleComputerOpen,
       setComputerTab,
+      selectComputerTabWithoutOpening,
       closeComputerTab,
       setComputerWidth,
       setCanvasEnabled,
@@ -423,6 +461,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       setCanvasText,
       setActiveCanvasSession,
       requestFileOpen,
+      requestContextAttach,
       setSelection,
       hydrateSelections,
     ],
@@ -437,16 +476,11 @@ export function useTools(): ToolsContextValue {
   return value;
 }
 
-export type { ToolSelection, ToolSelectionMap, BrowserState, ComputerState, ComputerTab };
-
-function deriveExtensionName(source: string, absPath: string): string {
-  // Prefer the package name from sources like "npm:@scope/foo" or "git:owner/repo".
-  if (source && source !== "auto") {
-    const m = /^(?:npm|git|file|ssh|https?):(.+)$/.exec(source);
-    const tail = (m?.[1] ?? source).trim();
-    const last = tail.split(/[\\/]/).filter(Boolean).pop();
-    if (last) return last;
-  }
-  const base = absPath.split(/[\\/]/).filter(Boolean).pop() ?? absPath;
-  return base.replace(/\.(?:t|j)sx?$/i, "");
-}
+export type {
+  ToolSelection,
+  ToolSelectionMap,
+  BrowserState,
+  BrowserBackend,
+  ComputerState,
+  ComputerTab,
+};

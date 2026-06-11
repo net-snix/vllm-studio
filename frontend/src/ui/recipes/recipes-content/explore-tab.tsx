@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState, useSyncExternalStore } from "react";
+import type { HuggingFaceModel } from "@/lib/types";
 import {
   DownloadStatusSection,
   ExploreControls,
@@ -9,6 +10,8 @@ import {
 import { useExplore } from "./use-explore";
 import { useDownloads } from "@/hooks/use-downloads";
 import api from "@/lib/api";
+import { HuggingFaceModelCardPanel } from "@/ui";
+import type { ModelFit } from "./hardware-profile";
 
 export function ExploreTab() {
   const {
@@ -16,8 +19,8 @@ export function ExploreTab() {
     maxVramGb,
     detectedPoolGb,
     poolOverrideGb,
+    hardwareProfile,
     setPoolOverrideGb,
-    gpuCount,
     loading,
     error,
     search,
@@ -37,6 +40,11 @@ export function ExploreTab() {
   } = useDownloads();
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [localModelIds, setLocalModelIds] = useState<Set<string>>(new Set());
+  const [selectedModelCard, setSelectedModelCard] = useState<{
+    model: HuggingFaceModel;
+    variants: HuggingFaceModel[];
+    fit?: ModelFit;
+  } | null>(null);
   const completedSet = useRef<Set<string>>(new Set());
 
   const loadLocalModels = useCallback(async () => {
@@ -126,7 +134,7 @@ export function ExploreTab() {
         maxVramGb={maxVramGb}
         detectedPoolGb={detectedPoolGb}
         poolOverrideGb={poolOverrideGb}
-        gpuCount={gpuCount}
+        hardwareProfile={hardwareProfile}
         loading={loading}
         error={error}
         search={search}
@@ -151,6 +159,14 @@ export function ExploreTab() {
         pauseDownload={handlePause}
         resumeDownload={handleResume}
         loadMore={loadMore}
+        openModelCard={(model, variants, fit) => setSelectedModelCard({ model, variants, fit })}
+      />
+      <HuggingFaceModelCardPanel
+        open={Boolean(selectedModelCard)}
+        model={selectedModelCard?.model ?? null}
+        variants={selectedModelCard?.variants ?? []}
+        fit={selectedModelCard?.fit}
+        onClose={() => setSelectedModelCard(null)}
       />
     </div>
   );

@@ -18,7 +18,13 @@ import {
 } from "./pi-runtime-helpers";
 import { refreshPiModels, resolvePiModelSelection } from "./pi-runtime-models";
 import { piEventsAfter, piStatusFromEvents } from "./pi-runtime-state";
-import { readEnabledOverrides } from "./pi-packages-store";
+import {
+  compactionTokensBefore,
+  contextUsageAwaitingFreshCompactionUsage,
+  normalizeSdkMessageTimestampsForCompactionBoundary,
+  piEventIsSuccessfulCompaction,
+  postCompactionUsageIsFresh,
+} from "./pi-runtime-compaction";
 import { findSessionFile } from "./sessions-store";
 import type { LoggedPiEvent, PiAgentSession } from "./pi-runtime-types";
 
@@ -75,6 +81,9 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
   private eventSeq = 0;
   private eventLog: LoggedPiEvent[] = [];
   private activePromptCount = 0;
+  private awaitingPostCompactionUsage = false;
+  private postCompactionTokensBefore: number | null = null;
+  private warnedCompactionBoundaryShape = false;
   private lastError: string | null = null;
   private currentFingerprint = "";
   private currentPiSessionId: string | null = null;
@@ -97,6 +106,9 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     this.eventSeq = 0;
     this.eventLog = [];
     this.activePromptCount = 0;
+    this.awaitingPostCompactionUsage = false;
+    this.postCompactionTokensBefore = null;
+    this.warnedCompactionBoundaryShape = false;
     this.lastError = null;
 
     const { models, agentDir } = await refreshPiModels();
@@ -121,39 +133,21 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     const resuming = Boolean(resumeFile);
     const runtime = await createAgentSessionRuntime(
       async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
-        // Per-extension disable overrides written by the plugins panel,
-        // overlaid with any per-turn `/plugins` overrides from the composer.
-        // The turn-level entries win because they're the user's most recent
-        // explicit intent. We filter the SDK's loaded extension list AFTER
-        // the loader has already executed each module; this preserves
-        // load-error diagnostics while preventing disabled extensions from
-        // contributing tools or handlers to the active session.
-        const persistedOverrides = readEnabledOverrides();
-        const turnOverrides = sessionOptions.extensionOverrides;
-        const isEnabled = (extPath: string, source: string | undefined) => {
-          // Turn-level override wins if either the path or the source is keyed.
-          if (extPath in turnOverrides) return turnOverrides[extPath];
-          if (source && source in turnOverrides) return turnOverrides[source];
-          if (persistedOverrides[extPath] === false) return false;
-          if (source && persistedOverrides[source] === false) return false;
-          return true;
-        };
         const services = await createAgentSessionServices({
           cwd,
           agentDir,
           resourceLoaderOptions: {
+            // Do not load user-installed Pi package/drop-in extensions from
+            // settings.json or auto-discovery. vLLM Studio only allows the
+            // first-party extension paths assembled below plus selected MCP
+            // servers through mcp-plugin.ts.
+            noExtensions: true,
             additionalSkillPaths: sessionOptions.skills,
             // Hand the SDK absolute paths so its jiti-based loader handles
             // .ts/.js resolution. We avoid pre-importing via `import(variable)`
             // because Next/webpack's static analyser refuses dynamic specifiers.
             additionalExtensionPaths: sessionOptions.extensionPaths,
             additionalPromptTemplatePaths: sessionOptions.promptTemplatePaths,
-            extensionsOverride: (base) => ({
-              ...base,
-              extensions: base.extensions.filter((ext) =>
-                isEnabled(ext.path, ext.sourceInfo?.source),
-              ),
-            }),
           },
         });
         const model = services.modelRegistry.find(providerId, backendModelId);
@@ -208,6 +202,7 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     this.currentPiSessionId = runtime.session.sessionId || desiredSessionId;
     this.currentFingerprint = fingerprint;
     this.unsubscribe = runtime.session.subscribe((event) => this.recordEvent(event));
+    this.normalizeCompactionBoundary(runtime.session);
   }
 
   async prompt(
@@ -216,6 +211,7 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     options: { streamingBehavior?: "steer" | "followUp"; images?: AgentImageInput[] } = {},
   ): Promise<void> {
     const session = this.requireSession();
+    this.normalizeCompactionBoundary(session);
     const listener = (logged: LoggedPiEvent) => onEvent(logged.event, logged.seq);
     this.on("loggedEvent", listener);
     this.activePromptCount += 1;
@@ -251,7 +247,9 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     if (this.activePromptCount > 0) {
       throw new Error("Cannot compact while the agent is running.");
     }
-    return this.requireSession().compact(customInstructions);
+    const result = await this.requireSession().compact(customInstructions);
+    this.markCompactionAcknowledged(result);
+    return result;
   }
 
   async abort(): Promise<void> {
@@ -267,9 +265,14 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
   }
 
   get status() {
+    const sdkSession = this.runtime?.session;
     return piStatusFromEvents({
       running: Boolean(this.runtime),
       activePromptCount: this.activePromptCount,
+      sdkActive:
+        Boolean(sdkSession?.isStreaming) ||
+        Boolean(sdkSession?.isCompacting) ||
+        (sdkSession?.pendingMessageCount ?? 0) > 0,
       modelId: this.currentModelId,
       cwd: this.currentCwd,
       piSessionId: this.currentPiSessionId,
@@ -293,7 +296,7 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     if (!usage) return null;
     const settings = session.settingsManager.getCompactionSettings();
     const tokens = typeof usage.tokens === "number" ? usage.tokens : null;
-    return {
+    const normalized = {
       tokens,
       contextWindow: usage.contextWindow,
       percent: typeof usage.percent === "number" ? usage.percent : null,
@@ -302,6 +305,15 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
           ? shouldCompact(tokens, usage.contextWindow, settings)
           : false,
     };
+    if (this.awaitingPostCompactionUsage) {
+      if (postCompactionUsageIsFresh(normalized, this.postCompactionTokensBefore)) {
+        this.awaitingPostCompactionUsage = false;
+        this.postCompactionTokensBefore = null;
+        return normalized;
+      }
+      return contextUsageAwaitingFreshCompactionUsage(usage);
+    }
+    return normalized;
   }
 
   getEventsAfter(seq: number): LoggedPiEvent[] {
@@ -323,6 +335,9 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     if (event.type === "session_info_changed" && this.runtime?.session.sessionId) {
       this.currentPiSessionId = this.runtime.session.sessionId;
     }
+    if (piEventIsSuccessfulCompaction(event as Record<string, unknown>)) {
+      this.markCompactionAcknowledged(event);
+    }
     const logged: LoggedPiEvent = {
       seq: ++this.eventSeq,
       event: event as PiEvent,
@@ -332,5 +347,22 @@ export class PiSdkSession extends EventEmitter implements PiAgentSession {
     if (this.eventLog.length > 2_000) this.eventLog.splice(0, this.eventLog.length - 2_000);
     this.emit("loggedEvent", logged);
     this.emit("event", event);
+  }
+
+  private markCompactionAcknowledged(source?: unknown): void {
+    this.awaitingPostCompactionUsage = true;
+    this.postCompactionTokensBefore =
+      compactionTokensBefore(source) ?? this.postCompactionTokensBefore;
+    this.normalizeCompactionBoundary(this.runtime?.session);
+  }
+
+  private normalizeCompactionBoundary(session: unknown): void {
+    const normalized = normalizeSdkMessageTimestampsForCompactionBoundary(session);
+    if (!normalized && !this.warnedCompactionBoundaryShape) {
+      this.warnedCompactionBoundaryShape = true;
+      console.warn(
+        "[vLLM Studio] Pi SDK compaction boundary guard could not inspect session messages; stale post-compaction usage may reappear after an SDK shape change.",
+      );
+    }
   }
 }

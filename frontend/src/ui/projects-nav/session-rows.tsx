@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 import { safeJson } from "@/lib/agent/safe-json";
 import { cleanSessionTitle } from "@/lib/agent/session/helpers";
@@ -9,7 +10,6 @@ import { useProjectSessionsReloadEffect } from "@/hooks/agent/use-projects-nav-s
 import {
   ACTIVE_AGENT_SESSION_OPEN_EVENT,
   ACTIVE_AGENT_SESSION_RENAME_EVENT,
-  NEW_AGENT_SESSION_EVENT,
 } from "@/lib/agent/workspace/events";
 import type { Project as ProjectEntry } from "@/lib/agent/projects/types";
 import { ChatIcon, Folder, FolderOpen, PlusIcon, TrashIcon } from "@/ui/icons";
@@ -30,6 +30,7 @@ export function ProjectRow({
   open,
   onToggle,
   onRemove,
+  onNewChatStart,
   activeSessions,
   prefs,
   excludedIds,
@@ -39,6 +40,7 @@ export function ProjectRow({
   open: boolean;
   onToggle: () => void;
   onRemove?: () => void;
+  onNewChatStart?: () => void;
   activeSessions: ActiveAgentSession[];
   prefs: SessionPrefs;
   excludedIds: ReadonlySet<string>;
@@ -75,7 +77,7 @@ export function ProjectRow({
               />
             </span>
           )}
-          <span className="truncate text-[13px] font-normal text-(--dim) transition-colors group-hover:text-(--fg)/85">
+          <span className="truncate text-[length:var(--fs-base)] font-normal text-(--dim) transition-colors group-hover:text-(--fg)/85">
             {project.name}
           </span>
           {!project.exists ? (
@@ -91,6 +93,7 @@ export function ProjectRow({
             projectId={project.id}
             label={`New chat in ${project.name}`}
             className="flex h-5 w-5 items-center justify-center text-(--dim)/55 hover:text-(--fg)/80"
+            onNavigateStart={onNewChatStart}
           />
         </div>
         {onRemove ? (
@@ -110,7 +113,7 @@ export function ProjectRow({
         ) : null}
       </div>
       {missingErrorVisible && !project.exists ? (
-        <div className="pl-12 pr-2 pb-1 text-[12px] text-red-400">
+        <div className="pl-12 pr-2 pb-1 text-[length:var(--fs-md)] text-red-400">
           <span>Folder not found at {project.path}</span>
           <button
             type="button"
@@ -216,9 +219,9 @@ export function ProjectSessions({
         />
       ))}
       {loading && !sessions ? (
-        <div className="pl-2 pr-2 py-0.5 text-[11px] text-(--dim)">Loading...</div>
+        <div className="pl-2 pr-2 py-0.5 text-[length:var(--fs-sm)] text-(--dim)">Loading...</div>
       ) : recent.length === 0 && visibleActiveSessions.length === 0 ? (
-        <div className="pl-2 pr-2 py-0.5 text-[11px] text-(--dim)">No chats</div>
+        <div className="pl-2 pr-2 py-0.5 text-[length:var(--fs-sm)] text-(--dim)">No chats</div>
       ) : (
         recent.map((session) => (
           <SessionRow
@@ -262,7 +265,15 @@ export function ActiveSessionRow({
       onOpen={() => {
         window.dispatchEvent(
           new CustomEvent(ACTIVE_AGENT_SESSION_OPEN_EVENT, {
-            detail: { paneId: session.paneId, tabId: session.tabId, mode: "focus" },
+            detail: {
+              paneId: session.paneId,
+              tabId: session.tabId,
+              piSessionId: session.piSessionId,
+              projectId: project.id,
+              cwd: session.cwd || project.path,
+              title: label,
+              mode: "focus",
+            },
           }),
         );
       }}
@@ -283,7 +294,7 @@ export function ActiveSessionRow({
       isRunning={session.status !== "idle" && session.status !== "done"}
       canDoubleClickRename
       menuIconClass="h-3.5 w-3.5"
-      renameInputClass="text-[10.5px]"
+      renameInputClass="text-[length:var(--fs-xs)]"
     />
   );
 }
@@ -339,20 +350,27 @@ export function NewChatPlusButton({
   projectId,
   label,
   className,
+  onNavigateStart,
 }: {
   projectId: string;
   label: string;
   className: string;
+  onNavigateStart?: () => void;
 }) {
+  const router = useRouter();
+  const href = `/agent?project=${encodeURIComponent(projectId)}&new=1`;
   return (
     <div className="relative flex items-center justify-center leading-none">
       <Link
-        href={`/agent?project=${encodeURIComponent(projectId)}&new=1`}
+        href={href}
         onClick={(event) => {
-          if (window.location.pathname !== "/agent") return;
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
           event.stopPropagation();
-          window.dispatchEvent(new CustomEvent(NEW_AGENT_SESSION_EVENT, { detail: { projectId } }));
+          onNavigateStart?.();
+          router.push(
+            `/agent?project=${encodeURIComponent(projectId)}&new=${Date.now().toString(36)}`,
+          );
         }}
         className={className}
         aria-label={label}

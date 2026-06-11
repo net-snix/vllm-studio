@@ -1,10 +1,10 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { Table, TBody, THead, TH, TRow } from "@/ui";
+import { HuggingFaceModelCardPanel, Table, TBody, THead, TH, TRow } from "@/ui";
 import type { HuggingFaceModel, ModelDownload } from "@/lib/types";
-import { normalizeModelId } from "../utils";
+import { originalModelKey } from "@/lib/huggingface";
 import { ModelRow } from "./discover-results/model-row";
 
 export function DiscoverResults({
@@ -42,11 +42,14 @@ export function DiscoverResults({
   onPauseDownload: (downloadId: string) => Promise<void>;
   onResumeDownload: (downloadId: string) => Promise<void>;
 }) {
-  const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([]);
-  const groupedModels = useMemo(() => {
+  const [selectedModelCard, setSelectedModelCard] = useState<{
+    model: HuggingFaceModel;
+    variants: HuggingFaceModel[];
+  } | null>(null);
+  const variantsByKey = useMemo(() => {
     const groups = new Map<string, HuggingFaceModel[]>();
     filteredModels.forEach((model) => {
-      const key = normalizeModelId(model.modelId) || model.modelId.toLowerCase();
+      const key = originalModelKey(model);
       const existing = groups.get(key);
       if (existing) {
         existing.push(model);
@@ -54,24 +57,8 @@ export function DiscoverResults({
         groups.set(key, [model]);
       }
     });
-
-    return Array.from(groups.entries()).map(([key, variants]) => {
-      const sortedVariants = [...variants].sort((left, right) => right.downloads - left.downloads);
-      return {
-        key,
-        lead: sortedVariants[0] as HuggingFaceModel,
-        variants: sortedVariants,
-      };
-    });
+    return groups;
   }, [filteredModels]);
-
-  const toggleGroup = (groupKey: string) => {
-    setExpandedGroupKeys((previous) =>
-      previous.includes(groupKey)
-        ? previous.filter((current) => current !== groupKey)
-        : [...previous, groupKey],
-    );
-  };
 
   if (error) {
     return (
@@ -107,8 +94,7 @@ export function DiscoverResults({
   return (
     <>
       <div className="text-xs text-(--dim) mb-3">
-        {groupedModels.length} {groupedModels.length === 1 ? "model" : "models"}
-        {groupedModels.length !== filteredModels.length && ` (${filteredModels.length} variants)`}
+        {filteredModels.length} {filteredModels.length === 1 ? "model" : "models"}
         {providerFilter && ` from ${providerFilter}`}
       </div>
 
@@ -126,45 +112,22 @@ export function DiscoverResults({
           </TRow>
         </THead>
         <TBody>
-          {groupedModels.map((group) => {
-            const expanded = expandedGroupKeys.includes(group.key);
+          {filteredModels.map((model) => {
+            const variants = variantsByKey.get(originalModelKey(model)) ?? [model];
             return (
-              <Fragment key={group.key}>
-                <ModelRow
-                  model={group.lead}
-                  copied={copiedId === group.lead.modelId}
-                  isLocal={isModelLocal(group.lead.modelId)}
-                  activeDownload={getDownloadForModel(group.lead.modelId)}
-                  isStarting={startingModelIds.has(group.lead.modelId)}
-                  onCopyModelId={onCopyModelId}
-                  onStartDownload={onStartDownload}
-                  onPauseDownload={onPauseDownload}
-                  onResumeDownload={onResumeDownload}
-                  variantCount={group.variants.length}
-                  expanded={expanded}
-                  onToggleExpand={
-                    group.variants.length > 1 ? () => toggleGroup(group.key) : undefined
-                  }
-                />
-                {expanded &&
-                  group.variants
-                    .slice(1)
-                    .map((model) => (
-                      <ModelRow
-                        key={model._id}
-                        model={model}
-                        copied={copiedId === model.modelId}
-                        isLocal={isModelLocal(model.modelId)}
-                        activeDownload={getDownloadForModel(model.modelId)}
-                        isStarting={startingModelIds.has(model.modelId)}
-                        onCopyModelId={onCopyModelId}
-                        onStartDownload={onStartDownload}
-                        onPauseDownload={onPauseDownload}
-                        onResumeDownload={onResumeDownload}
-                        child
-                      />
-                    ))}
-              </Fragment>
+              <ModelRow
+                key={model._id || model.modelId}
+                model={model}
+                copied={copiedId === model.modelId}
+                isLocal={isModelLocal(model.modelId)}
+                activeDownload={getDownloadForModel(model.modelId)}
+                isStarting={startingModelIds.has(model.modelId)}
+                onCopyModelId={onCopyModelId}
+                onStartDownload={onStartDownload}
+                onPauseDownload={onPauseDownload}
+                onResumeDownload={onResumeDownload}
+                onOpenModelCard={() => setSelectedModelCard({ model, variants })}
+              />
             );
           })}
         </TBody>
@@ -188,6 +151,12 @@ export function DiscoverResults({
           </button>
         </div>
       )}
+      <HuggingFaceModelCardPanel
+        open={Boolean(selectedModelCard)}
+        model={selectedModelCard?.model ?? null}
+        variants={selectedModelCard?.variants ?? []}
+        onClose={() => setSelectedModelCard(null)}
+      />
     </>
   );
 }

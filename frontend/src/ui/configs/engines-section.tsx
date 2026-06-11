@@ -1,33 +1,32 @@
 "use client";
 
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { ArrowUpCircle, Check, Loader2, Settings, XCircle } from "lucide-react";
+import { ArrowUpCircle, Check, Loader2, XCircle } from "lucide-react";
 import { useRealtimeStatus } from "@/hooks/use-realtime-status";
 import api from "@/lib/api";
 import type { EngineJob, RuntimeBackendInfo, RuntimeTarget, SystemRuntimeInfo } from "@/lib/types";
 import {
+  ENGINE_META,
+  MANAGED_RUNTIME_BACKENDS,
+  ManagedRuntimeInstallRows,
+  RowDetailLine,
+  RuntimeTargetRows,
+  RuntimeTargetStatus,
   SettingsButton,
   SettingsGroup,
   SettingsRow,
   SettingsValue,
   StatusPill,
-  type StatusTone,
+  isManagedRuntimeTarget,
+  type ManagedRuntimeInstallBackend,
 } from "@/ui";
 import {
-  ENGINE_META,
   hasHydratedEngineRows,
   resolveEngineRowsView,
   type EngineRowsView,
 } from "./engines-section-model";
 
 type UpgradeState = { status: "idle" | "upgrading" | "success" | "error"; message?: string };
-
-const isRunningJob = (job: EngineJob | undefined): boolean =>
-  job?.status === "queued" || job?.status === "running";
-
-const jobForTarget = (jobs: EngineJob[], target: RuntimeTarget): EngineJob | undefined =>
-  jobs.find((job) => job.targetId === target.id && isRunningJob(job)) ??
-  jobs.find((job) => job.targetId === target.id);
 
 export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null }) {
   const { runtimeSummary, status, lease } = useRealtimeStatus();
@@ -65,7 +64,7 @@ export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null
     <div className="space-y-8">
       <SettingsGroup
         title="Inference engines"
-        description="Codex-style status rows instead of install cards; each row keeps an action or a fallback."
+        description="Model-serving runtimes installed on the controller host."
         actions={<HydrationStatus hasRows={hasRows} />}
       >
         <EngineRows
@@ -78,7 +77,7 @@ export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null
 
       <SettingsGroup
         title="Hardware monitor"
-        description="GPU telemetry rows stay visible even before live samples arrive."
+        description="GPU telemetry and lease state reported by the controller."
       >
         <GpuMonitoringRow gpuMon={gpuMon} />
         <GpuLeaseRow holder={lease?.holder} />
@@ -90,16 +89,18 @@ export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null
 const getEnginesSectionSnapshot = (): number => 0;
 
 function HydrationStatus({ hasRows }: { hasRows: boolean }) {
-  return (
-    <StatusPill tone={hasRows ? "good" : "info"}>{hasRows ? "hydrated" : "waiting"}</StatusPill>
-  );
+  // Nothing to announce once the data is in — the rows speak for themselves, and
+  // the page header already shows controller sync. Only surface a quiet hint
+  // while the first payload is still loading.
+  if (hasRows) return null;
+  return <StatusPill tone="info">Loading…</StatusPill>;
 }
 
 function GpuMonitoringRow({ gpuMon }: { gpuMon?: SystemRuntimeInfo["gpu_monitoring"] }) {
   return (
     <SettingsRow
       label="GPU monitoring"
-      description="nvidia-smi, amd-smi, or rocm-smi discovery from the controller."
+      description="nvidia-smi, amd-smi, rocm-smi, or Intel sysfs discovery from the controller."
       value={<SettingsValue mono>{gpuMonitorValue(gpuMon)}</SettingsValue>}
       status={
         <StatusPill tone={gpuMon?.available ? "good" : "warning"}>
@@ -139,15 +140,45 @@ function EngineRows({
   onJobCreated: () => Promise<void>;
   view: EngineRowsView;
 }) {
+  const handleTargetAction = useCallback(
+    async (target: RuntimeTarget) => {
+      await api.createRuntimeJob({
+        backend: target.backend,
+        targetId: target.id,
+        type: target.installed ? "update" : "install",
+      });
+      await onJobCreated();
+    },
+    [onJobCreated],
+  );
+  const handleManagedInstall = useCallback(
+    async (backend: ManagedRuntimeInstallBackend) => {
+      await api.createRuntimeJob({ backend, type: "install" });
+      await onJobCreated();
+    },
+    [onJobCreated],
+  );
+
   if (view.kind === "targets") {
-    return view.targets.map((target) => (
-      <RuntimeTargetRow
-        key={target.id}
-        target={target}
-        job={jobForTarget(jobs, target)}
-        onJobCreated={onJobCreated}
-      />
-    ));
+    const discoveredTargets = view.targets.filter((target) => !isManagedRuntimeTarget(target));
+    return (
+      <>
+        <ManagedRuntimeInstallRows
+          backends={MANAGED_RUNTIME_BACKENDS}
+          targets={view.targets}
+          jobs={jobs}
+          onInstall={handleManagedInstall}
+          onUpdateTarget={handleTargetAction}
+        />
+        {discoveredTargets.length > 0 ? (
+          <RuntimeTargetRows
+            targets={discoveredTargets}
+            jobs={jobs}
+            onAction={handleTargetAction}
+          />
+        ) : null}
+      </>
+    );
   }
   if (view.kind === "backends") {
     return view.rows.map(({ id, info }) => (
@@ -163,81 +194,6 @@ function EngineRows({
       status={<StatusPill tone="info">pending</StatusPill>}
     />
   ));
-}
-
-function RuntimeTargetRow({
-  target,
-  job,
-  onJobCreated,
-}: {
-  target: RuntimeTarget;
-  job?: EngineJob;
-  onJobCreated: () => Promise<void>;
-}) {
-  const meta = ENGINE_META[target.backend] ?? {
-    label: target.backend,
-    description: "Runtime target",
-  };
-  const running = isRunningJob(job);
-  const action = target.capabilities.canUpdate
-    ? target.installed
-      ? "Update"
-      : "Install"
-    : "Configure";
-  const actionDisabled = running || !target.capabilities.canUpdate;
-  const disabledReason = !target.capabilities.canUpdate
-    ? (target.health.message ?? "Updates are unsupported for this target.")
-    : undefined;
-
-  const handleAction = useCallback(async () => {
-    if (actionDisabled) return;
-    await api.createRuntimeJob({
-      backend: target.backend,
-      targetId: target.id,
-      type: target.installed ? "update" : "install",
-    });
-    await onJobCreated();
-  }, [actionDisabled, onJobCreated, target.backend, target.id, target.installed]);
-
-  return (
-    <SettingsRow
-      label={target.label || meta.label}
-      description={`${meta.description} · ${target.kind} · ${target.source}`}
-      value={
-        <SettingsValue mono>
-          {target.installed ? (target.version ?? "installed") : "not installed"}
-          {pathForTarget(target) ? ` · ${pathForTarget(target)}` : ""}
-        </SettingsValue>
-      }
-      status={
-        <EngineStatus
-          installed={target.installed}
-          active={target.active}
-          health={target.health.status}
-        />
-      }
-      actions={
-        <SettingsButton
-          onClick={() => void handleAction()}
-          disabled={actionDisabled}
-          title={disabledReason}
-        >
-          {running ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : target.capabilities.canUpdate ? (
-            <ArrowUpCircle className="h-3 w-3" />
-          ) : (
-            <Settings className="h-3 w-3" />
-          )}
-          {running ? job?.status : action}
-        </SettingsButton>
-      }
-    >
-      {job ? <JobMessage job={job} /> : null}
-      {target.update ? <UpdateDetails update={target.update} /> : null}
-      {disabledReason ? <p className="text-[11px] text-(--dim)">{disabledReason}</p> : null}
-    </SettingsRow>
-  );
 }
 
 function BackendRow({
@@ -268,10 +224,11 @@ function BackendRow({
 
   return (
     <SettingsRow
+      variant="resource"
       label={meta.label}
       description={meta.description}
       value={
-        <SettingsValue mono>
+        <SettingsValue mono truncate>
           {info.installed ? (info.version ?? "installed") : "not installed"}
         </SettingsValue>
       }
@@ -297,90 +254,21 @@ function BackendRow({
       }
     >
       {info.python_path || info.binary_path ? (
-        <SettingsValue mono dim>
+        <RowDetailLine mono truncate size="md">
           {info.python_path ?? info.binary_path}
-        </SettingsValue>
+        </RowDetailLine>
       ) : null}
       {state.status === "error" && state.message ? (
-        <p className="truncate text-[11px] text-(--err)">{state.message}</p>
+        <RowDetailLine tone="danger" truncate>
+          {state.message}
+        </RowDetailLine>
       ) : null}
     </SettingsRow>
   );
 }
 
-function EngineStatus({
-  installed,
-  active,
-  health,
-}: {
-  installed: boolean;
-  active?: boolean;
-  health?: RuntimeTarget["health"]["status"];
-}) {
-  const tone: StatusTone = active
-    ? "good"
-    : health === "error"
-      ? "danger"
-      : installed
-        ? "info"
-        : "default";
-  const label = active
-    ? "active"
-    : health === "error"
-      ? "error"
-      : installed
-        ? "installed"
-        : "available";
-  return <StatusPill tone={tone}>{label}</StatusPill>;
-}
-
-function JobMessage({ job }: { job: EngineJob }) {
-  return (
-    <div
-      className={`space-y-1 text-[12px] ${job.status === "error" ? "text-(--err)/80" : "text-(--dim)/60"}`}
-    >
-      <p>{job.message}</p>
-      {job.command ? <p className="truncate font-mono">{job.command}</p> : null}
-      {job.error || job.outputTail ? (
-        <p className="line-clamp-3 whitespace-pre-wrap font-mono">{job.error ?? job.outputTail}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function UpdateDetails({ update }: { update: NonNullable<RuntimeTarget["update"]> }) {
-  return (
-    <div className="grid gap-1.5 border-t border-(--border)/[0.06] pt-3 text-[12px] text-(--dim)/60">
-      <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px]">
-        <span>current {update.currentVersion ?? "unknown"}</span>
-        <span>target {update.targetVersion}</span>
-        <span>{update.restartRequired ? "restart required" : "no restart"}</span>
-      </div>
-      <div className="font-mono text-[11px]">{update.packageSpec}</div>
-      <div className="flex flex-wrap gap-1">
-        {update.changes.map((change) => (
-          <span
-            key={change}
-            className="rounded border border-(--border)/[0.08] px-1.5 py-[1px] text-[11px]"
-          >
-            {change}
-          </span>
-        ))}
-      </div>
-      <a
-        href={update.releaseNotesUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="w-fit text-[12px] text-(--accent)/80 hover:underline"
-      >
-        release notes
-      </a>
-    </div>
-  );
-}
-
-function pathForTarget(target: RuntimeTarget) {
-  return target.pythonPath ?? target.binaryPath ?? target.dockerImage ?? "";
+function EngineStatus({ installed, active }: { installed: boolean; active?: boolean }) {
+  return <RuntimeTargetStatus installed={installed} active={active} />;
 }
 
 function upgradeHandler(id: string) {

@@ -1,10 +1,8 @@
 import { NextRequest } from "next/server";
 import {
-  type ComposerExtensionOverride,
   type ComposerPluginRef,
   type ComposerPromptTemplateRef,
   type ComposerSkillRef,
-  sanitizeComposerExtensionOverrides,
   sanitizeComposerPlugins,
   sanitizeComposerPromptTemplates,
   sanitizeComposerSkills,
@@ -23,11 +21,11 @@ type CompactRequest = {
   customInstructions?: string;
   browserToolEnabled?: boolean;
   browserSessionId?: string;
+  browserBackend?: "embedded" | "parchi";
   canvasEnabled?: boolean;
   plugins?: ComposerPluginRef[];
   skills?: ComposerSkillRef[];
   promptTemplates?: ComposerPromptTemplateRef[];
-  extensionOverrides?: ComposerExtensionOverride[];
 };
 
 function compactInstructions(
@@ -60,16 +58,15 @@ export async function POST(request: NextRequest) {
     const plugins = sanitizeComposerPlugins(body.plugins);
     const skills = sanitizeComposerSkills(body.skills);
     const promptTemplates = sanitizeComposerPromptTemplates(body.promptTemplates);
-    const extensionOverrides = sanitizeComposerExtensionOverrides(body.extensionOverrides);
     await session.ensureStarted(modelId, cwd, piSessionId, {
       browserToolEnabled: body.browserToolEnabled === true,
       browserSessionId:
         typeof body.browserSessionId === "string" ? body.browserSessionId.trim() : undefined,
+      browserBackend: body.browserBackend === "embedded" ? "embedded" : "parchi",
       canvasEnabled: body.canvasEnabled === true,
       plugins,
       skills,
       promptTemplates,
-      extensionOverrides,
     });
     const result = await session.compact(
       compactInstructions(plugins, skills, body.customInstructions),

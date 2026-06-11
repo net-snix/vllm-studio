@@ -11,17 +11,33 @@ import {
 } from "lucide-react";
 import type { HuggingFaceModel, ModelDownload } from "@/lib/types";
 import { formatBytes, formatNumber } from "@/lib/formatters";
-import { ModelButton, ModelRow, ModelStatus, type ModelStatusTone } from "@/ui";
+import { ModelButton, ModelLogo, ModelRow, ModelStatus, type ModelStatusTone } from "@/ui";
 import { extractProvider, extractQuantizations } from "@/ui/discover/utils";
+import type { ModelFit } from "./hardware-profile";
 
-function ExploreVramCell({ needGb, poolGb }: { needGb: number | null; poolGb: number }) {
+function ExploreVramCell({
+  needGb,
+  poolGb,
+  fit,
+}: {
+  needGb: number | null;
+  poolGb: number;
+  fit?: ModelFit;
+}) {
   if (needGb == null || !Number.isFinite(needGb)) {
-    return <span className="text-xs text-(--dim)">—</span>;
+    return (
+      <span className="text-xs text-(--dim)" title={fit?.reason}>
+        —
+      </span>
+    );
   }
   const label = needGb < 10 ? needGb.toFixed(1) : Math.round(needGb).toString();
   if (poolGb <= 0) {
     return (
-      <span className="text-xs text-(--dim)" title="Rough weight estimate from name and tags">
+      <span
+        className="text-xs text-(--dim)"
+        title={fit?.reason ?? "Rough weight estimate from name and tags"}
+      >
         ~{label} GB
       </span>
     );
@@ -30,7 +46,7 @@ function ExploreVramCell({ needGb, poolGb }: { needGb: number | null; poolGb: nu
   return (
     <span
       className={`text-xs ${over ? "text-(--err)" : "text-(--dim)"}`}
-      title="Estimated footprint vs pooled GPU VRAM (recipe data when available, else heuristic)"
+      title={fit?.reason ?? "Estimated footprint vs pooled GPU VRAM"}
     >
       ~{label} / {Math.round(poolGb)} GB
     </span>
@@ -53,6 +69,8 @@ export const ExploreModelRow = memo(function ExploreModelRow({
   displayLikes,
   weightEstimateGb,
   pooledVramGb,
+  fit,
+  onOpenModelCard,
 }: {
   model: HuggingFaceModel;
   isLocal: boolean;
@@ -70,6 +88,8 @@ export const ExploreModelRow = memo(function ExploreModelRow({
   displayLikes?: number;
   weightEstimateGb?: number | null;
   pooledVramGb: number;
+  fit?: ModelFit;
+  onOpenModelCard?: () => void;
 }) {
   const provider = useMemo(() => extractProvider(model.modelId), [model.modelId]);
   const quants = useMemo(() => extractQuantizations(model.tags), [model.tags]);
@@ -87,17 +107,30 @@ export const ExploreModelRow = memo(function ExploreModelRow({
     <ModelRow
       label={rowLabel(model.modelId, child)}
       description={rowDescription(provider, variantCount, child)}
+      onClick={onOpenModelCard}
+      highlight={
+        fit && !child && (fit.status === "best" || fit.status === "fits") ? "success" : "none"
+      }
       value={
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-(--dim)">
-          <span className="font-mono text-(--fg)">
-            {quants.length ? quants.join(", ") : "format unknown"}
-          </span>
-          <ExploreVramCell needGb={weightEstimateGb ?? null} poolGb={pooledVramGb} />
-          <span>{formatNumber(displayDownloads ?? model.downloads)} downloads</span>
-          <span>{formatNumber(displayLikes ?? model.likes)} likes</span>
+        <div className="flex min-w-0 items-center gap-3">
+          <ModelLogo modelId={model.modelId} author={model.author} size={child ? "sm" : "md"} />
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[length:var(--fs-md)] text-(--dim)">
+              <span className="font-mono text-(--fg)">
+                {quants.length ? quants.join(", ") : child ? "derivative" : "original"}
+              </span>
+              <ExploreVramCell needGb={weightEstimateGb ?? null} poolGb={pooledVramGb} fit={fit} />
+              <span>{formatNumber(displayDownloads ?? model.downloads)} downloads</span>
+              <span>{formatNumber(displayLikes ?? model.likes)} likes</span>
+            </div>
+          </div>
         </div>
       }
-      status={<ModelStatus tone={download.tone}>{download.label}</ModelStatus>}
+      status={
+        <div className="flex flex-col items-end gap-0.5">
+          <ModelStatus tone={download.tone}>{download.label}</ModelStatus>
+        </div>
+      }
       actions={
         <ExploreModelActions
           modelId={model.modelId}
@@ -117,7 +150,7 @@ export const ExploreModelRow = memo(function ExploreModelRow({
     >
       {activeDownload ? (
         <div
-          className="text-[11px] text-(--dim)"
+          className="text-[length:var(--fs-sm)] text-(--dim)"
           title={`Server path: ${activeDownload.target_dir}`}
         >
           {formatBytes(activeDownload.downloaded_bytes)} / {formatBytes(activeDownload.total_bytes)}{" "}
@@ -178,7 +211,7 @@ function ExploreModelActions({
         href={`https://huggingface.co/${modelId}`}
         target="_blank"
         rel="noopener noreferrer"
-        className="inline-flex h-7 items-center justify-center rounded-md px-2 text-[11px] text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
+        className="inline-flex h-7 items-center justify-center rounded-md px-2 text-[length:var(--fs-sm)] text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
         title="Open on Hugging Face"
       >
         <ExternalLink className="h-3 w-3" />
@@ -247,5 +280,5 @@ function rowLabel(modelId: string, child?: boolean) {
 }
 
 function rowDescription(provider: string, variantCount: number, child?: boolean) {
-  return `${provider}${variantCount > 1 && !child ? ` · ${variantCount} variants` : ""}`;
+  return `${provider}${variantCount > 1 && !child ? ` · ${variantCount - 1} quantized variants` : ""}`;
 }

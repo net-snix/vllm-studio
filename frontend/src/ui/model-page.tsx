@@ -5,6 +5,7 @@ import { StatusPill, type UiTone } from "./status";
 import { cx } from "./utils";
 
 export type ModelStatusTone = UiTone;
+export type ModelRowHighlight = "none" | "success";
 
 type ModelRowProps = {
   label: string;
@@ -14,6 +15,9 @@ type ModelRowProps = {
   status?: ReactNode;
   actions?: ReactNode;
   children?: ReactNode;
+  highlight?: ModelRowHighlight;
+  className?: string;
+  onClick?: () => void;
 };
 
 export function ModelSection({
@@ -31,9 +35,9 @@ export function ModelSection({
     <section className="min-w-0">
       <div className="flex min-h-9 items-end justify-between gap-4 border-b border-(--ui-border)/75 pb-2">
         <div className="min-w-0">
-          <h3 className="text-[12px] font-medium text-(--ui-fg)">{title}</h3>
+          <h3 className="text-[length:var(--fs-md)] font-medium text-(--ui-fg)">{title}</h3>
           {description ? (
-            <p className="mt-0.5 text-[11px] text-(--ui-muted)">{description}</p>
+            <p className="mt-0.5 text-[length:var(--fs-sm)] text-(--ui-muted)">{description}</p>
           ) : null}
         </div>
         {actions ? <div className="shrink-0">{actions}</div> : null}
@@ -51,26 +55,75 @@ export function ModelRow({
   status,
   actions,
   children,
+  highlight = "none",
+  className,
+  onClick,
 }: ModelRowProps) {
+  const interactive = Boolean(onClick);
   return (
-    <div className="group px-1 py-2.5 transition-colors hover:bg-(--ui-hover)/35">
+    <div
+      className={cx(
+        "group px-1 py-2.5 transition-colors hover:bg-(--ui-hover)/35",
+        interactive
+          ? "cursor-pointer rounded-md focus:outline-none focus:ring-1 focus:ring-(--ui-info)/45"
+          : "",
+        highlight === "success" ? "model-row-shine" : "",
+        className,
+      )}
+      onClick={onClick}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onClick?.();
+              }
+            }
+          : undefined
+      }
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+    >
       <div className="grid min-h-7 grid-cols-1 gap-2 md:grid-cols-[minmax(150px,0.44fr)_minmax(0,1fr)] md:items-center md:gap-5">
         <div className="min-w-0">
-          <div className="truncate text-[12px] font-medium text-(--ui-fg)" title={label}>
+          <div
+            className="truncate text-[length:var(--fs-md)] font-medium text-(--ui-fg)"
+            title={label}
+          >
             {label}
           </div>
           {description ? (
-            <div className="mt-0.5 truncate text-[11px] text-(--ui-muted)" title={description}>
+            <div
+              className="mt-0.5 truncate text-[length:var(--fs-sm)] text-(--ui-muted)"
+              title={description}
+            >
               {description}
             </div>
           ) : null}
         </div>
         <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
+          <div
+            className="min-w-0 flex-1"
+            onClick={control && interactive ? (event) => event.stopPropagation() : undefined}
+          >
             {control ?? value ?? <ModelValue dim>Not reported yet</ModelValue>}
           </div>
-          {status ? <div className="shrink-0">{status}</div> : null}
-          {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
+          {status ? (
+            <div
+              className="shrink-0"
+              onClick={interactive ? (event) => event.stopPropagation() : undefined}
+            >
+              {status}
+            </div>
+          ) : null}
+          {actions ? (
+            <div
+              className="flex shrink-0 items-center gap-1"
+              onClick={interactive ? (event) => event.stopPropagation() : undefined}
+            >
+              {actions}
+            </div>
+          ) : null}
         </div>
       </div>
       {children ? <div className="mt-2 md:ml-[calc(150px+1.25rem)]">{children}</div> : null}
@@ -90,7 +143,7 @@ export function ModelValue({
   return (
     <div
       className={cx(
-        "truncate text-[12px]",
+        "truncate text-[length:var(--fs-md)]",
         mono ? "font-mono" : "",
         dim ? "text-(--ui-muted)" : "text-(--ui-fg)",
       )}
@@ -109,7 +162,7 @@ export function ModelStatus({
   children: ReactNode;
 }) {
   return (
-    <StatusPill tone={tone} variant="dot" className="text-[10px]">
+    <StatusPill tone={tone} variant="dot" className="text-[length:var(--fs-xs)]">
       {children}
     </StatusPill>
   );
@@ -143,7 +196,7 @@ export function ModelButton({
       disabled={disabled}
       title={title}
       className={cx(
-        "inline-flex h-6 items-center justify-center gap-1.5 rounded-md px-1.5 text-[11px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
+        "inline-flex h-6 items-center justify-center gap-1.5 rounded-md px-1.5 text-[length:var(--fs-sm)] font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
         classes,
       )}
     >
@@ -172,7 +225,7 @@ export function ModelInput({
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
       className={cx(
-        "h-7 w-full rounded-md border border-transparent bg-(--ui-surface) px-2.5 text-[12px] text-(--ui-fg) outline-none transition placeholder:text-(--ui-muted)/65 focus:bg-(--ui-bg) focus:ring-1 focus:ring-(--ui-info)/60",
+        "h-7 w-full rounded-md border border-transparent bg-(--ui-surface) px-2.5 text-[length:var(--fs-md)] text-(--ui-fg) outline-none transition placeholder:text-(--ui-muted)/65 focus:bg-(--ui-bg) focus:ring-1 focus:ring-(--ui-info)/60",
         className,
       )}
     />

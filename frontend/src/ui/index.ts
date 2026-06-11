@@ -11,6 +11,12 @@ export type { SpinnerProps, SpinnerSize } from "./spinner";
 export { EmptyState } from "./empty-state";
 export type { EmptyStateProps } from "./empty-state";
 
+export { FactGrid } from "./fact-grid";
+export type { FactGridColumns, FactGridItem, FactGridVariant } from "./fact-grid";
+export { MarkdownContent } from "./markdown-content";
+export { RightDetailPanel } from "./right-detail-panel";
+export type { RightDetailPanelProps } from "./right-detail-panel";
+
 // Form Controls
 export { Input } from "./input";
 export type { InputProps } from "./input";
@@ -66,10 +72,50 @@ export type { TableProps, THeadProps, TBodyProps, TRowProps, THProps, TCellProps
 export { AppPage, PageHeader, SectionNav, RefreshIconButton } from "./page";
 export type { SectionNavItem } from "./page";
 
-export { ListGroup, ListRow, RowValue, EmptySafeNotice, KeyValueRow } from "./list";
+export {
+  ListGroup,
+  ListRow,
+  RowDetailLine,
+  RowFacts,
+  RowValue,
+  EmptySafeNotice,
+  KeyValueRow,
+} from "./list";
+export type { RowFact } from "./list";
+
+export { Toggle } from "./toggle";
+export { Slider } from "./slider";
+export { SegmentedControl } from "./segmented-control";
+export type { SegmentedItem } from "./segmented-control";
+export { ColorField } from "./color-field";
 
 export { StatusDot, StatusPill } from "./status";
 export type { UiTone, StatusPillVariant } from "./status";
+
+export {
+  ENGINE_META,
+  MANAGED_RUNTIME_BACKENDS,
+  ManagedRuntimeInstallRows,
+  RuntimeTargetRows,
+  RuntimeTargetStatus,
+  isManagedRuntimeTarget,
+  isRunningEngineJob,
+  jobForRuntimeTarget,
+} from "./runtime-targets";
+export type { ManagedRuntimeInstallBackend } from "./runtime-targets";
+
+export { ModelLogo } from "./model-logo";
+export { HuggingFaceModelCardPanel } from "./huggingface-model-card";
+export { AgentModelPicker } from "./agent-model-picker";
+export { AgentQueuePanel } from "./agent-queue-panel";
+export { AgentAttachmentTray } from "./agent-attachment-tray";
+export type { AgentComposerAttachment } from "./agent-attachment-tray";
+export { AgentComposerActions } from "./agent-composer-actions";
+export { AgentComposerTextArea } from "./agent-composer-textarea";
+export { AgentChatPaneHeader } from "./agent-chat-pane-header";
+export { AgentComposerStatusBar } from "./agent-composer-status-bar";
+export { AgentLoadedContextTabs, AgentMentionPicker } from "./agent-composer-context";
+export type { FileMentionRow, MentionRow } from "./agent-composer-context";
 
 export { LeftSidebar } from "./left-sidebar";
 export { ModelStopConfirm } from "./model-stop-confirm";
@@ -85,13 +131,22 @@ export { SessionsCommand } from "./sessions-command";
 // Page-specialized adapters kept in /ui so library swaps happen in one place.
 export {
   SettingsLayout,
+  SettingsFactRows,
   SettingsGroup,
   SettingsRow,
   SettingsValue,
   SettingsButton,
   SettingsInput,
+  SettingsTextarea,
+  SettingsNotice,
+  SettingsActions,
 } from "./settings";
-export type { SettingsSectionDef, SettingsSectionId, StatusTone } from "./settings";
+export type {
+  SettingsFactRow,
+  SettingsSectionDef,
+  SettingsSectionId,
+  StatusTone,
+} from "./settings";
 
 export {
   ModelSection,

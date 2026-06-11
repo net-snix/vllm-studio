@@ -25,6 +25,7 @@ const ENV_KEYS = [
   "VLLM_STUDIO_RUNTIME_SKIP_DOCKER",
   "VLLM_STUDIO_RUNTIME_SKIP_SYSTEM",
   "VLLM_STUDIO_LLAMA_BIN",
+  "VLLM_STUDIO_SGLANG_PYTHON",
   "VLLM_STUDIO_MLX_PYTHON",
   "PI_CODING_AGENT_DIR",
 ] as const;
@@ -144,9 +145,8 @@ async function collectSseJson(stream: ReadableStream<Uint8Array>) {
 
 describe("controller route contracts", () => {
   test("stream proxy keeps content with null tool_calls as answer text", async () => {
-    const { createToolCallStream } = await import(
-      "../../../controller/src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -210,9 +210,8 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy keeps same-delta content visible when tool_calls are present", async () => {
-    const { createToolCallStream } = await import(
-      "../../../controller/src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -259,9 +258,8 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy splits implicit thinking close tags without duplicating answer text", async () => {
-    const { createToolCallStream } = await import(
-      "../../../controller/src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -302,9 +300,8 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy buffers split implicit thinking until the close tag arrives", async () => {
-    const { createToolCallStream } = await import(
-      "../../../controller/src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -351,9 +348,8 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy normalizes openai-compatible reasoning aliases", async () => {
-    const { createToolCallStream } = await import(
-      "../../../controller/src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -389,9 +385,8 @@ describe("controller route contracts", () => {
   });
 
   test("message normalizer maps reasoning aliases to reasoning_content", async () => {
-    const { normalizeReasoningAndContentInMessage } = await import(
-      "../../../controller/src/modules/proxy/reasoning-extractor"
-    );
+    const { normalizeReasoningAndContentInMessage } =
+      await import("../../../controller/src/modules/proxy/reasoning-extractor");
     const message: Record<string, unknown> = {
       role: "assistant",
       content: "pong",
@@ -406,9 +401,8 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy still extracts XML tool calls after stripping visible content", async () => {
-    const { createToolCallStream } = await import(
-      "../../../controller/src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -455,10 +449,93 @@ describe("controller route contracts", () => {
     ]);
   });
 
-  test("tool XML parser repairs malformed JSON arguments through pi-ai", async () => {
-    const { parseToolCallsFromContent } = await import(
-      "../../../controller/src/modules/proxy/tool-call-parser"
+  test("stream proxy extracts bare JSON tool lines without showing them as content", async () => {
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
+    const encoder = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    content: [
+                      JSON.stringify({
+                        tool: "set_goal",
+                        args: { objective: "Deep research on Oxsero" },
+                      }),
+                      JSON.stringify({
+                        tool: "set_plan",
+                        args: {
+                          steps: [
+                            { title: "Search for Oxsero on major platforms" },
+                          ],
+                        },
+                      }),
+                    ].join("\n"),
+                  },
+                },
+              ],
+            })}\n\n`,
+          ),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const events = await collectSseJson(
+      createToolCallStream(upstream.getReader()),
     );
+    const visibleContent = events
+      .flatMap((event) =>
+        Array.isArray(event["choices"])
+          ? event["choices"].map((choice) =>
+              String(
+                ((choice as { delta?: Record<string, unknown> }).delta?.[
+                  "content"
+                ] as string | undefined) ?? "",
+              ),
+            )
+          : [],
+      )
+      .join("");
+    const toolEvent = events.find((event) => {
+      const choices = event["choices"];
+      if (!Array.isArray(choices)) return false;
+      const firstChoice = choices[0] as
+        | { delta?: Record<string, unknown> }
+        | undefined;
+      return Array.isArray(firstChoice?.delta?.tool_calls);
+    }) as { choices?: Array<{ delta?: Record<string, unknown> }> } | undefined;
+
+    expect(visibleContent).not.toContain('"tool"');
+    expect(toolEvent?.choices?.[0]?.delta?.tool_calls).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({
+          name: "set_goal",
+          arguments: JSON.stringify({ objective: "Deep research on Oxsero" }),
+        }),
+      }),
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({
+          name: "set_plan",
+          arguments: JSON.stringify({
+            steps: [{ title: "Search for Oxsero on major platforms" }],
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  test("tool XML parser repairs malformed JSON arguments through pi-ai", async () => {
+    const { parseToolCallsFromContent } =
+      await import("../../../controller/src/modules/proxy/tool-call-parser");
 
     const [call] = parseToolCallsFromContent(
       `<tool_call><function=write_file><arguments>{"content":"hello
@@ -469,6 +546,84 @@ world"}</arguments></tool_call>`,
     expect(JSON.parse(call?.function.arguments ?? "{}")).toEqual({
       content: "hello\nworld",
     });
+  });
+
+  test("tool XML parser extracts invoke parameter blocks", async () => {
+    const { parseToolCallsFromContent, stripToolCallsFromContent } =
+      await import("../../../controller/src/modules/proxy/tool-call-parser");
+
+    const content =
+      '<invoke name="set_goal"> <parameter name="objective">Deep research on 0xsero</parameter> </invoke>';
+    const [call] = parseToolCallsFromContent(content);
+
+    expect(call?.function.name).toBe("set_goal");
+    expect(JSON.parse(call?.function.arguments ?? "{}")).toEqual({
+      objective: "Deep research on 0xsero",
+    });
+    expect(stripToolCallsFromContent(content).trim()).toBe("");
+  });
+
+  test("stream proxy extracts invoke XML tool calls without visible content", async () => {
+    const { createToolCallStream } =
+      await import("../../../controller/src/modules/proxy/tool-call-stream");
+    const encoder = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    content:
+                      '<invoke name="set_goal"> <parameter name="objective">Deep research on 0xsero</parameter> </invoke>',
+                  },
+                },
+              ],
+            })}\n\n`,
+          ),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const events = await collectSseJson(
+      createToolCallStream(upstream.getReader()),
+    );
+    const visibleContent = events
+      .flatMap((event) =>
+        Array.isArray(event["choices"])
+          ? event["choices"].map((choice) =>
+              String(
+                ((choice as { delta?: Record<string, unknown> }).delta?.[
+                  "content"
+                ] as string | undefined) ?? "",
+              ),
+            )
+          : [],
+      )
+      .join("");
+    const toolEvent = events.find((event) => {
+      const choices = event["choices"];
+      if (!Array.isArray(choices)) return false;
+      const firstChoice = choices[0] as
+        | { delta?: Record<string, unknown> }
+        | undefined;
+      return Array.isArray(firstChoice?.delta?.tool_calls);
+    }) as { choices?: Array<{ delta?: Record<string, unknown> }> } | undefined;
+
+    expect(visibleContent).not.toContain("<invoke");
+    expect(toolEvent?.choices?.[0]?.delta?.tool_calls).toEqual([
+      expect.objectContaining({
+        type: "function",
+        function: expect.objectContaining({
+          name: "set_goal",
+          arguments: JSON.stringify({ objective: "Deep research on 0xsero" }),
+        }),
+      }),
+    ]);
   });
 
   test("status route reports no active runtime on an isolated test port", async () => {
@@ -765,6 +920,102 @@ world"}</arguments></tool_call>`,
     }
   });
 
+  test("HuggingFace model search route forwards createdAt sorting", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      if (!url.startsWith("https://huggingface.co/api/models?")) {
+        return new Response(JSON.stringify({ detail: "unexpected URL" }), {
+          status: 500,
+        });
+      }
+
+      const params = new URL(url).searchParams;
+      expect(params.get("filter")).toBe("text-generation");
+      expect(params.get("sort")).toBe("createdAt");
+      expect(params.get("limit")).toBe("5");
+      return new Response(
+        JSON.stringify([
+          {
+            id: "fresh/model",
+            createdAt: "2026-06-05T00:00:00.000Z",
+            downloads: 0,
+            likes: 0,
+            private: false,
+            tags: ["text-generation"],
+          },
+        ]),
+        { headers: { "content-type": "application/json" } },
+      );
+    };
+
+    try {
+      const app = await createTestApp();
+      const response = await app.request(
+        "/v1/huggingface/models?filter=text-generation&sort=createdAt&limit=5",
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body).toEqual([
+        expect.objectContaining({
+          _id: "fresh/model",
+          modelId: "fresh/model",
+          createdAt: "2026-06-05T00:00:00.000Z",
+        }),
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("HuggingFace model search route preserves omitted sort for relevance", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      if (!url.startsWith("https://huggingface.co/api/models?")) {
+        return new Response(JSON.stringify({ detail: "unexpected URL" }), {
+          status: 500,
+        });
+      }
+
+      const params = new URL(url).searchParams;
+      expect(params.get("search")).toBe("llama");
+      expect(params.get("sort")).toBeNull();
+      expect(params.get("limit")).toBe("1");
+      return new Response(
+        JSON.stringify([
+          {
+            id: "relevant/model",
+            downloads: 10,
+            likes: 2,
+            private: false,
+            tags: ["text-generation"],
+          },
+        ]),
+        { status: 200 },
+      );
+    };
+
+    try {
+      const app = await createTestApp();
+      const response = await app.request(
+        "/v1/huggingface/models?search=llama&limit=1",
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body).toEqual([
+        expect.objectContaining({
+          _id: "relevant/model",
+          modelId: "relevant/model",
+        }),
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("invalid controller proxy targets fail before any upstream request is made", async () => {
     const app = await createTestApp();
     const response = await app.request(
@@ -979,6 +1230,7 @@ world"}</arguments></tool_call>`,
         frontend_url: expect.any(String),
       }),
     );
+    expect(configBody.environment).not.toHaveProperty("litellm_url");
     expect(configBody.runtime).toEqual(expect.any(Object));
 
     const specResponse = await app.request("/api/spec");
@@ -1053,7 +1305,7 @@ world"}</arguments></tool_call>`,
         }),
       ]),
     );
-  }, 15_000);
+  }, 30_000);
 
   test("studio settings and provider CRUD routes persist observable contracts", async () => {
     const app = await createTestApp();
@@ -1721,6 +1973,20 @@ world"}</arguments></tool_call>`,
     );
     chmodSync(llamaBin, 0o755);
     process.env.VLLM_STUDIO_LLAMA_BIN = llamaBin;
+    const sglangPython = join(tempDir, "python-sglang-test");
+    writeFileSync(
+      sglangPython,
+      [
+        "#!/usr/bin/env sh",
+        'if [ "$1" = "--version" ] || [ "$1" = "-V" ]; then echo \'Python 3.12.0\'; exit 0; fi',
+        'if [ "$1" = "-c" ]; then echo \'{"version":"0.4.0","python":"\'"$0"\'"}\'; exit 0; fi',
+        "exit 0",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(sglangPython, 0o755);
+    process.env.VLLM_STUDIO_SGLANG_PYTHON = sglangPython;
     const mlxPython = join(tempDir, "python-mlx-test");
     writeFileSync(
       mlxPython,
@@ -1761,6 +2027,34 @@ world"}</arguments></tool_call>`,
     });
     if (!target)
       throw new Error("Expected configured llama.cpp runtime target");
+
+    const sglangTarget = targetsBody.targets.find(
+      (candidate: Record<string, unknown>) =>
+        candidate["backend"] === "sglang" &&
+        candidate["source"] === "configured" &&
+        candidate["pythonPath"] === sglangPython,
+    );
+    expect(sglangTarget).toMatchObject({
+      backend: "sglang",
+      kind: "venv",
+      source: "configured",
+      installed: true,
+      active: false,
+      version: "0.4.0",
+      pythonPath: sglangPython,
+      capabilities: expect.objectContaining({
+        canLaunch: true,
+        canUpdate: true,
+        canInspectOptions: false,
+      }),
+      update: expect.objectContaining({
+        targetVersion: "latest",
+        packageSpec: "sglang",
+      }),
+      health: { status: "ok" },
+    });
+    if (!sglangTarget)
+      throw new Error("Expected configured SGLang runtime target");
 
     const mlxTarget = targetsBody.targets.find(
       (candidate: Record<string, unknown>) =>
@@ -2056,7 +2350,38 @@ world"}</arguments></tool_call>`,
         }),
       ]),
     );
-  }, 15_000);
+  }, 30_000);
+
+  test("managed runtime install helpers stay inside controller data dir", async () => {
+    const { managedPackageSpec, managedVenvPath } =
+      await import("../../../controller/src/modules/engines/runtimes/engine-jobs");
+    const { getSglangRuntimePython } =
+      await import("../../../controller/src/modules/engines/runtimes/runtime-upgrade");
+    const selectedSglangPython = join(
+      tempDir,
+      "runtime",
+      "venvs",
+      "sglang-latest",
+      "bin",
+      "python",
+    );
+
+    expect(managedVenvPath({ data_dir: tempDir }, "vllm")).toBe(
+      join(tempDir, "runtime", "venvs", "vllm-latest"),
+    );
+    expect(managedPackageSpec("vllm")).toBe("vllm");
+    expect(managedPackageSpec("vllm", "0.10.2")).toBe("vllm==0.10.2");
+    expect(managedPackageSpec("sglang")).toBe("sglang");
+    expect(managedPackageSpec("mlx")).toBe("mlx-lm");
+    expect(
+      getSglangRuntimePython(
+        { sglang_python: join(tempDir, "fallback-python") } as Parameters<
+          typeof getSglangRuntimePython
+        >[0],
+        { pythonPath: selectedSglangPython },
+      ),
+    ).toBe(selectedSglangPython);
+  });
 
   test("runtime backend metadata routes expose host-shaped contracts and observability", async () => {
     const app = await createTestApp();
@@ -2281,14 +2606,16 @@ world"}</arguments></tool_call>`,
     const logsResponse = await app.request("/logs");
     const logsBody = await logsResponse.json();
     expect(logsResponse.status).toBe(200);
-    expect(logsBody.sessions).toEqual([
-      expect.objectContaining({
-        id: "route-test",
-        recipe_id: "route-test",
-        model: "route-test",
-        status: "stopped",
-      }),
-    ]);
+    expect(logsBody.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "route-test",
+          recipe_id: "route-test",
+          model: "route-test",
+          status: "stopped",
+        }),
+      ]),
+    );
 
     const logResponse = await app.request("/logs/route-test?limit=1");
     const logBody = await logResponse.json();

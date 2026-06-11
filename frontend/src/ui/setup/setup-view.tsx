@@ -1,13 +1,14 @@
 "use client";
 
 import { AlertTriangle, Loader2 } from "lucide-react";
-import { Alert, AppPage, Button, Card } from "@/ui";
+import { Alert, AppPage, Button, Card, type ManagedRuntimeInstallBackend } from "@/ui";
 import type {
+  EngineJob,
   ModelDownload,
   ModelRecommendation,
+  RuntimeTarget,
   StudioDiagnostics,
   StudioSettings,
-  VllmUpgradeResult,
 } from "@/lib/types";
 import { SetupStepper } from "./setup-view/setup-stepper";
 import { StepBenchmark } from "./setup-view/step-benchmark";
@@ -29,18 +30,20 @@ interface SetupViewProps {
   setStep: (step: number) => void;
   loading: boolean;
   error: string | null;
+  loadWarning: string | null;
   settings: StudioSettings | null;
   modelsDir: string;
   setModelsDir: (value: string) => void;
   diagnostics: StudioDiagnostics | null;
   recommendations: ModelRecommendation[];
+  runtimeTargets: RuntimeTarget[];
+  runtimeJobs: EngineJob[];
   maxVram: number;
   selectedModel: string;
   manualModelId: string;
   setManualModelId: (value: string) => void;
   savingSettings: boolean;
   upgrading: boolean;
-  upgradeResult: VllmUpgradeResult | null;
   hardwareConfirmed: boolean;
   setHardwareConfirmed: (value: boolean) => void;
   downloads: ModelDownload[];
@@ -49,7 +52,8 @@ interface SetupViewProps {
   resumeDownload: (id: string) => void;
   cancelDownload: (id: string) => void;
   saveSettings: () => void;
-  upgradeRuntime: () => void;
+  installRuntime: (backend: ManagedRuntimeInstallBackend) => void;
+  updateRuntimeTarget: (target: RuntimeTarget) => void;
   beginDownload: (modelId: string) => void;
   submitManualModel: () => void;
   continueFromHardware: () => void;
@@ -71,18 +75,20 @@ export function SetupView({
   setStep,
   loading,
   error,
+  loadWarning,
   settings,
   modelsDir,
   setModelsDir,
   diagnostics,
   recommendations,
+  runtimeTargets,
+  runtimeJobs,
   maxVram,
   selectedModel,
   manualModelId,
   setManualModelId,
   savingSettings,
   upgrading,
-  upgradeResult,
   hardwareConfirmed,
   setHardwareConfirmed,
   downloads,
@@ -91,7 +97,8 @@ export function SetupView({
   resumeDownload,
   cancelDownload,
   saveSettings,
-  upgradeRuntime,
+  installRuntime,
+  updateRuntimeTarget,
   beginDownload,
   submitManualModel,
   continueFromHardware,
@@ -137,11 +144,18 @@ export function SetupView({
           </Alert>
         )}
 
+        {loadWarning && !error && (
+          <Alert variant="warning" icon={<AlertTriangle className="h-4 w-4" />} className="mb-6">
+            {loadWarning}
+          </Alert>
+        )}
+
         {!loading && step === 0 && (
           <StepWelcome
             modelsDir={modelsDir}
             setModelsDir={setModelsDir}
             settings={settings}
+            diagnostics={diagnostics}
             saveSettings={saveSettings}
             savingSettings={savingSettings}
           />
@@ -150,9 +164,11 @@ export function SetupView({
         {!loading && step === 1 && (
           <StepHardware
             diagnostics={diagnostics}
-            upgradeRuntime={upgradeRuntime}
+            runtimeTargets={runtimeTargets}
+            runtimeJobs={runtimeJobs}
+            installRuntime={installRuntime}
+            updateRuntimeTarget={updateRuntimeTarget}
             upgrading={upgrading}
-            upgradeResult={upgradeResult}
             hardwareConfirmed={hardwareConfirmed}
             setHardwareConfirmed={setHardwareConfirmed}
             continueFromHardware={continueFromHardware}

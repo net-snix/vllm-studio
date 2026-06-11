@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
 import { useClickOutside } from "@/hooks/use-click-outside";
@@ -9,6 +10,11 @@ import type { SessionPref } from "@/lib/agent/session/prefs";
 
 const SESSION_MENU_CLASS =
   "absolute right-0 top-5 isolate z-[999] min-w-[150px] rounded-md border border-[#3a3a3a] bg-[#202020] p-1 text-xs text-(--fg) opacity-100 shadow-[0_12px_32px_rgba(0,0,0,0.85)]";
+
+function hrefWithOpenNonce(href: string): string {
+  const separator = href.includes("?") ? "&" : "?";
+  return `${href}${separator}open=${Date.now().toString(36)}`;
+}
 
 type SessionNavRowProps = {
   pref: SessionPref;
@@ -52,7 +58,7 @@ export function SessionNavRow({
   canDoubleClickRename = false,
   showClearAction = false,
   menuIconClass = "h-3 w-3",
-  renameInputClass = "text-[12px]",
+  renameInputClass = "text-[length:var(--fs-md)]",
   menuItemsWithIcons = false,
 }: SessionNavRowProps) {
   const [renaming, setRenaming] = useState(false);
@@ -207,6 +213,7 @@ function SessionOpenTarget({
   onRememberTitle?: () => void;
   onStartRename: () => void;
 }) {
+  const router = useRouter();
   const openProps = canDoubleClickRename
     ? {
         onDoubleClick: (event: MouseEvent) => {
@@ -223,7 +230,12 @@ function SessionOpenTarget({
         href={href}
         aria-label={label}
         draggable
-        onClick={onRememberTitle}
+        onClick={(event) => {
+          onRememberTitle?.();
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          router.push(hrefWithOpenNonce(href));
+        }}
         onDragStart={onDragStart}
         className="flex min-w-0 flex-1 items-center gap-1"
         {...openProps}
@@ -238,7 +250,10 @@ function SessionOpenTarget({
       type="button"
       draggable
       onDragStart={onDragStart}
-      onClick={onOpen}
+      onClick={() => {
+        onRememberTitle?.();
+        onOpen?.();
+      }}
       aria-label={label}
       className="flex min-w-0 flex-1 items-center gap-1 text-left"
       {...openProps}
@@ -262,11 +277,13 @@ function SessionRowContent({
       {isRunning ? (
         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-(--accent)" aria-hidden />
       ) : null}
-      <span className="min-w-0 flex-1 truncate text-[10.5px] font-normal leading-4 text-(--fg)/78 transition-colors group-hover:text-(--fg)/95">
+      <span className="min-w-0 flex-1 truncate text-[length:var(--fs-xs)] font-normal leading-4 text-(--fg)/78 transition-colors group-hover:text-(--fg)/95">
         {label}
       </span>
       {age ? (
-        <span className="shrink-0 pl-1.5 pr-1 font-mono text-[8.5px] text-(--dim)">{age}</span>
+        <span className="shrink-0 pl-1.5 pr-1 font-mono text-[length:var(--fs-2xs)] text-(--dim)">
+          {age}
+        </span>
       ) : null}
     </>
   );

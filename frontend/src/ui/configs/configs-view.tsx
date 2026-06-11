@@ -21,7 +21,7 @@ import {
 } from "./agent-settings-sections";
 import { AppearanceSettings } from "./appearance-settings";
 import { EnginesSection } from "./engines-section";
-import { PluginsSettings } from "./plugins-settings";
+import { PluginsSettingsSection } from "../plugins/plugins-page";
 import { ServicesSettings, SystemSettings } from "./system-settings-section";
 import { getConfigsViewSnapshot } from "./configs-view-snapshot";
 interface ConfigsViewProps {
@@ -31,7 +31,6 @@ interface ConfigsViewProps {
   error: string | null;
   apiSettings: ApiConnectionSettings;
   apiSettingsLoading: boolean;
-  showApiKey: boolean;
   saving: boolean;
   testing: boolean;
   connectionStatus: ConnectionStatus;
@@ -40,7 +39,6 @@ interface ConfigsViewProps {
   isInitialLoading: boolean;
   onReload: () => void;
   onApiSettingsChange: (nextSettings: ApiConnectionSettings) => void;
-  onToggleApiKey: () => void;
   onTestConnection: () => void;
   onSaveSettings: () => void;
 }
@@ -78,7 +76,6 @@ export function ConfigsView({
   error,
   apiSettings,
   apiSettingsLoading,
-  showApiKey,
   saving,
   testing,
   connectionStatus,
@@ -87,7 +84,6 @@ export function ConfigsView({
   isInitialLoading,
   onReload,
   onApiSettingsChange,
-  onToggleApiKey,
   onTestConnection,
   onSaveSettings,
 }: ConfigsViewProps) {
@@ -131,18 +127,15 @@ export function ConfigsView({
       onReload={onReload}
       onSelectSection={selectSection}
     >
-      {" "}
       {activeSection === "connection" ? (
         <ApiConnectionSection
           apiSettingsLoading={apiSettingsLoading}
           apiSettings={apiSettings}
-          showApiKey={showApiKey}
           testing={testing}
           saving={saving}
           connectionStatus={connectionStatus}
           statusMessage={statusMessage}
           onApiSettingsChange={onApiSettingsChange}
-          onToggleApiKey={onToggleApiKey}
           onTestConnection={onTestConnection}
           onSave={onSaveSettings}
         />
@@ -159,11 +152,11 @@ export function ConfigsView({
           />
         </div>
       ) : null}
-      {activeSection === "appearance" ? <AppearanceSettings /> : null}{" "}
+      {activeSection === "appearance" ? <AppearanceSettings /> : null}
       {activeSection === "archive" ? <ArchivedChatsSettings /> : null}
-      {activeSection === "plugins" ? <PluginsSettings /> : null}{" "}
+      {activeSection === "plugins" ? <PluginsSettingsSection /> : null}
       {activeSection === "skills" ? <SkillsSettings /> : null}
-      {activeSection === "setup" ? <SetupChecksSettings /> : null}{" "}
+      {activeSection === "setup" ? <SetupChecksSettings /> : null}
     </SettingsLayout>
   );
 }

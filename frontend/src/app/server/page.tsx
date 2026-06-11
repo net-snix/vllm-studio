@@ -28,15 +28,21 @@ export default function ServerPage() {
     /\/+$/,
     "",
   );
-  const docsUrl = `${backendUrl}/api/docs`;
+  const docsUrl = "/api/proxy/api/docs";
+  const docsSpecUrl = "/api/proxy/api/spec";
+  const docsSrcDoc = useMemo(() => swaggerSrcDoc(docsSpecUrl), [docsSpecUrl]);
 
   return (
     <AppPage className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="border-b border-(--border) px-5 py-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.16em] text-(--dim)">Server</div>
-            <h1 className="mt-1 text-[20px] font-semibold tracking-[-0.015em]">Controller</h1>
+            <div className="text-[length:var(--fs-xs)] uppercase tracking-[0.16em] text-(--dim)">
+              Server
+            </div>
+            <h1 className="mt-1 text-[length:var(--fs-3xl)] font-semibold tracking-[-0.015em]">
+              Controller
+            </h1>
             <p className="mt-1 text-xs text-(--dim)">{backendUrl}</p>
           </div>
           <div className="flex items-center gap-2">
@@ -57,7 +63,7 @@ export default function ServerPage() {
 
       <section className="grid min-h-0 flex-1 grid-cols-1 gap-0 lg:grid-cols-[260px_minmax(0,1fr)]">
         <aside className="min-h-0 border-b border-(--border) p-3 lg:border-b-0 lg:border-r">
-          <div className="mb-3 text-[10px] uppercase tracking-[0.16em] text-(--dim)">
+          <div className="mb-3 text-[length:var(--fs-xs)] uppercase tracking-[0.16em] text-(--dim)">
             Server Health
           </div>
           <dl className="space-y-2 text-xs">
@@ -84,7 +90,7 @@ export default function ServerPage() {
                   setTab("logs");
                   handleSelectSession(session.id);
                 }}
-                className={`mb-1 block w-full truncate rounded px-2 py-1.5 text-left text-[11px] ${
+                className={`mb-1 block w-full truncate rounded px-2 py-1.5 text-left text-[length:var(--fs-sm)] ${
                   selectedSession === session.id
                     ? "bg-(--active) text-(--fg)"
                     : "text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
@@ -108,13 +114,13 @@ export default function ServerPage() {
                   checked={autoScroll}
                   onChange={setAutoScroll}
                   label="auto-scroll"
-                  className="items-center text-[11px]"
-                  labelClassName="text-[11px] font-normal"
+                  className="items-center text-[length:var(--fs-sm)]"
+                  labelClassName="text-[length:var(--fs-sm)] font-normal"
                 />
               </div>
               <div
                 ref={logRef}
-                className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[11px] leading-5 text-(--fg)"
+                className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[length:var(--fs-sm)] leading-5 text-(--fg)"
               >
                 {loadingContent ? (
                   <div className="text-(--dim)">Loading logs…</div>
@@ -139,8 +145,9 @@ export default function ServerPage() {
                 </a>
               </div>
               <iframe
-                src={docsUrl}
+                srcDoc={docsSrcDoc}
                 title="Controller API docs"
+                sandbox="allow-scripts allow-same-origin allow-popups"
                 className="min-h-0 flex-1 bg-white"
               />
             </section>
@@ -149,6 +156,34 @@ export default function ServerPage() {
       </section>
     </AppPage>
   );
+}
+
+function swaggerSrcDoc(specUrl: string): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vLLM Studio API Docs</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui.css" />
+    <style>
+      html, body, #swagger-ui { margin: 0; min-height: 100%; background: #fff; }
+      .swagger-ui .topbar { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui-bundle.js" crossorigin="anonymous"></script>
+    <script>
+      window.onload = function () {
+        window.ui = SwaggerUIBundle({
+          dom_id: "#swagger-ui",
+          url: ${JSON.stringify(specUrl)}
+        });
+      };
+    </script>
+  </body>
+</html>`;
 }
 
 function HealthPill({ label, ok }: { label: string; ok: boolean }) {

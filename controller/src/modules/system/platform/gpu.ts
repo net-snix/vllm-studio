@@ -1,6 +1,7 @@
 import type { GpuInfo, RuntimeGpuMonitoringTool } from "../../models/types";
 import { runCommand } from "../../../core/command";
 import { getGpuInfoFromAmdSmi, getGpuInfoFromRocmSmi } from "./amd-gpu";
+import { getGpuInfoFromIntelSysfs, hasIntelSysfsGpus } from "./intel-gpu";
 import { resolveRocmSmiTool } from "./rocm-info";
 import { resolveForcedGpuMonitoringTool, resolveNvidiaSmiBinary } from "./smi-tools";
 
@@ -79,9 +80,16 @@ export const resolveGpuMonitoringTool = (): RuntimeGpuMonitoringTool | null => {
   if (forced === "amd-smi" || forced === "rocm-smi") {
     return forced;
   }
+  if (forced === "intel-sysfs") {
+    return "intel-sysfs";
+  }
 
   if (resolveNvidiaSmiBinary()) {
     return "nvidia-smi";
+  }
+
+  if (hasIntelSysfsGpus()) {
+    return "intel-sysfs";
   }
 
   return resolveRocmSmiTool();
@@ -97,6 +105,9 @@ export const getGpuInfo = (): GpuInfo[] => {
   }
   if (forced === "rocm-smi") {
     return getGpuInfoFromRocmSmi();
+  }
+  if (forced === "intel-sysfs") {
+    return getGpuInfoFromIntelSysfs();
   }
 
   const nvidia = getGpuInfoFromNvidiaSmi();
@@ -116,74 +127,10 @@ export const getGpuInfo = (): GpuInfo[] => {
     return getGpuInfoFromAmdSmi();
   }
 
+  const intel = getGpuInfoFromIntelSysfs();
+  if (intel.length > 0) {
+    return intel;
+  }
+
   return [];
-};
-
-export const estimateModelMemory = (
-  modelSizeGb: number,
-  quantization?: string,
-  dtype?: string,
-  tensorParallel = 1
-): number => {
-  let memoryGb = modelSizeGb;
-
-  if (quantization) {
-    const quantLower = quantization.toLowerCase();
-    if (quantLower.includes("int4") || quantLower.includes("4bit")) {
-      memoryGb *= 0.25;
-    } else if (
-      quantLower.includes("int8") ||
-      quantLower.includes("8bit") ||
-      quantLower === "awq" ||
-      quantLower === "gptq"
-    ) {
-      memoryGb *= 0.5;
-    } else if (quantLower.includes("fp8")) {
-      memoryGb *= 0.5;
-    }
-  }
-
-  if (dtype) {
-    const dtypeLower = dtype.toLowerCase();
-    if (dtypeLower.includes("float32") || dtypeLower.includes("fp32")) {
-      memoryGb *= 2.0;
-    } else if (dtypeLower.includes("int8")) {
-      memoryGb *= 0.5;
-    }
-  }
-
-  if (tensorParallel > 1) {
-    memoryGb /= tensorParallel;
-  }
-
-  memoryGb *= 1.3;
-  return memoryGb;
-};
-
-export const canFitModel = (
-  modelSizeGb: number,
-  quantization?: string,
-  dtype?: string,
-  tensorParallel = 1
-): boolean => {
-  const gpus = getGpuInfo();
-  if (gpus.length === 0) {
-    return true;
-  }
-
-  const requiredGb = estimateModelMemory(modelSizeGb, quantization, dtype, tensorParallel);
-  const requiredBytes = requiredGb * 1024 ** 3;
-
-  if (gpus.length < tensorParallel) {
-    return false;
-  }
-
-  for (let index = 0; index < tensorParallel; index += 1) {
-    const gpu = gpus[index];
-    if (!gpu || gpu.memory_free < requiredBytes) {
-      return false;
-    }
-  }
-
-  return true;
 };

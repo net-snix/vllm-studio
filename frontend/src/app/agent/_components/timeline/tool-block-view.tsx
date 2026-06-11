@@ -93,7 +93,11 @@ function toolMeta(block: ToolBlock, filePath?: string | null): ToolMeta {
     case "exec":
       return { icon, label: "Ran command", detail: compactToolText(command, 110) };
     case "browser":
-      return { icon, label: "Used browser", detail: compactToolText(url, 110) };
+      return {
+        icon,
+        label: browserToolLabel(block.name),
+        detail: compactToolText(url ?? browserToolDetail(block), 110),
+      };
     default:
       return {
         icon,
@@ -103,10 +107,34 @@ function toolMeta(block: ToolBlock, filePath?: string | null): ToolMeta {
   }
 }
 
+function browserToolLabel(name: string): string {
+  const normalized = name
+    .toLowerCase()
+    .replace(/^browser_/, "")
+    .replace(/^parchi_/, "");
+  if (normalized.includes("navigate")) return "Browser navigated";
+  if (normalized.includes("get_text")) return "Browser read text";
+  if (normalized.includes("get_html")) return "Browser read HTML";
+  if (normalized.includes("screenshot")) return "Browser captured screenshot";
+  if (normalized.includes("click")) return "Browser clicked";
+  if (normalized.includes("fill")) return "Browser filled field";
+  if (normalized.includes("scroll")) return "Browser scrolled";
+  if (normalized.includes("get_url")) return "Browser checked URL";
+  return "Used browser";
+}
+
+function browserToolDetail(block: ToolBlock): string | null {
+  const stringValue = toolArg(block, ["selector", "value", "tabId", "query"]);
+  const deltaY = block.args?.deltaY;
+  if (stringValue) return stringValue;
+  if (typeof deltaY === "number") return `deltaY ${deltaY}`;
+  return compactToolText(block.resultText, 110);
+}
+
 function ToolStatus({ status }: { status: ToolBlock["status"] }) {
   if (status === "running") {
     return (
-      <span className="inline-flex items-center gap-1 text-[9.6px] text-(--accent)">
+      <span className="inline-flex items-center gap-1 text-[length:var(--fs-xs)] text-(--accent)">
         <Loader2 className="h-3 w-3 animate-spin" />
         running
       </span>
@@ -114,7 +142,7 @@ function ToolStatus({ status }: { status: ToolBlock["status"] }) {
   }
   if (status === "error") {
     return (
-      <span className="inline-flex items-center gap-1 text-[9.6px] text-(--err)">
+      <span className="inline-flex items-center gap-1 text-[length:var(--fs-xs)] text-(--err)">
         <AlertTriangle className="h-3 w-3" />
         error
       </span>
@@ -142,11 +170,11 @@ function ToolSummary({
           {meta.icon}
         </span>
         <span className="flex min-w-0 flex-1 items-baseline gap-2">
-          <span className="shrink-0 truncate text-[10.4px] font-medium leading-4 text-(--fg)/90">
+          <span className="shrink-0 truncate text-[length:var(--fs-xs)] font-medium leading-4 text-(--fg)/90">
             {meta.label}
           </span>
           {meta.detail ? (
-            <span className="min-w-0 flex-1 truncate text-[10.4px] leading-4 text-(--dim)">
+            <span className="min-w-0 flex-1 truncate text-[length:var(--fs-xs)] leading-4 text-(--dim)">
               {meta.detail}
             </span>
           ) : null}
@@ -160,7 +188,7 @@ function ToolSummary({
 
 function ToolOutput({ children }: { children: ReactNode }) {
   return (
-    <pre className="max-h-[320px] max-w-full overflow-auto whitespace-pre font-mono text-[9.6px] leading-4 text-(--fg)/70">
+    <pre className="max-h-[320px] max-w-full overflow-auto whitespace-pre font-mono text-[length:var(--fs-xs)] leading-4 text-(--fg)/70">
       {children}
     </pre>
   );
@@ -179,7 +207,7 @@ function HighlightedToolSource({ body, lang }: { body: string; lang: string }) {
   }, [body, lang]);
 
   const className =
-    "max-h-[420px] max-w-full overflow-auto rounded-lg border border-(--border)/50 bg-(--surface)/35 p-3 font-mono text-[9.6px] leading-4 text-(--fg)";
+    "max-h-[420px] max-w-full overflow-auto rounded-lg border border-(--border)/50 bg-(--surface)/35 p-3 font-mono text-[length:var(--fs-xs)] leading-4 text-(--fg)";
 
   if (highlighted === null) {
     return <pre className={className}>{body}</pre>;
@@ -239,13 +267,13 @@ function FileWritePreview({
 
   return (
     <ToolSummary block={block} filePath={filePath} open>
-      <div className="mb-1 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.08em] text-(--dim)">
+      <div className="mb-1 flex items-center justify-between gap-2 text-[length:var(--fs-xs)] uppercase tracking-[0.08em] text-(--dim)">
         <span>{sourceLang || "source"}</span>
         {isHtml ? (
           <button
             type="button"
             onClick={() => setShowPreview((value) => !value)}
-            className="rounded-md px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
+            className="rounded-md px-1.5 py-0.5 text-[length:var(--fs-xs)] normal-case tracking-normal text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
           >
             {showPreview ? "Source" : "Preview"}
           </button>
@@ -263,7 +291,7 @@ function FileWritePreview({
         <HighlightedToolSource body={body} lang={sourceLang} />
       )}
       {block.resultText ? (
-        <div className="mt-1 font-mono text-[10px] text-(--dim)">
+        <div className="mt-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
           <ToolOutput>{block.resultText}</ToolOutput>
         </div>
       ) : null}
@@ -284,10 +312,71 @@ function DiffPreview({ block, diffText }: { block: ToolBlock; diffText: string }
   const filePath = toolArg(block, ["path", "file_path", "filePath", "file", "filename"]);
   return (
     <ToolSummary block={block} filePath={filePath} open>
-      <div className="mb-1 text-[10px] uppercase tracking-[0.08em] text-(--dim)">diff</div>
+      <div className="mb-1 text-[length:var(--fs-xs)] uppercase tracking-[0.08em] text-(--dim)">
+        diff
+      </div>
       <HighlightedToolSource body={diffText} lang="diff" />
     </ToolSummary>
   );
+}
+
+function execCommand(block: ToolBlock): string | null {
+  const command = extractFromArgs(block.args, block.argsText, [
+    "cmd",
+    "command",
+    "script",
+    "shell",
+    "input",
+  ]);
+  return command && command.trim() ? command : null;
+}
+
+function ExecPreview({ block, command }: { block: ToolBlock; command: string }) {
+  return (
+    <ToolSummary block={block} open={block.status === "running"}>
+      <div className="mb-1 text-[length:var(--fs-xs)] uppercase tracking-[0.08em] text-(--dim)">
+        bash
+      </div>
+      <HighlightedToolSource body={command} lang="bash" />
+      {block.resultText ? (
+        <div className="mt-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
+          <ToolOutput>{block.resultText}</ToolOutput>
+        </div>
+      ) : null}
+    </ToolSummary>
+  );
+}
+
+function BrowserPreview({ block }: { block: ToolBlock }) {
+  const args = browserToolArgs(block);
+  const display =
+    compactBrowserResult(block.resultText) ||
+    (block.text && block.text !== block.argsText ? compactBrowserResult(block.text) : null);
+  return (
+    <ToolSummary block={block} open={block.status === "running"}>
+      {args ? (
+        <div className="mb-1 rounded-md border border-(--border)/45 bg-(--surface)/30 px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--fg)/75">
+          {args}
+        </div>
+      ) : null}
+      {display ? <ToolOutput>{display}</ToolOutput> : null}
+    </ToolSummary>
+  );
+}
+
+function browserToolArgs(block: ToolBlock): string | null {
+  if (!block.args || Object.keys(block.args).length === 0) return null;
+  const pairs = Object.entries(block.args).flatMap(([key, value]) => {
+    if (value === undefined || value === null || value === "") return [];
+    const text = typeof value === "string" || typeof value === "number" ? String(value) : "";
+    return text ? [`${key}: ${text}`] : [];
+  });
+  return pairs.length ? pairs.join("  ") : null;
+}
+
+function compactBrowserResult(result: string | null | undefined): string | null {
+  if (!result) return null;
+  return compactToolText(result, 1200);
 }
 
 export function ToolBlockView({ block }: { block: ToolBlock }) {
@@ -301,8 +390,17 @@ export function ToolBlockView({ block }: { block: ToolBlock }) {
   if (diffPreview) {
     return <DiffPreview block={block} diffText={diffPreview} />;
   }
+  if (classifyTool(block) === "exec") {
+    const command = execCommand(block);
+    if (command) {
+      return <ExecPreview block={block} command={command} />;
+    }
+  }
+  if (classifyTool(block) === "browser") {
+    return <BrowserPreview block={block} />;
+  }
 
-  // Generic fallback (shells, reads, searches, browser tools, etc.).
+  // Generic fallback (reads, searches, browser tools, etc.).
   const display =
     block.resultText || (block.text && block.text !== block.argsText ? block.text : "");
   return (

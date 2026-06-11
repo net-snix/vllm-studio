@@ -2,8 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { resolveDataDir } from "@/lib/data-dir";
-import { packagesConfigToken, readEnabledOverrides } from "./pi-packages-store";
 import { listProjectsFromStore } from "./projects-store";
 
 export type RuntimePluginRef = {
@@ -12,9 +10,6 @@ export type RuntimePluginRef = {
   path?: string;
   skillPath?: string;
   mcpConfigPath?: string;
-  appConfigPath?: string;
-  appIds?: string[];
-  appPath?: string;
 };
 
 export type RuntimeSkillRef = {
@@ -29,18 +24,6 @@ export type RuntimePromptTemplateRef = {
   path?: string;
 };
 
-/**
- * Per-turn override for a single Pi extension. The runtime applies these on
- * top of the persistent `<agentDir>/extension-config/enabled.json` map without
- * writing to disk; this is how the composer's `/plugins` slash command toggles
- * extensions for the next turn only.
- */
-export type RuntimeExtensionOverride = {
-  /** Source string preferred, falls back to absolute path. */
-  key: string;
-  enabled: boolean;
-};
-
 export type RuntimeStartOptions = {
   browserToolEnabled?: boolean;
   browserSessionId?: string;
@@ -49,8 +32,6 @@ export type RuntimeStartOptions = {
   plugins?: RuntimePluginRef[];
   skills?: RuntimeSkillRef[];
   promptTemplates?: RuntimePromptTemplateRef[];
-  /** Per-turn extension overrides — empty array means "no per-turn override". */
-  extensionOverrides?: RuntimeExtensionOverride[];
 };
 
 type RuntimeMcpConfig = {
@@ -72,11 +53,6 @@ export type AgentSessionOptions = {
   skills: string[];
   /** Absolute prompt-template file/dir paths; forwarded to the SDK. */
   promptTemplatePaths: string[];
-  /**
-   * Per-turn extension on/off override map (key = source or path → enabled).
-   * Empty when no `/plugins` overrides were specified for this turn.
-   */
-  extensionOverrides: Record<string, boolean>;
   envInjections: Record<string, string>;
 };
 
@@ -118,7 +94,7 @@ export async function resolveAgentCwd(input?: string): Promise<string> {
   return resolved;
 }
 
-// Locate bundled Pi extensions in both development checkouts and packaged
+// Locate bundled first-party extensions in both development checkouts and packaged
 // Electron resource directories. Environment overrides keep this testable and
 // let desktop packaging repair paths without changing runtime code.
 export function resolveBundledPiExtensionPath(
@@ -173,6 +149,13 @@ export function resolveTimeoutExtensionPath(): string | null {
   );
 }
 
+export function resolveAgentPolicyExtensionPath(): string | null {
+  return resolveBundledPiExtensionPath(
+    "vllm-studio-agent-policy.ts",
+    process.env.VLLM_STUDIO_AGENT_POLICY_EXTENSION_PATH,
+  );
+}
+
 export function resolveMcpExtensionPath(): string | null {
   return resolveBundledPiExtensionPath("mcp-plugin.ts", process.env.VLLM_STUDIO_MCP_EXTENSION_PATH);
 }
@@ -200,29 +183,22 @@ export function resolveBrowserSkillPath(): string | null {
   return resolveBundledSkillPath("browser", process.env.VLLM_STUDIO_BROWSER_SKILL_PATH);
 }
 
-export function resolveCanvasSkillPath(): string | null {
-  return resolveBundledSkillPath("canvas", process.env.VLLM_STUDIO_CANVAS_SKILL_PATH);
+export function resolveParchiBrowserSkillPath(): string | null {
+  return resolveBundledSkillPath(
+    "parchi-browser",
+    process.env.VLLM_STUDIO_PARCHI_BROWSER_SKILL_PATH,
+  );
 }
 
-export function pluginNameMatches(plugin: RuntimePluginRef, needle: string): boolean {
-  return [
-    plugin.id,
-    plugin.name,
-    plugin.path,
-    plugin.skillPath,
-    plugin.mcpConfigPath,
-    plugin.appConfigPath,
-    plugin.appPath,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .some((value) => value.toLowerCase().includes(needle));
+export function resolveCanvasSkillPath(): string | null {
+  return resolveBundledSkillPath("canvas", process.env.VLLM_STUDIO_CANVAS_SKILL_PATH);
 }
 
 export function pluginFingerprint(options: RuntimeStartOptions): string {
   const names = (options.plugins ?? [])
     .map(
       (plugin) =>
-        `${plugin.name ?? ""}:${plugin.path ?? ""}:${plugin.skillPath ?? ""}:${plugin.mcpConfigPath ?? ""}:${plugin.appConfigPath ?? ""}:${plugin.appIds?.join(",") ?? ""}:${plugin.appPath ?? ""}`,
+        `${plugin.name ?? ""}:${plugin.path ?? ""}:${plugin.skillPath ?? ""}:${plugin.mcpConfigPath ?? ""}`,
     )
     .sort();
   const skills = (options.skills ?? [])
@@ -231,30 +207,14 @@ export function pluginFingerprint(options: RuntimeStartOptions): string {
   const promptTemplates = (options.promptTemplates ?? [])
     .map((template) => `${template.name ?? ""}:${template.path ?? ""}`)
     .sort();
-  // Include the Pi-package enable/disable overrides so that toggling a Pi
-  // extension on or off invalidates the cached runtime and the loader's
-  // extensionsOverride filter is re-evaluated on the next session start.
-  const overrides = Object.entries(readEnabledOverrides())
-    .filter(([, enabled]) => enabled === false)
-    .map(([key]) => key)
-    .sort();
-  // Per-turn `/plugins` overrides also invalidate the cached runtime — they
-  // layer on top of the persisted overrides, so a turn that wants to re-enable
-  // a globally disabled extension (or vice versa) needs a fresh session.
-  const turnOverrides = (options.extensionOverrides ?? [])
-    .map((entry) => `${entry.key}=${entry.enabled ? "1" : "0"}`)
-    .sort();
   return JSON.stringify({
     browser: options.browserToolEnabled === true,
-    browserBackend: options.browserBackend ?? process.env.VLLM_STUDIO_BROWSER_BACKEND ?? "embedded",
+    browserBackend: browserBackend(options),
     browserSessionId: options.browserSessionId ?? "",
     canvas: options.canvasEnabled === true,
     plugins: names,
     skills,
     promptTemplates,
-    extensionsDisabled: overrides,
-    extensionsTurnOverride: turnOverrides,
-    piPackagesToken: packagesConfigToken(),
   });
 }
 
@@ -286,48 +246,6 @@ export function uniqueExistingPaths(values: Array<string | null | undefined>): s
   });
 }
 
-function isLaunchConstrainedComputerUseMcp(configPath: string): boolean {
-  try {
-    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as {
-      mcpServers?: Record<string, { command?: unknown; args?: unknown }>;
-    };
-    return Object.entries(parsed.mcpServers ?? {}).some(([name, server]) => {
-      const marker =
-        `${name} ${String(server.command ?? "")} ${Array.isArray(server.args) ? server.args.join(" ") : ""}`.toLowerCase();
-      return marker.includes("computer-use") || marker.includes("skycomputeruseclient");
-    });
-  } catch {
-    return false;
-  }
-}
-
-function shouldLoadMcpConfig(plugin: RuntimePluginRef, configPath: string): boolean {
-  if (process.env.VLLM_STUDIO_ENABLE_CODEX_COMPUTER_USE_MCP === "1") return true;
-  if (isLocalComputerUseHelper(plugin, configPath)) return true;
-  return !(
-    pluginNameMatches(plugin, "computer-use") && isLaunchConstrainedComputerUseMcp(configPath)
-  );
-}
-
-function isLocalComputerUseHelper(plugin: RuntimePluginRef, configPath: string): boolean {
-  return (
-    pluginNameMatches(plugin, "computer-use") &&
-    localComputerUseRoots().some((root) => isPathInside(configPath, root))
-  );
-}
-
-function localComputerUseRoots(): string[] {
-  return [
-    path.join(resolveDataDir(), "computer-use"),
-    path.join(homedir(), ".codex", "computer-use"),
-  ];
-}
-
-export function isPathInside(candidate: string, root: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 export function pluginMcpConfigs(plugins: RuntimePluginRef[]): RuntimeMcpConfig[] {
   const seen = new Set<string>();
   return plugins.flatMap((plugin) => {
@@ -336,7 +254,6 @@ export function pluginMcpConfigs(plugins: RuntimePluginRef[]): RuntimeMcpConfig[
       (plugin.path && !plugin.path.endsWith(".app") ? path.join(plugin.path, ".mcp.json") : null);
     if (!configPath || !existsSync(configPath)) return [];
     const resolved = path.resolve(configPath);
-    if (!shouldLoadMcpConfig(plugin, resolved)) return [];
     if (seen.has(resolved)) return [];
     seen.add(resolved);
     return [
@@ -350,35 +267,38 @@ export function deriveFrontendBase(env: NodeJS.ProcessEnv = process.env): string
   return `http://127.0.0.1:${port}`;
 }
 
-function shouldLoadBrowserTool(options: RuntimeStartOptions, plugins: RuntimePluginRef[]): boolean {
-  return (
-    options.browserToolEnabled === true ||
-    plugins.some(
-      (plugin) =>
-        pluginNameMatches(plugin, "browser-use") || pluginNameMatches(plugin, "computer-use"),
-    )
-  );
+function shouldLoadBrowserTool(options: RuntimeStartOptions): boolean {
+  return options.browserToolEnabled === true;
 }
 
 function browserBackend(options: RuntimeStartOptions): "embedded" | "parchi" {
-  return options.browserBackend === "parchi" || process.env.VLLM_STUDIO_BROWSER_BACKEND === "parchi"
-    ? "parchi"
-    : "embedded";
+  const backend = options.browserBackend ?? process.env.VLLM_STUDIO_BROWSER_BACKEND;
+  if (backend === "parchi") return "parchi";
+  return "embedded";
+}
+
+function browserExtensionPathFor(backend: "embedded" | "parchi"): string | null {
+  if (backend === "parchi") return resolveParchiBrowserExtensionPath();
+  return resolveBrowserExtensionPath();
+}
+
+function browserSkillPathFor(backend: "embedded" | "parchi"): string | null {
+  if (backend === "parchi") return resolveParchiBrowserSkillPath();
+  return resolveBrowserSkillPath();
 }
 
 function runtimeExtensionPaths(
   options: RuntimeStartOptions,
-  plugins: RuntimePluginRef[],
   mcpConfigs: RuntimeMcpConfig[],
 ): string[] {
   const timeoutExtensionPath = resolveTimeoutExtensionPath();
-  const browserExtensionPath = shouldLoadBrowserTool(options, plugins)
-    ? browserBackend(options) === "parchi"
-      ? resolveParchiBrowserExtensionPath()
-      : resolveBrowserExtensionPath()
+  const agentPolicyExtensionPath = resolveAgentPolicyExtensionPath();
+  const browserExtensionPath = shouldLoadBrowserTool(options)
+    ? browserExtensionPathFor(browserBackend(options))
     : null;
   return uniqueExistingPaths([
     timeoutExtensionPath,
+    agentPolicyExtensionPath,
     mcpConfigs.length ? resolveMcpExtensionPath() : null,
     browserExtensionPath,
     options.canvasEnabled === true ? resolveCanvasExtensionPath() : null,
@@ -386,11 +306,12 @@ function runtimeExtensionPaths(
 }
 
 function runtimeSkillPaths(options: RuntimeStartOptions, plugins: RuntimePluginRef[]): string[] {
-  const loadBrowser = shouldLoadBrowserTool(options, plugins);
+  const loadBrowser = shouldLoadBrowserTool(options);
+  const backend = browserBackend(options);
   return uniqueExistingPaths([
     ...pluginSkillPaths(plugins),
     ...selectedSkillPaths(options.skills ?? []),
-    loadBrowser ? resolveBrowserSkillPath() : null,
+    loadBrowser ? browserSkillPathFor(backend) : null,
     options.canvasEnabled === true ? resolveCanvasSkillPath() : null,
   ]);
 }
@@ -401,13 +322,49 @@ function runtimeEnvInjections(
   env: NodeJS.ProcessEnv,
 ): Record<string, string> {
   const frontendBase = env.VLLM_STUDIO_FRONTEND_BASE ?? deriveFrontendBase(env);
+  const parchiRelay = readParchiRelayEnv(env);
   return {
     VLLM_STUDIO_BROWSER_SESSION_ID: options.browserSessionId ?? "",
     VLLM_STUDIO_FRONTEND_BASE: frontendBase,
     VLLM_STUDIO_MCP_PLUGIN_CONFIGS: JSON.stringify(mcpConfigs),
+    PARCHI_RELAY_URL:
+      env.PARCHI_RELAY_RPC ??
+      env.PARCHI_RELAY_URL ??
+      parchiRelay.PARCHI_RELAY_RPC ??
+      parchiRelay.PARCHI_RELAY_URL ??
+      "",
+    PARCHI_RELAY_TOKEN: env.PARCHI_RELAY_TOKEN ?? parchiRelay.PARCHI_RELAY_TOKEN ?? "",
     PARCHI_RELAY_ORIGIN: env.PARCHI_RELAY_ORIGIN ?? frontendBase,
     PARCHI_RELAY_SESSION_ID: options.browserSessionId ?? "",
   };
+}
+
+function readParchiRelayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const filePath = expandHome(
+    env.VLLM_STUDIO_PARCHI_RELAY_ENV_PATH ?? "~/.config/parchi-relay/env",
+  );
+  if (!existsSync(filePath)) return {};
+  try {
+    return Object.fromEntries(
+      readFileSync(filePath, "utf8")
+        .split(/\r?\n/)
+        .flatMap((line): Array<[string, string]> => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) return [];
+          const clean = trimmed.startsWith("export ") ? trimmed.slice(7).trim() : trimmed;
+          const index = clean.indexOf("=");
+          if (index < 1) return [];
+          const key = clean.slice(0, index).trim();
+          const value = clean
+            .slice(index + 1)
+            .trim()
+            .replace(/^['"]|['"]$/g, "");
+          return key.startsWith("PARCHI_RELAY_") ? [[key, value]] : [];
+        }),
+    );
+  } catch {
+    return {};
+  }
 }
 
 export function applyRuntimeEnvInjections(
@@ -424,19 +381,9 @@ export async function buildAgentSessionOptions(
   const plugins = options.plugins ?? [];
   const mcpConfigs = pluginMcpConfigs(plugins);
   return {
-    extensionPaths: runtimeExtensionPaths(options, plugins, mcpConfigs),
+    extensionPaths: runtimeExtensionPaths(options, mcpConfigs),
     skills: runtimeSkillPaths(options, plugins),
     promptTemplatePaths: selectedPromptTemplatePaths(options.promptTemplates ?? []),
-    extensionOverrides: extensionOverrideMap(options.extensionOverrides ?? []),
     envInjections: runtimeEnvInjections(options, mcpConfigs, input.processEnv ?? process.env),
   };
-}
-
-function extensionOverrideMap(entries: RuntimeExtensionOverride[]): Record<string, boolean> {
-  const map: Record<string, boolean> = {};
-  for (const entry of entries) {
-    if (!entry.key) continue;
-    map[entry.key] = entry.enabled;
-  }
-  return map;
 }

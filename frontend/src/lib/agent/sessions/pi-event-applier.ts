@@ -51,6 +51,14 @@ export function applyPiEventToSession(
 
   if (appendUserMessageFromPiEvent(deps, sessionId, event)) return;
 
+  if (isSuccessfulCompactionEvent(event)) {
+    deps.updateSession(sessionId, (session) => ({
+      ...session,
+      contextUsage: null,
+      tokenStats: undefined,
+    }));
+  }
+
   const usage = usageFromEvent(event);
   if (usage) {
     deps.updateSession(sessionId, (session) => ({ ...session, tokenStats: usage }));
@@ -88,6 +96,35 @@ export function applyPiEventToSession(
   });
 }
 
+function isSuccessfulCompactionEvent(event: Record<string, unknown>): boolean {
+  const type = typeof event.type === "string" ? event.type.toLowerCase() : "";
+  if (!type.includes("compact") && !type.includes("compaction")) return false;
+  if (isFailedCompactionEvent(event)) return false;
+  if (type.includes("start") || type.includes("begin")) return false;
+  return true;
+}
+
+function isFailedCompactionEvent(event: Record<string, unknown>): boolean {
+  if (
+    event.error ||
+    event.errorMessage ||
+    event.aborted ||
+    event.cancelled ||
+    event.canceled ||
+    event.failed
+  ) {
+    return true;
+  }
+  if (event.type === "compaction_end" && event.result == null) return true;
+  const status =
+    typeof event.status === "string"
+      ? event.status
+      : typeof (event.result as { status?: unknown } | undefined)?.status === "string"
+        ? (event.result as { status: string }).status
+        : "";
+  return /abort|cancel|error|fail/.test(status.toLowerCase());
+}
+
 function currentAssistantId(
   deps: PiEventApplierDeps,
   sessionId: SessionId,
@@ -117,6 +154,7 @@ function applyAssistantSnapshotEvent(
 
   const stopReason = typeof message.stopReason === "string" ? message.stopReason : "";
   const callFailed = type === "message_end" && (stopReason === "error" || stopReason === "aborted");
+  const failureText = callFailed ? assistantFailureText(message, stopReason) : "";
 
   deps.patchAssistant(sessionId, currentAssistantId(deps, sessionId, assistantId), (current) => {
     const streamCalls = nextStreamCalls(current.streamCalls, type, content);
@@ -124,8 +162,15 @@ function applyAssistantSnapshotEvent(
     // An LLM call that errored/aborted will never execute the tools it declared
     // — settle them now instead of leaving a perpetual "running" badge.
     if (callFailed) blocks = finalizeRunningToolBlocks(blocks, "error");
+    if (failureText) blocks = appendFailureBlock(blocks, failureText);
     return { ...current, streamCalls, blocks, text: messageTextFromBlocks(blocks) };
   });
+  if (failureText) {
+    deps.updateSession(sessionId, (session) => ({
+      ...session,
+      error: failureText,
+    }));
+  }
   return true;
 }
 
@@ -190,12 +235,36 @@ function patchFinalAssistantMessageFromPiEvent(
   if (msg?.role !== "assistant") return false;
   const content = finalMessageContent(msg.content);
   const stopReason = typeof msg.stopReason === "string" ? msg.stopReason : undefined;
-  const blocks = blocksFromMessageContent(content, { stopReason });
+  const errorMessage = assistantFailureText(msg, stopReason);
+  const blocks = blocksFromMessageContent(content, { stopReason, errorMessage });
   const text = messageTextFromBlocks(blocks);
   deps.patchAssistant(sessionId, currentAssistantId(deps, sessionId, assistantId), (current) => {
     return reconcileFinalAssistantMessage(current, text, blocks);
   });
+  if (errorMessage) {
+    deps.updateSession(sessionId, (session) => ({
+      ...session,
+      error: errorMessage,
+    }));
+  }
   return true;
+}
+
+function assistantFailureText(
+  message: Record<string, unknown>,
+  stopReason: string | undefined,
+): string {
+  if (stopReason !== "error" && stopReason !== "aborted") return "";
+  const raw = [message.errorMessage, message.error, message.stopReason]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+    ?.trim();
+  if (!raw) return stopReason === "aborted" ? "Assistant turn aborted." : "Assistant turn failed.";
+  return raw;
+}
+
+function appendFailureBlock(blocks: AssistantBlock[], text: string): AssistantBlock[] {
+  if (blocks.some((block) => block.kind === "event" && block.text === text)) return blocks;
+  return [...blocks, { kind: "event", id: newId("error"), text }];
 }
 
 function finalMessageContent(value: unknown): string | Array<Record<string, unknown>> | undefined {
