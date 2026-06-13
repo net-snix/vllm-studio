@@ -2,6 +2,15 @@
 
 vLLM Studio is a local-first workstation for running, managing, and using self-hosted LLM backends. It combines a controller API, a Next.js/Electron interface, and a small CLI so one machine can launch models, watch GPU/runtime state, chat with OpenAI-compatible endpoints, and run agent sessions against local or remote controllers.
 
+
+## Screenshots
+
+![Dashboard overview](docs/images/dashboard.png)
+
+![Model recipes](docs/images/models.png)
+
+![Usage analytics](docs/images/usage.png)
+
 ## What Is A Controller?
 
 A controller is the backend process that the UI and CLI talk to. In this repo it is the Bun/Hono server in `controller/`.
