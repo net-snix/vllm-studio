@@ -1,11 +1,11 @@
-import type { Hono } from "hono";
 import { connect } from "node:net";
 import { hostname } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import type { AppContext } from "../../types/context";
+import type { RouteRegistrar } from "../../http/route-registrar";
 import type { SystemConfigResponse } from "../models/types";
 import { badRequest, notFound } from "../../core/errors";
+import { parseJsonObjectBody } from "../../core/validation";
 import { observeControllerFunction } from "../../core/function-observability";
 import { estimateWeightsSizeBytes } from "../models/model-browser";
 import { getGpuInfo } from "./platform/gpu";
@@ -22,7 +22,7 @@ import {
 } from "./configs";
 import { registerLinuxDashboardRoutes } from "./linux-dashboard-routes";
 
-export const registerSystemRoutes = (app: Hono, context: AppContext): void => {
+export const registerSystemRoutes: RouteRegistrar = (app, context) => {
   const checkService = (
     host: string,
     port: number,
@@ -88,10 +88,7 @@ export const registerSystemRoutes = (app: Hono, context: AppContext): void => {
   });
 
   app.post("/vram-calculator", async (ctx) => {
-    const body = await ctx.req.json().catch(() => ({}));
-    if (!body || typeof body !== "object") {
-      throw badRequest("Invalid payload");
-    }
+    const body = await parseJsonObjectBody(ctx);
 
     const model = typeof body["model"] === "string" ? body["model"].trim() : "";
     const contextLength = Number(body["context_length"] ?? 0);

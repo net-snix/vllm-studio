@@ -106,9 +106,7 @@ export const appendDashboardHistory = (
 
   const next = snapshotToHistoryPoint(snapshot);
   const earliest = next.time - DASHBOARD_HISTORY_WINDOW_MS;
-  return [...history, next]
-    .filter((point) => point.time >= earliest)
-    .slice(-limit);
+  return [...history, next].filter((point) => point.time >= earliest).slice(-limit);
 };
 
 export const loadStoredDashboardHistory = (): DashboardHistoryPoint[] => {
@@ -142,7 +140,7 @@ export const storeDashboardHistory = (history: DashboardHistoryPoint[]): void =>
   }
 };
 
-export const getCpuUsageSeries = (history: DashboardHistoryPoint[]): Array<number | null> =>
+const getCpuUsageSeries = (history: DashboardHistoryPoint[]): Array<number | null> =>
   history.map((point) => point.cpu_usage_percent ?? point.cpu_load_percent);
 
 export const getCpuUsageSamples = (history: DashboardHistoryPoint[]): DashboardUsageSample[] =>

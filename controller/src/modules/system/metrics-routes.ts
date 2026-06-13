@@ -1,9 +1,9 @@
-import type { Hono } from "hono";
 import { performance } from "node:perf_hooks";
 import { observeControllerFunction } from "../../core/function-observability";
-import type { AppContext } from "../../types/context";
+import type { RouteRegistrar } from "../../http/route-registrar";
+import type { AppContext } from "../../app-context";
 import { getGpuInfo } from "./platform/gpu";
-import { fetchInference } from "../../services/inference/inference-client";
+import { fetchInference } from "../../services/inference-client";
 import { fetchLocal } from "../../http/local-fetch";
 import { scrapeDs4Throughput } from "./log-throughput";
 
@@ -248,7 +248,7 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
   };
 };
 
-export const registerMonitoringRoutes = (app: Hono, context: AppContext): void => {
+export const registerMonitoringRoutes: RouteRegistrar = (app, context) => {
   app.get("/metrics", async (_ctx) => {
     const current = await observeControllerFunction(
       context,

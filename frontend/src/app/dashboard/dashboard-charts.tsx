@@ -166,7 +166,7 @@ function UsageLineChart({
   );
 }
 
-export function DashboardSparkline({
+function DashboardSparkline({
   samples,
   stroke = "var(--fg)",
   dotted = false,
@@ -517,7 +517,7 @@ export function formatGpuPower(
   return current == null ? `n/a/${limit}W` : `${current}/${limit}W`;
 }
 
-export function formatCpuTopology(data: LinuxDashboardSnapshot): string {
+function formatCpuTopology(data: LinuxDashboardSnapshot): string {
   const physicalCores = data.host.cpu_physical_cores || data.cpu.cores;
   const threads = data.host.cpu_threads || data.cpu.cores;
   return `${physicalCores} cores / ${threads} threads`;

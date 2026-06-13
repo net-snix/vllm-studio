@@ -1,4 +1,4 @@
-import type { DashboardLayoutProps } from "@/components/dashboard/layout/dashboard-types";
+import type { DashboardLayoutProps } from "@/features/dashboard/layout/dashboard-types";
 import type { GPU } from "@/lib/types";
 import { toGB, toGBFromMB } from "@/lib/formatters";
 

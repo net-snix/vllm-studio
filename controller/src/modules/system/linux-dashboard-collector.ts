@@ -2,7 +2,7 @@ import { connect } from "node:net";
 import { arch, cpus, hostname, loadavg, platform, release, totalmem, uptime } from "node:os";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { AppContext } from "../../types/context";
+import type { AppContext } from "../../app-context";
 import { runCommand } from "../../core/command";
 import { getGpuInfo } from "./platform/gpu";
 import { resolveNvidiaSmiBinary } from "./platform/smi-tools";

@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { useDashboardData } from "@/components/dashboard/use-dashboard-data";
-import { useLinuxDashboardEffects } from "@/hooks/agent/use-linux-dashboard-effects";
-import api from "@/lib/api";
+import { useDashboardData } from "@/features/dashboard/use-dashboard-data";
+import { useLinuxDashboardEffects } from "@/features/agent/ui/use-linux-dashboard-effects";
+import api from "@/lib/api/client";
 import type { LinuxDashboardSnapshot } from "@/lib/types";
 import {
   appendDashboardHistory,

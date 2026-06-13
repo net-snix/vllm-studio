@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import type { AppContext } from "../../types/context";
+import type { AppContext } from "../../app-context";
 import { buildSseHeaders, streamAsyncStrings } from "../../http/sse";
 import { collectLinuxDashboardSnapshot } from "./linux-dashboard-collector";
 import {

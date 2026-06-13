@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import { listLogFiles, resolveExistingLogPath, tailFileLines } from "../../core/log-files";
-import type { AppContext } from "../../types/context";
+import type { AppContext } from "../../app-context";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import type { ProcessInfo, Recipe } from "../models/types";
 

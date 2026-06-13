@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import { Hono } from "hono";
-import type { AppContext } from "../../types/context";
+import type { AppContext } from "../../app-context";
 import { registerLinuxDashboardRoutes } from "./linux-dashboard-routes";
 
 describe("linux dashboard routes", () => {

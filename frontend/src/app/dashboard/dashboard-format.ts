@@ -15,7 +15,7 @@ export const formatBytes = (bytes: number): string => {
 export const formatPercent = (value: number | null | undefined): string =>
   typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)}%` : "n/a";
 
-export const formatWatts = (value: number | null | undefined): string =>
+const formatWatts = (value: number | null | undefined): string =>
   typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} W` : "n/a";
 
 export const formatTemp = (value: number | null | undefined): string =>
@@ -30,7 +30,7 @@ export const formatUptime = (seconds: number): string => {
   return `${minutes}m`;
 };
 
-export const healthClasses: Record<LinuxDashboardHealth, string> = {
+const healthClasses: Record<LinuxDashboardHealth, string> = {
   ok: "border-(--fg)/20 text-(--fg)/70 bg-(--fg)/5",
   warning: "border-(--hl3)/40 text-(--hl3) bg-(--hl3)/10",
   critical: "border-(--err)/40 text-(--err) bg-(--err)/10",

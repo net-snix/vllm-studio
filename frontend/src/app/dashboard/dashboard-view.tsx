@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { RefreshCw } from "lucide-react";
-import type { DashboardLayoutProps } from "@/components/dashboard/layout/dashboard-types";
+import type { DashboardLayoutProps } from "@/features/dashboard/layout/dashboard-types";
 import type {
   LinuxDashboardAlert,
   LinuxDashboardHealth,

@@ -1,9 +1,15 @@
+import { existsSync } from "node:fs";
 import type { GpuInfo, RuntimeGpuMonitoringTool } from "../../models/types";
 import { runCommand } from "../../../core/command";
 import { getGpuInfoFromAmdSmi, getGpuInfoFromRocmSmi } from "./amd-gpu";
-import { getGpuInfoFromIntelSysfs, hasIntelSysfsGpus } from "./intel-gpu";
+import { getGpuInfoFromIntelSysfs } from "./intel-gpu";
 import { resolveRocmSmiTool } from "./rocm-info";
-import { resolveForcedGpuMonitoringTool, resolveNvidiaSmiBinary } from "./smi-tools";
+import {
+  resolveAmdSmiBinary,
+  resolveForcedGpuMonitoringTool,
+  resolveNvidiaSmiBinary,
+  resolveRocmSmiBinary,
+} from "./smi-tools";
 
 export const getGpuInfoFromNvidiaSmi = (): GpuInfo[] => {
   const query = [
@@ -72,30 +78,34 @@ export const getGpuInfoFromNvidiaSmi = (): GpuInfo[] => {
   }
 };
 
-export const resolveGpuMonitoringTool = (): RuntimeGpuMonitoringTool | null => {
+/** Tool the cascade in getGpuInfo would use, without running any query commands. */
+export const detectGpuMonitoringTool = (): RuntimeGpuMonitoringTool | null => {
   const forced = resolveForcedGpuMonitoringTool();
-  if (forced === "nvidia-smi") {
-    return "nvidia-smi";
-  }
-  if (forced === "amd-smi" || forced === "rocm-smi") {
-    return forced;
-  }
-  if (forced === "intel-sysfs") {
-    return "intel-sysfs";
-  }
-
-  if (resolveNvidiaSmiBinary()) {
-    return "nvidia-smi";
-  }
-
-  if (hasIntelSysfsGpus()) {
-    return "intel-sysfs";
-  }
-
-  return resolveRocmSmiTool();
+  if (forced) return forced;
+  if (resolveNvidiaSmiBinary()) return "nvidia-smi";
+  const rocmTool = resolveRocmSmiTool();
+  if (rocmTool) return rocmTool;
+  if (getGpuInfoFromIntelSysfs().length > 0) return "intel-sysfs";
+  return null;
 };
 
-export const getGpuInfo = (): GpuInfo[] => {
+// Logged once per process so CPU-only and missing-driver hosts are distinguishable
+// from "zero GPUs" without spamming every poll.
+let warnedNoGpuTooling = false;
+
+const warnNoGpuToolingOnce = (): void => {
+  if (warnedNoGpuTooling) return;
+  warnedNoGpuTooling = true;
+  const attempted = [
+    `nvidia-smi=${resolveNvidiaSmiBinary() ? "found" : "not found"}`,
+    `amd-smi=${resolveAmdSmiBinary() ? "found" : "not found"}`,
+    `rocm-smi=${resolveRocmSmiBinary() ? "found" : "not found"}`,
+    `intel-sysfs=${existsSync("/sys/bus/pci/devices") ? "no compute GPUs" : "unavailable"}`,
+  ].join(" ");
+  console.warn(`No GPUs reported by any monitoring tool; attempted: ${attempted}`);
+};
+
+const collectGpuInfo = (): GpuInfo[] => {
   const forced = resolveForcedGpuMonitoringTool();
   if (forced === "nvidia-smi") {
     return getGpuInfoFromNvidiaSmi();
@@ -133,4 +143,12 @@ export const getGpuInfo = (): GpuInfo[] => {
   }
 
   return [];
+};
+
+export const getGpuInfo = (): GpuInfo[] => {
+  const gpus = collectGpuInfo();
+  if (gpus.length === 0) {
+    warnNoGpuToolingOnce();
+  }
+  return gpus;
 };
