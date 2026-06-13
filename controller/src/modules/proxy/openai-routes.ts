@@ -5,7 +5,10 @@ import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import { buildSseHeaders } from "../../http/sse";
 import type { AppContext } from "../../types/context";
 import type { Recipe } from "../models/types";
-import { getDefaultReasoningParser } from "../engines/process/model-runtime-defaults";
+import {
+  getDefaultReasoningParser,
+  getDefaultToolCallParser,
+} from "../engines/process/model-runtime-defaults";
 import { buildInferenceUrl } from "../../services/inference/inference-client";
 import {
   DEFAULT_CHAT_PROVIDER,
@@ -94,6 +97,13 @@ const shouldPreserveReasoningTagsInContent = (recipe: Recipe | null): boolean =>
   const reasoningFormat =
     recipe.extra_args["reasoning-format"] ?? recipe.extra_args["reasoning_format"];
   return typeof reasoningFormat === "string" && reasoningFormat.toLowerCase() === "none";
+};
+
+const recipeSupportsTools = (recipe: Recipe | null): boolean => {
+  if (!recipe) return true;
+  const explicitParser = recipe.tool_call_parser;
+  if (explicitParser !== null) return Boolean(explicitParser.trim());
+  return Boolean(getDefaultToolCallParser(recipe));
 };
 
 export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
@@ -230,6 +240,12 @@ export const registerOpenAIRoutes = (app: Hono, context: AppContext): void => {
             bodyChanged = true;
           }
         }
+      }
+      if (
+        !recipeSupportsTools(matchedRecipe) &&
+        normalizeToolRequest(parsed, { supportsTools: false })
+      ) {
+        bodyChanged = true;
       }
       if (parsed["functions"] || parsed["tools"] !== undefined) {
         bodyChanged = true;

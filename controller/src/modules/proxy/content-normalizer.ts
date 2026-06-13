@@ -1,5 +1,9 @@
-export const normalizeToolRequest = (payload: Record<string, unknown>): boolean => {
+export const normalizeToolRequest = (
+  payload: Record<string, unknown>,
+  options: { supportsTools?: boolean } = {}
+): boolean => {
   let changed = false;
+  const supportsTools = options.supportsTools !== false;
 
   if (payload["functions"] && !payload["tools"] && Array.isArray(payload["functions"])) {
     payload["tools"] = (payload["functions"] as Array<Record<string, unknown>>).map(
@@ -14,6 +18,21 @@ export const normalizeToolRequest = (payload: Record<string, unknown>): boolean 
   if (Array.isArray(payload["tools"]) && payload["tools"].length === 0) {
     delete payload["tools"];
     changed = true;
+  }
+  if (!supportsTools) {
+    if (payload["functions"] !== undefined) {
+      delete payload["functions"];
+      changed = true;
+    }
+    if (payload["tools"] !== undefined) {
+      delete payload["tools"];
+      changed = true;
+    }
+    if (payload["tool_choice"] !== undefined) {
+      delete payload["tool_choice"];
+      changed = true;
+    }
+    return changed;
   }
   if (payload["tool_choice"] === "auto") {
     delete payload["tool_choice"];
