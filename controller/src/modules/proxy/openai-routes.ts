@@ -75,6 +75,54 @@ const exposeReasoningAsContentWhenEmpty = (
   return true;
 };
 
+const booleanFromUnknown = (value: unknown): boolean | null => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+  }
+  return null;
+};
+
+const recipeMetadata = (recipe: Recipe): Record<string, unknown> => {
+  const metadata = recipe.extra_args?.["metadata"];
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>)
+    : {};
+};
+
+const recipeExtraArgument = (recipe: Recipe, ...keys: string[]): unknown => {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(recipe.extra_args, key)) return recipe.extra_args[key];
+  }
+  return undefined;
+};
+
+const recipeExposesReasoningContent = (recipe: Recipe | null): boolean => {
+  if (!recipe) return true;
+  const metadata = recipeMetadata(recipe);
+  const explicit = booleanFromUnknown(
+    recipeExtraArgument(
+      recipe,
+      "expose_reasoning_content",
+      "expose-reasoning-content",
+      "pi_reasoning",
+      "pi-reasoning",
+      "reasoning"
+    ) ?? metadata["reasoning"]
+  );
+  if (explicit !== null) return explicit;
+  if (recipe.reasoning_parser?.trim()) return true;
+  return Boolean(getDefaultReasoningParser(recipe));
+};
+
+const stripReasoningFieldsFromMessage = (message: Record<string, unknown>): void => {
+  delete message["reasoning_content"];
+  delete message["reasoning"];
+  delete message["reasoning_text"];
+};
+
 const shouldBufferImplicitReasoningContent = (
   model: string,
   reasoningParser: string | null | undefined
@@ -382,6 +430,7 @@ export const registerOpenAIRoutes: RouteRegistrar = (app, context) => {
 
       attachSessionUsage(result, sessionId, usage);
 
+      const exposeReasoningContent = recipeExposesReasoningContent(matchedRecipe);
       const choices = result["choices"];
       if (Array.isArray(choices)) {
         for (const choice of choices) {
@@ -400,6 +449,9 @@ export const registerOpenAIRoutes: RouteRegistrar = (app, context) => {
                 source: sourceHeader,
               }
             );
+          }
+          if (!exposeReasoningContent) {
+            stripReasoningFieldsFromMessage(message);
           }
         }
       }
@@ -473,6 +525,7 @@ export const registerOpenAIRoutes: RouteRegistrar = (app, context) => {
           reasoningParser
         ),
         preserveReasoningTagsInContent: shouldPreserveReasoningTagsInContent(matchedRecipe),
+        suppressReasoningContent: !recipeExposesReasoningContent(matchedRecipe),
       }
     );
 

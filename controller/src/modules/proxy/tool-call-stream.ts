@@ -18,6 +18,7 @@ export interface StreamUsage {
 export interface ToolCallStreamOptions {
   bufferImplicitReasoningContent?: boolean;
   preserveReasoningTagsInContent?: boolean;
+  suppressReasoningContent?: boolean;
 }
 
 export const createToolCallStream = (
@@ -149,7 +150,7 @@ export const createToolCallStream = (
     reasoning_content?: string;
   }): string | null => {
     const content = payload.content ?? "";
-    const reasoning = payload.reasoning_content ?? "";
+    const reasoning = options.suppressReasoningContent ? "" : (payload.reasoning_content ?? "");
     if (!content && !reasoning) return null;
     const delta: Record<string, string> = {};
     if (content) delta["content"] = content;
@@ -330,7 +331,7 @@ export const createToolCallStream = (
               reasoning = `${reasoning}${reasoningFromContent}`;
             }
 
-            if (reasoning) {
+            if (reasoning && !options.suppressReasoningContent) {
               delta["reasoning_content"] = stripToolXmlDelta(reasoning);
             } else if (REASONING_FIELDS.some((field) => field in delta)) {
               delete delta["reasoning_content"];
