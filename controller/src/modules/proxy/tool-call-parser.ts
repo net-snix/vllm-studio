@@ -209,6 +209,18 @@ const parseJsonToolCalls = (content: string, startIndex: number): ToolCall[] => 
   return toolCalls;
 };
 
+const parseShorthandToolCalls = (content: string, startIndex: number): ToolCall[] => {
+  const toolCalls: ToolCall[] = [];
+  const shorthandPattern = /<\s*(bash)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi;
+  for (const match of content.matchAll(shorthandPattern)) {
+    const name = String(match[1] ?? "").trim().toLowerCase();
+    const command = String(match[2] ?? "").trim();
+    if (!name || !command) continue;
+    toolCalls.push(buildToolCall(name, { command }, startIndex + toolCalls.length));
+  }
+  return toolCalls;
+};
+
 export const stripControlTagNoise = (text: string): string => {
   if (!text) return "";
   return text
@@ -221,6 +233,7 @@ export const stripToolCallsFromContent = (content: string): string => {
   let cleaned = content;
   cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "");
   cleaned = cleaned.replace(/<invoke\s+name=(["']?)[^"'\s>]+\1[^>]*>[\s\S]*?<\/invoke>/gi, "");
+  cleaned = cleaned.replace(/<\s*bash\s*>[\s\S]*?<\s*\/\s*bash\s*>/gi, "");
   cleaned = cleaned.replace(/<?use_mcp[\s_]*tool>[\s\S]*?<\/use_mcp[\s_]*tool>/gi, "");
   cleaned = cleaned.replace(
     /<\s*[｜|]\s*DSML\s*[｜|]\s*tool_calls\b[^>]*>[\s\S]*?(?:<\s*[｜|]\s*\/\s*DSML\s*[｜|]\s*tool_calls\s*>|<\s*\/\s*[｜|]\s*DSML\s*[｜|]\s*tool_calls\s*>|$)/gi,
@@ -294,6 +307,10 @@ export const parseToolCallsFromContent = (content: string): ToolCall[] => {
 
   if (toolCalls.length === 0) {
     toolCalls.push(...parseInvokeToolCalls(content, 0));
+  }
+
+  if (toolCalls.length === 0) {
+    toolCalls.push(...parseShorthandToolCalls(content, 0));
   }
 
   if (toolCalls.length === 0) {

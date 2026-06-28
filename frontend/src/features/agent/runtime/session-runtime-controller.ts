@@ -85,9 +85,11 @@ export type SessionRuntimeController = {
    * or a post-compaction/session swap) — `runtimeEventSeq` is the runtime's
    * current seq from the accept response. Rewind the gate to 0 only when that
    * seq sits below what we've already received (a genuine restart); otherwise
-   * keep the cursor where it is. Rewinding on every steady-state turn would make
-   * the next SSE reconnect re-apply the entire accumulated event log and
-   * duplicate every prior turn — the 502-retry-storm message explosion.
+   * keep the cursor where it is. A missing seq means the accept response could
+   * not prove a restart, so preserving the existing cursor is the only safe
+   * behavior. Rewinding on every steady-state turn would make the next SSE
+   * reconnect re-apply the entire accumulated event log and duplicate every
+   * prior turn — the 502-retry-storm message explosion.
    */
   noteTurnAccepted(sessionId: SessionId, assistantId?: string, runtimeEventSeq?: number): void;
   /**
@@ -596,10 +598,10 @@ export function createSessionRuntimeController(
       // runtime's reported seq is now below what we've already received. On a
       // steady-state turn the seq keeps climbing, so an unconditional rewind
       // would make the next reconnect re-apply the whole accumulated log (the
-      // 502-retry-storm duplication). A missing seq falls back to the old
-      // always-rewind behavior to preserve the dropped-second-turn guarantee.
+      // 502-retry-storm duplication). A missing seq is inconclusive; keep the
+      // existing cursor and let normal reconnect/status paths recover.
       const received = (cursors.get(sessionId) ?? adoptExternalCursor(undefined)).receivedSeq ?? 0;
-      if (runtimeEventSeq === undefined || runtimeEventSeq < received) {
+      if (typeof runtimeEventSeq === "number" && runtimeEventSeq < received) {
         adoptCursor(sessionId, 0);
       }
       // A new turn's authoritative bubble is its optimistic activeAssistantId;

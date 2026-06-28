@@ -424,6 +424,20 @@ world"}</arguments></tool_call>`,
     expect(stripToolCallsFromContent(content).trim()).toBe("");
   });
 
+  test("tool XML parser extracts shorthand bash blocks", async () => {
+    const { parseToolCallsFromContent, stripToolCallsFromContent } =
+      await import("../../../controller/src/modules/proxy/tool-call-parser");
+
+    const content = "Let me check.\n<bash>curl -s http://localhost:8888</bash>";
+    const [call] = parseToolCallsFromContent(content);
+
+    expect(call?.function.name).toBe("bash");
+    expect(JSON.parse(call?.function.arguments ?? "{}")).toEqual({
+      command: "curl -s http://localhost:8888",
+    });
+    expect(stripToolCallsFromContent(content).trim()).toBe("Let me check.");
+  });
+
   test("strips orphan tool-call tags that leak from split/partial tool calls", async () => {
     const { stripToolCallsFromContent } = await import(
       "../../../controller/src/modules/proxy/tool-call-parser"
