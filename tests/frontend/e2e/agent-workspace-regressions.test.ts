@@ -19,6 +19,7 @@ import {
 import type { WorkspaceState } from "@/features/agent/workspace/types";
 import { makeFreshTab } from "@/features/agent/messages/helpers";
 import { createSessionReplayQueue } from "@/features/agent/workspace/replay-queue";
+import { readTranscriptSnapshot } from "@/features/agent/workspace/transcript-cache";
 import type { Session } from "@/features/agent/runtime/types";
 import type { ToolSelection } from "@/features/agent/tools/types";
 
@@ -271,7 +272,7 @@ test("active-session broadcasts persist before the event and dedup by content", 
   const order: string[] = [];
   const originalSet = storage.setItem.bind(storage);
   storage.setItem = (key, value) => {
-    if (key === "vllm-studio.agent.activeSessions.snapshot") order.push("persist");
+    if (key === "local-studio.agent.activeSessions.snapshot") order.push("persist");
     originalSet(key, value);
   };
   harness.window.addEventListener(ACTIVE_AGENT_SESSIONS_EVENT, () => order.push("event"));
@@ -296,6 +297,103 @@ test("active-session broadcasts persist before the event and dedup by content", 
   assert.equal(
     harness.fired.filter((entry) => entry.type === ACTIVE_AGENT_SESSIONS_EVENT).length,
     1,
+  );
+});
+
+test("broadcasts surface running sessions that lost their pane as background entries", () => {
+  const pane = makeSession("s-pane", {
+    piSessionId: "pi-pane",
+    runtimeSessionId: "rt-pane",
+    title: "Pane chat",
+    startedAt: "2026-06-19T10:00:00.000Z",
+  });
+  const background = makeSession("s-bg", {
+    piSessionId: "pi-bg",
+    runtimeSessionId: "rt-bg",
+    status: "running",
+    title: "Background chat",
+    startedAt: "2026-06-19T09:00:00.000Z",
+  });
+  const prev = makeState(pane);
+  // The background turn is alive in the store (pruneSessions kept it) but no
+  // pane references it — the user navigated to s-pane.
+  const next: WorkspaceState = {
+    ...prev,
+    sessions: new Map([
+      [pane.id, pane],
+      [background.id, background],
+    ]),
+  };
+  const { deps, harness } = makeEffectDeps();
+
+  runWorkspaceEffect(
+    { type: "patchSession", sessionId: "s-bg", patch: { status: "running" } },
+    prev,
+    next,
+    deps,
+  );
+
+  const detail = harness.fired.find((entry) => entry.type === ACTIVE_AGENT_SESSIONS_EVENT)
+    ?.detail as {
+    sessions: { tabId: string; paneId: string; focused: boolean; status: string }[];
+  };
+  const bg = detail.sessions.find((entry) => entry.tabId === "s-bg");
+  assert.ok(bg, "background session should be broadcast");
+  // Orphan entries carry no pane and are never focused, but keep their status.
+  assert.equal(bg.paneId, "");
+  assert.equal(bg.focused, false);
+  assert.equal(bg.status, "running");
+  // The pane session is still broadcast and focused.
+  const focused = detail.sessions.find((entry) => entry.tabId === "s-pane");
+  assert.equal(focused?.focused, true);
+});
+
+test("settled sessions outside a pane are not broadcast as background entries", () => {
+  const pane = makeSession("s-pane2", {
+    piSessionId: "pi-pane2",
+    title: "Pane chat",
+    startedAt: "2026-06-19T10:00:00.000Z",
+  });
+  const settled = makeSession("s-old", {
+    piSessionId: "pi-old",
+    status: "done",
+    title: "Old chat",
+    startedAt: "2026-06-19T08:00:00.000Z",
+  });
+  // prev: pane session not yet broadcastable (no piSessionId), settled orphan
+  // present. next: pane session gains its piSessionId — this is what changes the
+  // broadcast key and fires the event. The settled orphan must stay absent
+  // throughout.
+  const prevPane = { ...pane, piSessionId: null };
+  const prev: WorkspaceState = {
+    ...makeState(prevPane),
+    sessions: new Map([
+      [prevPane.id, prevPane],
+      [settled.id, settled],
+    ]),
+  };
+  const next: WorkspaceState = {
+    ...prev,
+    sessions: new Map([
+      [pane.id, pane],
+      [settled.id, settled],
+    ]),
+  };
+  const { deps, harness } = makeEffectDeps();
+
+  runWorkspaceEffect(
+    { type: "patchSession", sessionId: "s-pane2", patch: { piSessionId: "pi-pane2" } },
+    prev,
+    next,
+    deps,
+  );
+
+  const detail = harness.fired.find((entry) => entry.type === ACTIVE_AGENT_SESSIONS_EVENT)
+    ?.detail as { sessions: { tabId: string }[] } | undefined;
+  // Only the pane session — the settled orphan stays out of the active list.
+  assert.deepEqual(
+    (detail?.sessions ?? []).map((entry) => entry.tabId),
+    ["s-pane2"],
   );
 });
 
@@ -590,4 +688,48 @@ test("a replay queued for a pane that never mounts stays inert", () => {
   // No handle ever registers: nothing fires, nothing retries, nothing throws.
   assert.deepEqual(harness.replays, []);
   assert.equal(harness.timers.length, 1);
+});
+
+// ----- crash-recovery transcript cache (settle-time write) -----
+
+test("a settled turn writes its transcript to the crash-recovery cache", () => {
+  const { deps, storage } = makeEffectDeps();
+  const running = makeSession("s-1", {
+    piSessionId: "pi-1",
+    status: "running",
+    messages: [{ id: "u1", role: "user", text: "plan the migration" }],
+  });
+  const settled = makeSession("s-1", {
+    piSessionId: "pi-1",
+    status: "idle",
+    title: "Migration",
+    messages: [
+      { id: "u1", role: "user", text: "plan the migration" },
+      { id: "a1", role: "assistant", text: "Here is the plan." },
+    ],
+  });
+  const prev: WorkspaceState = { ...makeState(running) };
+  const next: WorkspaceState = { ...makeState(settled) };
+
+  runWorkspaceEffect({ type: "patchSession", sessionId: "s-1", patch: {} }, prev, next, deps);
+
+  const restored = readTranscriptSnapshot("pi-1", storage);
+  assert.equal(restored?.length, 2);
+  assert.equal(restored?.[1].text, "Here is the plan.");
+});
+
+test("an in-flight (running) turn is not cached until it settles", () => {
+  const { deps, storage } = makeEffectDeps();
+  const idle = makeSession("s-1", { piSessionId: "pi-1", status: "idle", messages: [] });
+  const running = makeSession("s-1", {
+    piSessionId: "pi-1",
+    status: "running",
+    messages: [{ id: "u1", role: "user", text: "streaming…" }],
+  });
+  const prev: WorkspaceState = { ...makeState(idle) };
+  const next: WorkspaceState = { ...makeState(running) };
+
+  runWorkspaceEffect({ type: "patchSession", sessionId: "s-1", patch: {} }, prev, next, deps);
+
+  assert.equal(readTranscriptSnapshot("pi-1", storage), null);
 });

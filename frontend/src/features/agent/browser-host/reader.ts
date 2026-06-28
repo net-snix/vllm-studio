@@ -42,14 +42,14 @@ type BoundedResponse = {
 
 declare global {
   // Test-only hooks for simulating DNS answers / responses without real network.
-  var __VLLM_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST: ReaderHostResolver | undefined;
-  var __VLLM_STUDIO_BROWSER_READER_REQUEST_FOR_TEST:
+  var __LOCAL_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST: ReaderHostResolver | undefined;
+  var __LOCAL_STUDIO_BROWSER_READER_REQUEST_FOR_TEST:
     | ((url: string, address: ResolvedHostAddress) => Promise<BoundedResponse>)
     | undefined;
 }
 
 async function resolveReaderHost(hostname: string): Promise<ResolvedHostAddress[]> {
-  const testResolver = globalThis.__VLLM_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST;
+  const testResolver = globalThis.__LOCAL_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST;
   if (testResolver) return (await testResolver(hostname)).map(normalizeResolvedAddress);
   const results = await lookup(hostname, { all: true, verbatim: true });
   return results.map((result) => ({
@@ -167,7 +167,7 @@ function normalizeResolvedAddress(input: ResolvedHostInput): ResolvedHostAddress
 }
 
 function requestBoundedUrl(url: string, address: ResolvedHostAddress): Promise<BoundedResponse> {
-  const testRequest = globalThis.__VLLM_STUDIO_BROWSER_READER_REQUEST_FOR_TEST;
+  const testRequest = globalThis.__LOCAL_STUDIO_BROWSER_READER_REQUEST_FOR_TEST;
   if (testRequest) return testRequest(url, address);
   const parsed = new URL(url);
   const request = parsed.protocol === "https:" ? httpsRequest : httpRequest;

@@ -1,10 +1,18 @@
 "use client";
 
 import { memo, useCallback, type MouseEvent } from "react";
-import { MoreVertical, Play, Square } from "lucide-react";
+import { MoreVertical, Play, Square } from "@/ui/icon-registry";
 import type { RecipeWithStatus } from "@/lib/types";
-import { ModelButton, ModelRow, ModelStatus, ModelValue, type ModelStatusTone } from "@/ui";
-import { formatBackendLabel } from "@/features/recipes/recipe-labels";
+import {
+  ModelButton,
+  ModelLogo,
+  ModelRow,
+  ModelStatus,
+  ModelValue,
+  type ModelStatusTone,
+} from "@/ui";
+import { modelIdFromPath } from "@/lib/huggingface";
+import { engineNodeStyle, formatBackendLabel } from "@/features/recipes/recipe-labels";
 
 type Props = {
   recipe: RecipeWithStatus;
@@ -70,14 +78,33 @@ export const RecipeRow = memo(function RecipeRow({
   const context = recipe.max_model_len
     ? `${recipe.max_model_len.toLocaleString()} ctx`
     : "ctx auto";
-  const description = `${modelName} · ${formatBackendLabel(recipe.backend)} · ${context}`;
+  const description = `${modelName} · ${context}`;
+  const engine = formatBackendLabel(recipe.backend);
+  const engineStyle = engineNodeStyle(recipe.backend);
   const launchTitle = launchDisabledReason ?? "Launch recipe";
+  const parallelism = `tp/pp ${tp}/${pp}`;
+  const quant = recipe.quantization?.trim();
 
   return (
     <ModelRow
       label={recipe.name}
       description={description}
-      value={<ModelValue mono>{`${recipe.model_path} · tp/pp ${tp}/${pp}`}</ModelValue>}
+      leading={<ModelLogo modelId={modelIdFromPath(recipe.model_path)} size="sm" />}
+      value={
+        <div className="flex items-center gap-2">
+          <span
+            className={`inline-flex h-5 shrink-0 items-center rounded-md px-1.5 text-[length:var(--fs-2xs)] font-medium ${engineStyle.bg} ${engineStyle.fg}`}
+          >
+            {engine}
+          </span>
+          <ModelValue mono>{parallelism}</ModelValue>
+          {quant ? (
+            <span className="shrink-0 rounded bg-(--surface-2) px-1.5 py-0.5 text-[length:var(--fs-2xs)] text-(--dim)">
+              {quant}
+            </span>
+          ) : null}
+        </div>
+      }
       status={<ModelStatus tone={statusTone(status)}>{status}</ModelStatus>}
       actions={
         <>
@@ -95,29 +122,29 @@ export const RecipeRow = memo(function RecipeRow({
               <MoreVertical className="h-3 w-3" />
             </ModelButton>
             {isMenuOpen ? (
-              <div className="absolute right-0 z-50 mt-1 w-48 overflow-hidden rounded-md border border-(--border) bg-(--surface) shadow-lg">
+              <div className="absolute right-0 z-50 mt-1 w-48 overflow-hidden rounded-md border border-(--color-card-border) bg-(--color-popover) shadow-lg">
                 <button
                   onClick={handleTogglePin}
-                  className="w-full px-3 py-2 text-left text-[length:var(--fs-md)] hover:bg-(--hover)"
+                  className="w-full px-3 py-2 text-left text-[length:var(--fs-md)] text-(--fg) hover:bg-(--color-menu-hover)"
                 >
                   {isPinned ? "Unpin" : "Pin"}
                 </button>
                 <button
                   onClick={handleEdit}
-                  className="w-full px-3 py-2 text-left text-[length:var(--fs-md)] hover:bg-(--hover)"
+                  className="w-full px-3 py-2 text-left text-[length:var(--fs-md)] text-(--fg) hover:bg-(--color-menu-hover)"
                 >
                   Edit
                 </button>
                 <button
                   onClick={handleAttachAgents}
-                  className="w-full px-3 py-2 text-left text-[length:var(--fs-md)] hover:bg-(--hover)"
+                  className="w-full px-3 py-2 text-left text-[length:var(--fs-md)] text-(--fg) hover:bg-(--color-menu-hover)"
                 >
                   Attach to local agents…
                 </button>
                 <button
                   onClick={handleRequestDelete}
                   title={`Open delete confirmation for ${recipe.name}`}
-                  className="w-full border-t border-(--border) px-3 py-2 text-left text-[length:var(--fs-md)] text-(--err) hover:bg-(--err)/10"
+                  className="w-full border-t border-(--color-card-border) px-3 py-2 text-left text-[length:var(--fs-md)] text-(--color-destructive) hover:bg-(--color-destructive)/10"
                 >
                   Delete recipe...
                 </button>

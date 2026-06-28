@@ -1,5 +1,7 @@
 "use client";
 
+import { effectTimeout } from "@/lib/effect-timers";
+
 import { useCallback, useState, useSyncExternalStore } from "react";
 import type { HuggingFaceModel } from "@/lib/types";
 import { fetchHuggingFaceModels, isRecentHuggingFaceModel } from "@/lib/huggingface";
@@ -46,9 +48,11 @@ export function useHuggingFaceModelSearch(
           setModels(visibleData);
           setPage(0);
         }
-        setHasMore(
-          data.length === PAGE_SIZE && (!isBrowsing || visibleData.length === data.length),
-        );
+        // hasMore: HF returned a full page, so there may be more. In browse mode
+        // the recency filter may remove every result on a given page — that
+        // doesn't mean there are no more recent models on later pages, so we
+        // only gate on the raw page size, not the filtered count.
+        setHasMore(data.length === PAGE_SIZE);
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -61,10 +65,8 @@ export function useHuggingFaceModelSearch(
   const subscribeModelSearch = useCallback(
     (_notify: () => void) => {
       setPage(0);
-      const debounce = setTimeout(() => {
-        void fetchModels(false, 0);
-      }, 300);
-      return () => clearTimeout(debounce);
+      const timer = effectTimeout(() => void fetchModels(false, 0), 300);
+      return () => timer.cancel();
     },
     [fetchModels],
   );

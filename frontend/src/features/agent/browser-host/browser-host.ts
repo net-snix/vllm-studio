@@ -710,6 +710,6 @@ function keyEvent(key: string): Record<string, unknown> {
   };
 }
 
-const globalForHost = globalThis as typeof globalThis & { __vllmStudioBrowserHost?: BrowserHost };
-export const browserHost = globalForHost.__vllmStudioBrowserHost ?? new BrowserHost();
-globalForHost.__vllmStudioBrowserHost = browserHost;
+const globalForHost = globalThis as typeof globalThis & { __localStudioBrowserHost?: BrowserHost };
+export const browserHost = globalForHost.__localStudioBrowserHost ?? new BrowserHost();
+globalForHost.__localStudioBrowserHost = browserHost;

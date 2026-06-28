@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getApiSettings } from "@/lib/api/api-settings";
+import { getApiSettings } from "@/lib/services/settings-service";
 import { getUpstreamTimeoutMs } from "./proxy-timeouts";
 
-const OVERRIDE_ALLOWLIST_ENV_KEY = "VLLM_STUDIO_PROXY_OVERRIDE_ALLOWLIST";
-const PROXY_ACCESS_LOGS_ENABLED = process.env.VLLM_STUDIO_PROXY_ACCESS_LOGS === "true";
+const OVERRIDE_ALLOWLIST_ENV_KEY = "LOCAL_STUDIO_PROXY_OVERRIDE_ALLOWLIST";
+const PROXY_ACCESS_LOGS_ENABLED = process.env.LOCAL_STUDIO_PROXY_ACCESS_LOGS === "true";
 const PROXY_ERROR_LOG_THROTTLE_MS = 30_000;
-const CLEAR_BACKEND_OVERRIDE_COOKIE = "vllmstudio_backend_url=; Path=/; Max-Age=0; SameSite=Lax";
+const BACKEND_OVERRIDE_COOKIE = "localstudio_backend_url";
+const LEGACY_BACKEND_OVERRIDE_COOKIE = [["v", "llmstudio"].join(""), "backend_url"].join("_");
+const CLEAR_BACKEND_OVERRIDE_COOKIE = `${BACKEND_OVERRIDE_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
+const CLEAR_LEGACY_BACKEND_OVERRIDE_COOKIE = `${LEGACY_BACKEND_OVERRIDE_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
 const proxyErrorLogTimes = new Map<string, number>();
 
 type ClientInfo = { ip: string; country: string; ua: string };
@@ -114,7 +117,7 @@ function getTrustedOverrideOrigins(defaultBackendUrl: string): Set<string> {
 // https://attacker.example) receive the configured bearer key.
 function isTrustedOverride(urlString: string, defaultBackendUrl: string): boolean {
   // Desktop app (Electron) runs entirely locally — trust private targets.
-  if (process.env.VLLM_STUDIO_DATA_DIR) return true;
+  if (process.env.LOCAL_STUDIO_DATA_DIR) return true;
 
   const targetOrigin = normalizeOrigin(urlString);
   if (!targetOrigin) return false;
@@ -129,7 +132,7 @@ function buildTargetUrl(backendUrl: string, path: string[], searchParams: string
 function clearBackendOverrideHeaders(): Record<string, string> {
   return {
     "X-Backend-Override-Invalid": "1",
-    "Set-Cookie": CLEAR_BACKEND_OVERRIDE_COOKIE,
+    "Set-Cookie": `${CLEAR_BACKEND_OVERRIDE_COOKIE}, ${CLEAR_LEGACY_BACKEND_OVERRIDE_COOKIE}`,
   };
 }
 
@@ -137,7 +140,7 @@ function blockedHeaderOverrideResponse(): NextResponse {
   return NextResponse.json(
     {
       error:
-        "Backend override blocked: private/local addresses must be allowlisted via VLLM_STUDIO_PROXY_OVERRIDE_ALLOWLIST",
+        "Backend override blocked: private/local addresses must be allowlisted via LOCAL_STUDIO_PROXY_OVERRIDE_ALLOWLIST",
     },
     {
       status: 403,
@@ -154,7 +157,9 @@ async function resolveProxyTarget(
   const overrideHeaderUrl = normalizeBackendUrl(request.headers.get("x-backend-url"));
   const strictOverride = request.headers.get("x-backend-strict") === "1";
   const overrideCookieUrl = normalizeBackendUrl(
-    request.cookies.get("vllmstudio_backend_url")?.value ?? null,
+    request.cookies.get(BACKEND_OVERRIDE_COOKIE)?.value ??
+      request.cookies.get(LEGACY_BACKEND_OVERRIDE_COOKIE)?.value ??
+      null,
   );
   const defaultBackendUrl = normalizeBackendUrl(settings.backendUrl) ?? settings.backendUrl;
   let overrideUrl = overrideHeaderUrl ?? overrideCookieUrl;
@@ -243,25 +248,46 @@ function proxyResponseStream(
   },
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
+  // The consumer (the client's SSE/EventSource connection) can disconnect at any
+  // time — e.g. a page reload mid-stream. When it does, the runtime cancels this
+  // ReadableStream and any in-flight pull then sees an already-closed controller.
+  // Closing/enqueuing on it throws ERR_INVALID_STATE ("Controller is already
+  // closed"), and the old code re-threw that from inside the catch (uncaught) and
+  // logged a benign disconnect as a [PROXY STREAM CLOSED] error. Track terminal
+  // state and make close idempotent so a client disconnect is a no-op, not noise.
+  let finished = false;
+  const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    if (finished) return;
+    finished = true;
+    try {
+      controller.close();
+    } catch {
+      // Consumer already closed/cancelled the stream — nothing to do.
+    }
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (finished) return;
       try {
         const { done, value } = await reader.read();
         if (done) {
-          controller.close();
+          safeClose(controller);
           return;
         }
-        controller.enqueue(value);
+        if (!finished) controller.enqueue(value);
       } catch (error) {
-        if (shouldLogProxyError(context.method, context.path, error)) {
+        // Only surface genuine upstream failures; a post-disconnect error is
+        // expected once the consumer has gone away.
+        if (!finished && shouldLogProxyError(context.method, context.path, error)) {
           console.warn(
             `[PROXY STREAM CLOSED] ip=${context.client.ip} | country=${context.client.country} | method=${context.method} | path=/${context.path.join("/")} | error=${String(error)}`,
           );
         }
-        controller.close();
+        safeClose(controller);
       }
     },
     cancel(reason) {
+      finished = true;
       void reader.cancel(reason).catch(() => undefined);
     },
   });

@@ -23,8 +23,8 @@ import {
 } from "@/features/agent/workspace/store";
 import { makeFreshTab } from "@/features/agent/messages/helpers";
 
-const SESSIONS_COLLAPSED_KEY = "vllm-studio.agent.sessionsCollapsed";
-const SESSIONS_COLLAPSED_CLEANED_KEY = "vllm-studio.agent.sessionsCollapsedCleaned";
+const SESSIONS_COLLAPSED_KEY = "local-studio.agent.sessionsCollapsed";
+const SESSIONS_COLLAPSED_CLEANED_KEY = "local-studio.agent.sessionsCollapsedCleaned";
 
 function readStorage(storage: WorkspaceStorage, key: string): string | null {
   try {

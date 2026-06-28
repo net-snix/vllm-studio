@@ -4,7 +4,12 @@ export const FILE_WRITE_TOOL_NAMES = new Set([
   "write_file",
   "write",
   "create_file",
+  "createfile",
+  "create file",
+  "create",
   "edit_file",
+  "editfile",
+  "edit file",
   "edit",
   "apply_patch",
   "apply_edit",
@@ -133,6 +138,27 @@ export function toolArg(
 }
 
 export type ToolKind = "edit" | "search" | "read" | "exec" | "browser" | "generic";
+
+/**
+ * ZCode node-taxonomy colors for tool kinds — color-codes each tool verb so the
+ * timeline reads like ZCode's node taxonomy (command/file/session/skill nodes).
+ * Returns the foreground class used for the verb label when the tool is idle.
+ */
+export function toolKindNodeColor(kind: ToolKind): string {
+  switch (kind) {
+    case "exec":
+      return "text-(--color-command-node-foreground)";
+    case "edit":
+    case "read":
+    case "search":
+      return "text-(--color-file-node-foreground)";
+    case "browser":
+      return "text-(--color-session-node-foreground)";
+    case "generic":
+    default:
+      return "text-(--color-skill-node-foreground)";
+  }
+}
 
 export function classifyTool(block: ToolBlock): ToolKind {
   const name = block.name.toLowerCase();

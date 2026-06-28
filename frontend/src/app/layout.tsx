@@ -25,13 +25,13 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "vLLM Studio",
+  title: "Local Studio",
   description: "Model management for vLLM and SGLang",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "vLLM Studio",
+    title: "Local Studio",
   },
   icons: {
     icon: [
@@ -44,7 +44,7 @@ export const metadata: Metadata = {
 };
 
 const bootScript = `${getThemeBootstrapScript()}
-  const enableServiceWorker = ${process.env.VLLM_STUDIO_ENABLE_SERVICE_WORKER === "true" ? "true" : "false"};
+  const enableServiceWorker = ${process.env.LOCAL_STUDIO_ENABLE_SERVICE_WORKER === "true" ? "true" : "false"};
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       if (enableServiceWorker) {
@@ -56,7 +56,7 @@ const bootScript = `${getThemeBootstrapScript()}
         .catch(() => {});
       if ('caches' in window) {
         caches.keys()
-          .then((keys) => Promise.all(keys.filter((key) => key.startsWith('vllm-studio-')).map((key) => caches.delete(key))))
+          .then((keys) => Promise.all(keys.filter((key) => key.startsWith('local-studio-')).map((key) => caches.delete(key))))
           .catch(() => {});
       }
     });
@@ -75,7 +75,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" data-theme="omlx-dark" suppressHydrationWarning>
+    <html lang="en" data-theme="zai-dark" suppressHydrationWarning>
       <head>
         <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
         <link rel="icon" href="/mocks/logo-1.svg" type="image/svg+xml" />

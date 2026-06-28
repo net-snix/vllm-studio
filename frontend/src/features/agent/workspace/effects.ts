@@ -18,6 +18,7 @@ import {
   type WorkspaceStorage,
 } from "@/features/agent/workspace/store";
 import { writeActiveSessions, writePaneState } from "@/features/agent/workspace/persistence";
+import { writeTranscriptSnapshot } from "@/features/agent/workspace/transcript-cache";
 import {
   ACTIVE_AGENT_SESSIONS_EVENT,
   PROJECTS_LOADED_EVENT,
@@ -201,36 +202,59 @@ function runInitialApiEffects(state: WorkspaceState, deps: WorkspaceEffectDeps):
   }
 }
 
+function activeSessionSnapshot(
+  state: WorkspaceState,
+  tab: Session,
+  selectionFor: (id: SessionId) => ToolSelection,
+  paneId: string,
+  focused: boolean,
+): ActiveAgentSessionSnapshot {
+  const selection = selectionFor(tab.id);
+  const usedSkills = usedSkillsForSession(tab);
+  return {
+    projectId: tab.projectId ?? "",
+    cwd: tab.cwd ?? "",
+    paneId,
+    tabId: tab.id,
+    runtimeSessionId: tab.runtimeSessionId,
+    piSessionId: tab.piSessionId,
+    modelId: tab.modelId ?? state.selectedModel,
+    title: cleanSessionTitle(tab.title) || (paneId ? "Current session" : "Background session"),
+    status: tab.status,
+    focused,
+    startedAt: tab.startedAt,
+    updatedAt: tab.startedAt || new Date().toISOString(),
+    plugins: selection.plugins.length > 0 ? selection.plugins : undefined,
+    skills: selection.skills.length > 0 ? selection.skills : undefined,
+    usedSkills: usedSkills.length > 0 ? usedSkills : undefined,
+  };
+}
+
 function computeActiveSessionBroadcast(
   state: WorkspaceState,
   selectionFor: (id: SessionId) => ToolSelection,
 ): ActiveAgentSessionSnapshot[] | null {
   if (!state.hydrated) return null;
   const out: ActiveAgentSessionSnapshot[] = [];
+  const inPane = new Set<SessionId>();
   for (const [paneId, pane] of state.panesById.entries()) {
     const tab = state.sessions.get(pane.sessionId);
     if (!tab) continue;
+    inPane.add(tab.id);
     if (!(Boolean(tab.piSessionId) || tab.messages.length > 0) || tab.status === "loading")
       continue;
-    const selection = selectionFor(tab.id);
-    const usedSkills = usedSkillsForSession(tab);
-    out.push({
-      projectId: tab.projectId ?? "",
-      cwd: tab.cwd ?? "",
-      paneId,
-      tabId: tab.id,
-      runtimeSessionId: tab.runtimeSessionId,
-      piSessionId: tab.piSessionId,
-      modelId: tab.modelId ?? state.selectedModel,
-      title: cleanSessionTitle(tab.title) || "Current session",
-      status: tab.status,
-      focused: paneId === state.focusedPaneId,
-      startedAt: tab.startedAt,
-      updatedAt: tab.startedAt || new Date().toISOString(),
-      plugins: selection.plugins.length > 0 ? selection.plugins : undefined,
-      skills: selection.skills.length > 0 ? selection.skills : undefined,
-      usedSkills: usedSkills.length > 0 ? usedSkills : undefined,
-    });
+    out.push(
+      activeSessionSnapshot(state, tab, selectionFor, paneId, paneId === state.focusedPaneId),
+    );
+  }
+  // Sessions still working after the user navigated away keep no pane, but
+  // pruneSessions keeps them alive in the store. Surface them so a turn started
+  // in another chat stays visible (and re-openable) in the sidebar instead of
+  // running invisibly in the background.
+  for (const tab of state.sessions.values()) {
+    if (inPane.has(tab.id)) continue;
+    if (tab.status !== "running" && tab.status !== "starting") continue;
+    out.push(activeSessionSnapshot(state, tab, selectionFor, "", false));
   }
   return out;
 }
@@ -258,11 +282,41 @@ function storedSessionsKey(state: WorkspaceState): string {
   return JSON.stringify(entries);
 }
 
+// Cheap O(sessions) fingerprint of everything the active-session broadcast
+// snapshot actually depends on: hydration, the selected-model fallback, focus,
+// pane membership, and each session's identity/status/skill scalars. It
+// deliberately reads `messages.length` (not message bodies) and `usedSkills`
+// length — a streaming text delta grows the last message in place without
+// changing any of these, so the signature is stable across the entire token
+// stream of a turn. Tool selection (plugins/skills) is intentionally excluded:
+// it does not flow through a workspace dispatch, so gating on it would never
+// help and only the next session-field change re-broadcasts it (unchanged from
+// the prior every-dispatch behavior).
+export function activeBroadcastSignature(state: WorkspaceState): string {
+  if (!state.hydrated) return " unhydrated";
+  const parts: string[] = [`m:${state.selectedModel ?? ""}`, `f:${state.focusedPaneId ?? ""}`];
+  for (const [paneId, pane] of state.panesById.entries())
+    parts.push(`P:${paneId}>${pane.sessionId}`);
+  for (const tab of state.sessions.values()) {
+    parts.push(
+      `S:${tab.id}|${tab.status}|${tab.piSessionId ?? ""}|${tab.runtimeSessionId}|` +
+        `${tab.projectId ?? ""}|${tab.cwd ?? ""}|${tab.modelId ?? ""}|${tab.startedAt ?? ""}|` +
+        `${tab.title ?? ""}|${tab.messages.length}|${tab.usedSkills?.length ?? 0}`,
+    );
+  }
+  return parts.join("\n");
+}
+
 function broadcastActiveSessions(
   prevState: WorkspaceState,
   nextState: WorkspaceState,
   deps: WorkspaceEffectDeps,
 ): void {
+  // Hot path: a coalesced text delta dispatches patchSession on every animation
+  // frame. The broadcast snapshot can't change unless a broadcast-relevant
+  // scalar changed, so short-circuit on the cheap signature BEFORE the
+  // O(sessions x messages) double walk + JSON.stringify that follows.
+  if (activeBroadcastSignature(prevState) === activeBroadcastSignature(nextState)) return;
   const selectionFor = deps.selectionFor ?? (() => EMPTY_SELECTION);
   const previous = computeActiveSessionBroadcast(prevState, selectionFor);
   const next = computeActiveSessionBroadcast(nextState, selectionFor);
@@ -357,6 +411,47 @@ function paneMetadataKey(
   });
 }
 
+function isSettledStatus(status: string): boolean {
+  return status === "idle" || status === "done";
+}
+
+// Cheap content fingerprint — enough to tell "this session's transcript moved"
+// without serializing every message on every dispatch.
+function transcriptSignature(session: Session): string {
+  const last = session.messages[session.messages.length - 1];
+  return [
+    session.piSessionId ?? "",
+    session.status,
+    session.messages.length,
+    last?.id ?? "",
+    last?.text.length ?? 0,
+    last?.blocks?.length ?? 0,
+  ].join("|");
+}
+
+// Persist the crash-recovery transcript fallback once a session settles with
+// new content. Gated on settle + signature change so it writes about once per
+// completed turn, never per streamed token. The canonical pi JSONL stays the
+// source of truth; this only backstops a failed/empty replay on restore.
+function persistSettledTranscripts(
+  prevState: WorkspaceState,
+  nextState: WorkspaceState,
+  deps: WorkspaceEffectDeps,
+): void {
+  for (const [id, session] of nextState.sessions) {
+    if (!session.piSessionId || session.messages.length === 0) continue;
+    if (!isSettledStatus(session.status)) continue;
+    const before = prevState.sessions.get(id);
+    if (before && transcriptSignature(before) === transcriptSignature(session)) continue;
+    writeTranscriptSnapshot(
+      session.piSessionId,
+      session.messages,
+      cleanSessionTitle(session.title),
+      deps.storage,
+    );
+  }
+}
+
 export function runWorkspaceEffect(
   action: WorkspaceAction,
   prevState: WorkspaceState,
@@ -376,6 +471,9 @@ export function runWorkspaceEffect(
   }
 
   broadcastActiveSessions(prevState, nextState, deps);
+  if (SESSIONS_CHANGED_ACTIONS.has(action.type)) {
+    persistSettledTranscripts(prevState, nextState, deps);
+  }
   if (
     SESSIONS_CHANGED_ACTIONS.has(action.type) &&
     storedSessionsKey(prevState) !== storedSessionsKey(nextState)

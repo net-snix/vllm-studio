@@ -83,7 +83,7 @@ const ToolsContext = createContext<ToolsContextValue | null>(null);
 
 function buildInitialBrowser(): BrowserState {
   if (typeof window === "undefined") {
-    return { enabled: false, backend: "parchi", url: "", input: "" };
+    return { enabled: false, backend: "embedded", url: "", input: "" };
   }
   migrateToolStorage();
   return loadBrowserState();
@@ -151,7 +151,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
 
   const toggleBrowserBackend = useCallback(() => {
     setBrowser((current) => {
-      const backend = current.backend === "parchi" ? "embedded" : "parchi";
+      const backend = current.backend === "sitegeist" ? "embedded" : "sitegeist";
       writeBrowserBackend(backend);
       return { ...current, backend };
     });
@@ -555,9 +555,9 @@ async function loadToolsCatalogue(): Promise<{
   promptTemplates: ComposerPromptTemplateRef[];
 }> {
   const [plugins, skills, promptTemplates] = await Promise.all([
-    fetch("/api/agent/plugins?includeDisabled=1", { cache: "no-store" })
-      .then((res) => res.json() as Promise<{ plugins?: ComposerPluginRef[] }>)
-      .then((payload) => payload.plugins ?? [])
+    fetch("/api/mcp/servers?includeDisabled=1", { cache: "no-store" })
+      .then((res) => res.json() as Promise<{ servers?: ComposerPluginRef[] }>)
+      .then((payload) => payload.servers ?? [])
       .catch(() => [] as ComposerPluginRef[]),
     fetch("/api/agent/skills", { cache: "no-store" })
       .then((res) => res.json() as Promise<{ skills?: ComposerSkillRef[] }>)

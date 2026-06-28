@@ -7,8 +7,8 @@
 .factory
 
 # Per-project agent comments (created when the user adds comments via the
-# vLLM Studio agent surface). Project-local, not shared.
-.vllm-studio/
+# Local Studio agent surface). Project-local, not shared.
+.local-studio/
 
 # Python
 __pycache__/
@@ -83,6 +83,7 @@ scripts/*.local.sh
 .worktree/
 .pi/
 .ralph/
+.trace-harness*/
 
 # Sensitive data - do not commit specific IPs or domains
 # Use environment variables or config files instead

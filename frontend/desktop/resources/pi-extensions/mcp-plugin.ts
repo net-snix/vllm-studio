@@ -9,6 +9,12 @@ type McpServerConfig = {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  tools?: {
+    include?: string[];
+    exclude?: string[];
+    resources?: boolean;
+    prompts?: boolean;
+  };
 };
 
 // MCP servers can be launched from config the caller influences, so the child
@@ -61,7 +67,6 @@ type McpBridgeStatus = {
   error?: string;
 };
 
-const STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 120_000;
 const bridgeStatuses: McpBridgeStatus[] = [];
 
@@ -70,11 +75,15 @@ function readTimeoutMs(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
 }
 
-const TOOL_TIMEOUT_MS = readTimeoutMs("VLLM_STUDIO_MCP_TOOL_TIMEOUT_MS", DEFAULT_TOOL_TIMEOUT_MS);
+const TOOL_TIMEOUT_MS = readTimeoutMs("LOCAL_STUDIO_MCP_TOOL_TIMEOUT_MS", DEFAULT_TOOL_TIMEOUT_MS);
+// Startup must tolerate a cold `npx -y <pkg>` / `uvx` download on first launch,
+// which routinely takes longer than a few seconds. Configurable so a slow link
+// can raise it further.
+const STARTUP_TIMEOUT_MS = readTimeoutMs("LOCAL_STUDIO_MCP_STARTUP_TIMEOUT_MS", 20_000);
 
 function readPluginConfigs(): McpPluginConfig[] {
   try {
-    const parsed = JSON.parse(process.env.VLLM_STUDIO_MCP_PLUGIN_CONFIGS || "[]") as unknown;
+    const parsed = JSON.parse(process.env.LOCAL_STUDIO_MCP_PLUGIN_CONFIGS || "[]") as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed.flatMap((entry) => {
       if (!entry || typeof entry !== "object") return [];
@@ -134,7 +143,7 @@ class McpClient {
     // Resolve cwd "." (or any relative cwd) against the .mcp.json's own dir,
     // then resolve path-like commands against that cwd. Bare PATH executables
     // (e.g. "node", no separator) and absolute commands stay as-is.
-    const cwd = path.resolve(baseDir, config.cwd || ".");
+    const cwd = path.resolve(baseDir, expandHome(config.cwd || "."));
     const command = resolveServerCommand(config.command ?? "", cwd);
     this.child = spawn(command, config.args ?? [], {
       cwd,
@@ -171,7 +180,7 @@ class McpClient {
       {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "vllm-studio", version: "0.1.0" },
+        clientInfo: { name: "local-studio", version: "0.1.0" },
       },
       STARTUP_TIMEOUT_MS,
     );
@@ -291,6 +300,24 @@ function resolveServerCommand(command: string, cwd: string): string {
   return isPathLike ? path.resolve(cwd, command) : command;
 }
 
+function expandHome(value: string): string {
+  if (value === "~") return process.env.HOME || value;
+  if (value.startsWith("~/")) return path.join(process.env.HOME || "~", value.slice(2));
+  return value.replace(/\$\{HOME\}/g, process.env.HOME || "");
+}
+
+function filteredTools(serverConfig: McpServerConfig, tools: McpTool[]): McpTool[] {
+  const selection = serverConfig.tools;
+  if (!selection) return tools;
+  const include = new Set(selection.include ?? []);
+  const exclude = new Set(selection.exclude ?? []);
+  return tools.filter((tool) => {
+    if (include.size) return include.has(tool.name);
+    if (exclude.has(tool.name)) return false;
+    return true;
+  });
+}
+
 async function registerOneServer(
   pi: ExtensionAPI,
   plugin: McpPluginConfig,
@@ -312,7 +339,7 @@ async function registerOneServer(
       status.state = "failed";
       status.error = message;
     });
-    tools = await client.init();
+    tools = filteredTools(serverConfig, await client.init());
     process.once("exit", () => client.dispose());
     status.state = "ready";
     status.tools = tools.map((tool) => tool.name);

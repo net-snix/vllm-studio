@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { HttpStatus, notFound, serviceUnavailable } from "../../core/errors";
+import { HttpStatus, notFound } from "../../core/errors";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import { buildSseHeaders } from "../../http/sse";
 import type { RouteRegistrar } from "../../http/route-registrar";
@@ -33,6 +33,31 @@ interface NonRunningModelWarningState {
   lastWarnAt: number;
   suppressed: number;
 }
+
+export interface ModelNotRunningError {
+  error: { message: string; type: "model_not_running"; code: "model_not_running" };
+  detail: string;
+}
+
+/**
+ * The chat proxy never launches a model. When the requested model isn't the
+ * one running, return this OpenAI-shaped 503 body: SDK callers (the pi agent
+ * runtime) read `error.message`, so this surfaces a real instruction instead
+ * of a bare "503 status code (no body)". `detail` is kept for FastAPI-style
+ * callers that already read it.
+ */
+export const modelNotRunningError = (
+  activeModel: string | null,
+  requestedModel: string | null | undefined,
+): ModelNotRunningError => {
+  const message = activeModel
+    ? `Model ${activeModel} is running; ${requestedModel} is not. Launch it from the frontend before sending requests.`
+    : `No model is running. Launch ${requestedModel} from the frontend before sending requests.`;
+  return {
+    error: { message, type: "model_not_running", code: "model_not_running" },
+    detail: message,
+  };
+};
 
 export const ensureStreamingUsageIncluded = (payload: Record<string, unknown>): boolean => {
   if (!Boolean(payload["stream"])) return false;
@@ -354,11 +379,11 @@ export const registerOpenAIRoutes: RouteRegistrar = (app, context) => {
           activeModel,
           source: sourceHeader,
         });
-        throw serviceUnavailable(
-          activeModel
-            ? `Model ${activeModel} is running; ${requestedModel} is not. Launch it from the frontend before sending requests.`
-            : `No model is running. Launch ${requestedModel} from the frontend before sending requests.`
-        );
+        // Return an OpenAI-shaped error so SDK callers (the pi agent runtime)
+        // surface the message instead of a bare "503 status code (no body)" —
+        // the SDK reads `error.message`, not FastAPI's `detail`. Keep `detail`
+        // too for any non-OpenAI caller that already relies on it.
+        return ctx.json(modelNotRunningError(activeModel, requestedModel), { status: 503 });
       }
     }
 
@@ -459,76 +484,143 @@ export const registerOpenAIRoutes: RouteRegistrar = (app, context) => {
       return ctx.json(result, { status: response.status });
     }
 
-    let upstreamResponse: Response;
-    try {
-      upstreamResponse = await fetch(upstreamUrl, {
-        method: "POST",
-        headers,
-        body: finalBody,
-        signal: clientSignal,
-      });
-    } catch (error) {
-      if (clientSignal.aborted) {
-        return ctx.body(null, { status: 499 });
-      }
-      throw error;
-    }
-    if (!upstreamResponse.ok) {
-      const errorText = await upstreamResponse.text();
-      return new Response(errorText, {
-        status: upstreamResponse.status,
-        headers: {
-          "Content-Type": upstreamResponse.headers.get("Content-Type") ?? "application/json",
-        },
-      });
-    }
+    // SSE keepalive streaming path (fixes Cloudflare 502 during vLLM prefill)
+    const sseEncoder = new TextEncoder();
+    const KEEPALIVE_BYTES = sseEncoder.encode(": keepalive\n\n");
+    const KEEPALIVE_INTERVAL_MS = 15_000;
+    let keepaliveId: ReturnType<typeof setInterval> | null = null;
 
-    const reader = upstreamResponse.body?.getReader();
-    if (!reader) {
-      throw serviceUnavailable(
-        providerRouting ? `${requestProvider} backend unavailable` : "Inference backend unavailable"
-      );
-    }
+    const responseStream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(KEEPALIVE_BYTES);
+        keepaliveId = setInterval(() => {
+          try { controller.enqueue(KEEPALIVE_BYTES); } catch {
+            if (keepaliveId) { clearInterval(keepaliveId); keepaliveId = null; }
+          }
+        }, KEEPALIVE_INTERVAL_MS);
 
-    let ttftMs: number | null = null;
-    const reasoningParser =
-      matchedRecipe && matchedRecipe.reasoning_parser !== null
-        ? matchedRecipe.reasoning_parser
-        : matchedRecipe
-          ? getDefaultReasoningParser(matchedRecipe)
-          : null;
-    const stream = createToolCallStream(
-      reader,
-      (usage) => {
-        recordStreamingInferenceUsage(
-          { logger: context.logger, stores: context.stores },
-          {
-            usage,
-            record: {
-              model: recordedModel,
-              source: sourceHeader,
-              session_id: sessionId,
-              provider: recordedProvider,
-              ttft_ms: ttftMs,
-              duration_ms: Math.round(performance.now() - requestStart),
-              status: upstreamResponse.status,
+        let upstreamResponse: Response;
+        try {
+          upstreamResponse = await fetch(upstreamUrl, {
+            method: "POST",
+            headers,
+            body: finalBody,
+            signal: clientSignal,
+          });
+        } catch (error) {
+          if (keepaliveId) { clearInterval(keepaliveId); keepaliveId = null; }
+          if (clientSignal.aborted) {
+            try { controller.close(); } catch { /* already closed */ }
+            return;
+          }
+          const errorPayload = JSON.stringify({
+            error: {
+              message: `Upstream connection failed: ${String(error)}`,
+              type: "upstream_error",
             },
+          });
+          try {
+            controller.enqueue(sseEncoder.encode(`data: ${errorPayload}\n\n`));
+            controller.close();
+          } catch { /* already closed */ }
+          return;
+        }
+
+        if (keepaliveId) { clearInterval(keepaliveId); keepaliveId = null; }
+
+        if (!upstreamResponse.ok) {
+          let errorBody = "";
+          try { errorBody = await upstreamResponse.text(); } catch { /* ignore */ }
+          try {
+            const payload = errorBody || JSON.stringify({
+              error: {
+                message: `Upstream returned ${upstreamResponse.status}`,
+                type: "upstream_error",
+              },
+            });
+            controller.enqueue(sseEncoder.encode(`data: ${payload}\n\n`));
+            controller.close();
+          } catch { /* already closed */ }
+          return;
+        }
+
+        const reader = upstreamResponse.body?.getReader();
+        if (!reader) {
+          const errorPayload = JSON.stringify({
+            error: {
+              message: providerRouting
+                ? `${requestProvider} backend unavailable`
+                : "Inference backend unavailable",
+              type: "upstream_error",
+            },
+          });
+          try {
+            controller.enqueue(sseEncoder.encode(`data: ${errorPayload}\n\n`));
+            controller.close();
+          } catch { /* already closed */ }
+          return;
+        }
+
+        let ttftMs: number | null = null;
+        const reasoningParser =
+          matchedRecipe && matchedRecipe.reasoning_parser !== null
+            ? matchedRecipe.reasoning_parser
+            : matchedRecipe
+              ? getDefaultReasoningParser(matchedRecipe)
+              : null;
+        const toolCallStream = createToolCallStream(
+          reader,
+          (usage) => {
+            recordStreamingInferenceUsage(
+              { logger: context.logger, stores: context.stores },
+              {
+                usage,
+                record: {
+                  model: recordedModel,
+                  source: sourceHeader,
+                  session_id: sessionId,
+                  provider: recordedProvider,
+                  ttft_ms: ttftMs,
+                  duration_ms: Math.round(performance.now() - requestStart),
+                  status: upstreamResponse.status,
+                },
+              }
+            );
+          },
+          () => {
+            ttftMs ??= Math.max(0, Math.round(performance.now() - requestStart));
+          },
+          {
+            bufferImplicitReasoningContent: shouldBufferImplicitReasoningContent(
+              recordedModel,
+              reasoningParser
+            ),
+            preserveReasoningTagsInContent: shouldPreserveReasoningTagsInContent(matchedRecipe),
+            suppressReasoningContent: !recipeExposesReasoningContent(matchedRecipe),
           }
         );
-      },
-      () => {
-        ttftMs ??= Math.max(0, Math.round(performance.now() - requestStart));
-      },
-      {
-        bufferImplicitReasoningContent: shouldBufferImplicitReasoningContent(
-          recordedModel,
-          reasoningParser
-        ),
-        preserveReasoningTagsInContent: shouldPreserveReasoningTagsInContent(matchedRecipe),
-        suppressReasoningContent: !recipeExposesReasoningContent(matchedRecipe),
-      }
-    );
 
-    return new Response(stream, { headers: buildSseHeaders() });
+        const pipeReader = toolCallStream.getReader();
+        try {
+          while (true) {
+            const { done, value } = await pipeReader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          if (!clientSignal.aborted) {
+            context.logger.error("Stream pipe error", { error: String(error) });
+          }
+        } finally {
+          try { controller.close(); } catch { /* already closed */ }
+        }
+      },
+
+      cancel() {
+        if (keepaliveId) { clearInterval(keepaliveId); keepaliveId = null; }
+      },
+    });
+
+    return new Response(responseStream, { headers: buildSseHeaders() });
   });
 };

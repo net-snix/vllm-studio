@@ -1,21 +1,13 @@
 "use client";
 
 import { useMemo, useState, type ReactNode } from "react";
-import { Code2, Loader2 } from "lucide-react";
+import { Code2, Loader2 } from "@/ui/icon-registry";
 import { formatTokenCount } from "@/features/agent/messages";
 import { useTools } from "@/features/agent/tools/context";
 import type { ComposerSkillRef } from "@/features/agent/composer-context";
-import type { Project } from "@/features/agent/projects/types";
+import type { GitSummary, Project } from "@/features/agent/projects/types";
 import type { Session } from "@/features/agent/runtime/types";
 import type { AgentModel } from "@/features/agent/workspace/types";
-
-type GitSummary = {
-  isRepo: boolean;
-  branch?: string | null;
-  additions: number;
-  deletions: number;
-  statusCount: number;
-} | null;
 
 type StatusTotals = {
   read: number;
@@ -40,7 +32,7 @@ export function ComputerStatusPanel({
   activeModel: AgentModel | null;
   focusedSession: Session | null;
   sessions: Session[];
-  gitSummary?: GitSummary;
+  gitSummary?: GitSummary | null;
   onCompactSession?: () => Promise<void>;
 }) {
   const tools = useTools();
@@ -167,7 +159,7 @@ function sessionBottomRows(totals: StatusTotals): StatusRowData[] {
 function workspaceRows(
   activeProject: Project | null,
   session: Session | null,
-  gitSummary: GitSummary,
+  gitSummary: GitSummary | null,
   browserEnabled: boolean,
   browserUrl: string,
 ): StatusRowData[] {
@@ -244,7 +236,7 @@ function UsedSkillsSection({ skills }: { skills: ComposerSkillRef[] }) {
               className="flex min-w-0 items-center gap-2 py-0.5 text-[length:var(--fs-sm)]"
               title={skill.path}
             >
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400/75" />
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-(--ok)/75" />
               <span className="min-w-0 flex-1 truncate font-mono text-(--fg)">{skill.name}</span>
               <span className="shrink-0 truncate text-[length:var(--fs-xs)] text-(--dim)">
                 {skill.source ?? "skill"}
@@ -257,7 +249,7 @@ function UsedSkillsSection({ skills }: { skills: ComposerSkillRef[] }) {
   );
 }
 
-function formatGitSummary(gitSummary: GitSummary): string {
+function formatGitSummary(gitSummary: GitSummary | null): string {
   if (!gitSummary?.isRepo) return "Not a repo";
   return `${gitSummary.branch ?? "detached"} · +${gitSummary.additions} -${gitSummary.deletions} · ${gitSummary.statusCount} files`;
 }

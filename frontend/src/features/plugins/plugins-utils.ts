@@ -1,4 +1,17 @@
+import { isManagedOAuthEnvKey, providerForEnvKeys } from "@/features/agent/oauth/oauth-providers";
 import type { CatalogueEntry, McpServer } from "./plugins-types";
+
+export { isManagedOAuthEnvKey };
+
+/** The OAuth provider id a catalogue entry connects through, if any. */
+export function oauthProviderIdForEntry(entry: CatalogueEntry): string | null {
+  return entry.oauthProvider ?? providerForEnvKeys(entry.env)?.id ?? null;
+}
+
+/** Whether a catalogue entry is connected via a managed OAuth provider. */
+export function isManagedOAuthEntry(entry: CatalogueEntry): boolean {
+  return oauthProviderIdForEntry(entry) !== null;
+}
 
 export function serverDescription(server: McpServer): string {
   const summary = server.description?.replace(/\s+/g, " ").trim();
@@ -7,8 +20,9 @@ export function serverDescription(server: McpServer): string {
 }
 
 export function serverLocation(server: McpServer): string {
+  const state = !server.enabled ? "disabled" : server.ready ? "connected" : "not ready";
   const tags = server.tags?.length ? ` · ${server.tags.join(", ")}` : "";
-  return `${server.enabled ? "enabled" : "disabled"} · @${server.name}${tags}`;
+  return `${state} · @${server.name}${tags}`;
 }
 
 export function parseArgsText(text: string): string[] {

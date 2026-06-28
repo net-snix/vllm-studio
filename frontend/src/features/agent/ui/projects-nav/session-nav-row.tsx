@@ -2,19 +2,15 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { Loader2 } from "@/ui/icon-registry";
 import { useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
 import { useClickOutside } from "@/features/agent/hooks/use-click-outside";
 import { CloseIcon, EyeOffIcon, MoreIcon, PinIcon } from "@/ui/icons";
 import type { SessionPref } from "@/features/agent/messages/prefs";
+import { hrefWithOpenNonce, navigateToSessionHref } from "./helpers";
 
 const SESSION_MENU_CLASS =
-  "absolute right-0 top-5 isolate z-[999] min-w-[150px] rounded-md border border-[#3a3a3a] bg-[#202020] p-1 text-xs text-(--fg) opacity-100 shadow-[0_12px_32px_rgba(0,0,0,0.85)]";
-
-function hrefWithOpenNonce(href: string): string {
-  const separator = href.includes("?") ? "&" : "?";
-  return `${href}${separator}open=${Date.now().toString(36)}`;
-}
+  "absolute right-0 top-5 isolate z-[999] min-w-[150px] rounded-md border border-(--color-card-border) bg-(--color-popover) p-1 text-xs text-(--fg) opacity-100 shadow-[0_12px_32px_rgba(0,0,0,0.45)]";
 
 type SessionNavRowProps = {
   pref: SessionPref;
@@ -32,6 +28,8 @@ type SessionNavRowProps = {
   onDragStart: (event: DragEvent) => void;
   onContextMenu?: boolean;
   isRunning?: boolean;
+  /** Show the "unseen activity" dot — the session updated while not focused. */
+  unseen?: boolean;
   canDoubleClickRename?: boolean;
   showClearAction?: boolean;
   menuIconClass?: string;
@@ -55,6 +53,7 @@ export function SessionNavRow({
   onDragStart,
   onContextMenu = false,
   isRunning = false,
+  unseen = false,
   canDoubleClickRename = false,
   showClearAction = false,
   menuIconClass = "h-3 w-3",
@@ -114,6 +113,7 @@ export function SessionNavRow({
         canDoubleClickRename={canDoubleClickRename}
         href={href}
         isRunning={isRunning}
+        unseen={unseen}
         label={label}
         onDragStart={onDragStart}
         onOpen={onOpen}
@@ -197,6 +197,7 @@ function SessionOpenTarget({
   canDoubleClickRename,
   href,
   isRunning,
+  unseen,
   label,
   onDragStart,
   onOpen,
@@ -207,6 +208,7 @@ function SessionOpenTarget({
   canDoubleClickRename: boolean;
   href?: string;
   isRunning: boolean;
+  unseen: boolean;
   label: string;
   onDragStart: (event: DragEvent) => void;
   onOpen?: () => void;
@@ -222,7 +224,9 @@ function SessionOpenTarget({
         },
       }
     : {};
-  const content = <SessionRowContent age={age} isRunning={isRunning} label={label} />;
+  const content = (
+    <SessionRowContent age={age} isRunning={isRunning} unseen={unseen} label={label} />
+  );
 
   if (href) {
     return (
@@ -234,7 +238,7 @@ function SessionOpenTarget({
           onRememberTitle?.();
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          router.push(hrefWithOpenNonce(href));
+          navigateToSessionHref(router, hrefWithOpenNonce(href));
         }}
         onDragStart={onDragStart}
         className="flex min-w-0 flex-1 items-center gap-1"
@@ -266,22 +270,30 @@ function SessionOpenTarget({
 function SessionRowContent({
   age,
   isRunning,
+  unseen,
   label,
 }: {
   age: string;
   isRunning: boolean;
+  unseen: boolean;
   label: string;
 }) {
   return (
     <>
       {isRunning ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-(--accent)" aria-hidden />
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-(--link)" aria-hidden />
+      ) : unseen ? (
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-(--link)"
+          aria-label="Unseen activity"
+          title="Unseen activity"
+        />
       ) : null}
-      <span className="min-w-0 flex-1 truncate text-[length:var(--fs-xs)] font-normal leading-4 text-(--fg)/78 transition-colors group-hover:text-(--fg)/95">
+      <span className="min-w-0 flex-1 truncate text-[length:var(--fs-lg)] font-normal leading-4 text-(--fg)/78 transition-colors group-hover:text-(--fg)/95">
         {label}
       </span>
       {age ? (
-        <span className="shrink-0 pl-1.5 pr-1 font-mono text-[length:var(--fs-2xs)] text-(--dim)">
+        <span className="shrink-0 pl-1.5 pr-1 font-mono text-[length:var(--fs-md)] text-(--dim)">
           {age}
         </span>
       ) : null}
@@ -396,7 +408,7 @@ function SessionPinButton({
         if (!disabled) onToggle();
       }}
       disabled={disabled}
-      className={`pointer-events-none absolute left-1.5 top-1/2 z-20 inline-flex h-5 w-5 shrink-0 -translate-y-1/2 scale-90 items-center justify-center rounded-md bg-(--hover)/95 opacity-0 shadow-[0_0_14px_rgba(0,0,0,0.18)] backdrop-blur-sm transition-[opacity,transform,color] duration-300 ease-out hover:text-(--fg) group-hover:pointer-events-auto group-hover:scale-100 group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:scale-100 focus-visible:opacity-100 disabled:opacity-20 ${pinned ? "text-(--accent)" : "text-(--fg)/78"}`}
+      className={`pointer-events-none absolute left-1.5 top-1/2 z-20 inline-flex h-5 w-5 shrink-0 -translate-y-1/2 scale-90 items-center justify-center rounded-md bg-(--hover)/95 opacity-0 shadow-[0_0_14px_rgba(0,0,0,0.18)] backdrop-blur-sm transition-[opacity,transform,color] duration-300 ease-out hover:text-(--fg) group-hover:pointer-events-auto group-hover:scale-100 group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:scale-100 focus-visible:opacity-100 disabled:opacity-20 ${pinned ? "text-(--fg)" : "text-(--fg)/78"}`}
       aria-pressed={pinned}
       aria-label={pinned ? "Unpin session" : "Pin session"}
       title={pinned ? "Unpin session" : "Pin session"}
@@ -411,7 +423,7 @@ function SessionMenuItem({ onClick, children }: { onClick: () => void; children:
     <button
       type="button"
       onClick={onClick}
-      className="block w-full rounded-sm px-2 py-1 text-left text-xs text-(--fg) hover:bg-[#242424]"
+      className="block w-full rounded-sm px-2 py-1 text-left text-xs text-(--fg) hover:bg-(--color-menu-hover)"
     >
       {children}
     </button>

@@ -2,36 +2,16 @@
 
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import { Search } from "lucide-react";
+import { Search } from "@/ui/icon-registry";
 import { ChatIcon, Folder } from "@/ui/icons";
 import { cleanSessionTitle } from "@/features/agent/messages/helpers";
 import { safeJson } from "@/features/agent/safe-json";
 
-// Aggregated session row returned by /api/agent/sessions/all. Mirrored here
-// so the component is decoupled from the API module.
-type AggregatedSession = {
-  id: string;
-  projectId: string;
-  projectName: string;
-  projectPath: string;
-  modelId: string | null;
-  firstUserMessage: string | null;
-  turnCount: number;
-  startedAt: string;
-  updatedAt: string;
-};
-
-type ActiveSession = {
-  projectId: string;
-  cwd: string;
-  paneId: string;
-  tabId: string;
-  piSessionId: string | null;
-  title: string;
-  status: string;
-  focused?: boolean;
-  updatedAt: string;
-};
+import {
+  type ActiveSession,
+  type AggregatedSession,
+  indexActiveByPiId,
+} from "@/features/agent/session-contracts";
 
 type Props = {
   open: boolean;
@@ -164,13 +144,7 @@ export function SessionsCommand({ open, onClose, activeSessions }: Props) {
 
   // Index active sessions by piSessionId so we can mark stored sessions that
   // are currently running in a pane.
-  const activeByPiId = useMemo(() => {
-    const map = new Map<string, ActiveSession>();
-    for (const session of activeSessions) {
-      if (session.piSessionId) map.set(session.piSessionId, session);
-    }
-    return map;
-  }, [activeSessions]);
+  const activeByPiId = useMemo(() => indexActiveByPiId(activeSessions), [activeSessions]);
 
   // Active sessions that aren't yet persisted to disk (no piSessionId yet, or
   // running tabs we want to surface ahead of stored history).

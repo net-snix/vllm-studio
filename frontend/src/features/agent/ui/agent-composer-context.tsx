@@ -1,6 +1,6 @@
 "use client";
 
-import { AtSign, FileText, Slash, Sparkles } from "lucide-react";
+import { AtSign, FileText, Slash, Sparkles } from "@/ui/icon-registry";
 import type {
   ComposerMention,
   ComposerPluginRef,
@@ -23,7 +23,7 @@ export type MentionRow =
   | { kind: "promptTemplate"; row: ComposerPromptTemplateRef }
   | { kind: "file"; row: FileMentionRow };
 
-type LoadedContextKind = "plugin" | "skill" | "promptTemplate";
+export type LoadedContextKind = "plugin" | "skill" | "promptTemplate";
 
 export function AgentLoadedContextTabs({
   plugins,

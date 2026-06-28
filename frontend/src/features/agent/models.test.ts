@@ -10,7 +10,7 @@ function model(id: string, patch: Partial<AgentModel> = {}): AgentModel {
   return {
     id,
     name: id,
-    provider: "vllm-studio",
+    provider: "local-studio",
     contextWindow: 128_000,
     maxTokens: 65_536,
     reasoning: false,

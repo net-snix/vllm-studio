@@ -2,8 +2,12 @@
 
 import { useCallback, useState, useSyncExternalStore } from "react";
 import { Button, Checkbox, UiModal, UiModalHeader } from "@/ui";
-import { getSettingsViewSnapshot } from "./settings-view-snapshot";
-import type { AttachResult, LocalAgentId, LocalAgentTarget } from "./local-agents";
+import { getSettingsViewSnapshot } from "@/features/settings/settings-view-snapshot";
+import type {
+  AttachResult,
+  LocalAgentId,
+  LocalAgentTarget,
+} from "@/features/settings/local-agents";
 
 type Props = {
   modelId: string;

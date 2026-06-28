@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
 import {
   Activity,
   Code2,
@@ -12,19 +12,37 @@ import {
   Plus,
   TerminalSquare,
   type LucideIcon,
-} from "lucide-react";
+} from "@/ui/icon-registry";
 import { CloseIcon } from "@/ui/icons";
-import { clearPersistentTerminalOwners } from "@/features/agent/ui/use-persistent-terminal-owners";
+import {
+  clearPersistentTerminalOwners,
+  rememberPersistentTerminalOwner,
+  removePersistentTerminalOwner,
+  selectPersistentTerminalOwner,
+  usePersistentTerminalOwners,
+  type TerminalOwnersSnapshot,
+} from "@/features/agent/ui/use-persistent-terminal-owners";
 import { normalizeBrowserInput } from "@/features/agent/tools/browser-url";
-import { sanitizePublicBrowserUrl } from "@/features/agent/sanitize-embedded-browser-url";
+import {
+  sanitizeBrowserPaneUrl,
+  sanitizeLocalFileUrl,
+} from "@/features/agent/sanitize-embedded-browser-url";
 import { useTools } from "@/features/agent/tools/context";
 import type { ComputerTab } from "@/features/agent/tools/types";
-import type { Project } from "@/features/agent/projects/types";
+import type { GitSummary, Project } from "@/features/agent/projects/types";
 import type { Session } from "@/features/agent/runtime/types";
 import { makeFreshTab, newRuntimeId } from "@/features/agent/messages/helpers";
 import type { AgentModel } from "@/features/agent/workspace/types";
-import { uniqueTerminalKeys, type TerminalOwner } from "@/features/agent/terminal-owners";
-import { ComputerTabPanel, type SideChatTabsUpdater } from "@/features/agent/ui/computer-tab-panel";
+import {
+  terminalOwnerLabel,
+  uniqueTerminalKeys,
+  type TerminalOwner,
+} from "@/features/agent/terminal-owners";
+import {
+  ComputerTabPanel,
+  type SideChatDraft,
+  type SideChatTabsUpdater,
+} from "@/features/agent/ui/computer-tab-panel";
 import { PersistentTerminals } from "@/features/agent/ui/persistent-terminals";
 import type { WorkspaceHandles } from "@/features/agent/ui/use-workspace";
 
@@ -44,13 +62,7 @@ type AgentBrowserPanelProps = {
   sessions: Session[];
   activeModelId: string;
   activeModel: AgentModel | null;
-  gitSummary?: {
-    isRepo: boolean;
-    branch?: string | null;
-    additions: number;
-    deletions: number;
-    statusCount: number;
-  } | null;
+  gitSummary?: GitSummary | null;
 };
 
 function createSideChatSession(
@@ -63,8 +75,8 @@ function createSideChatSession(
     ...tab,
     runtimeSessionId: newRuntimeId(),
     title: "Side chat",
-    cwd: activeProject?.path ?? focusedSession?.cwd,
-    projectId: activeProject?.id ?? focusedSession?.projectId,
+    cwd: focusedSession?.cwd ?? activeProject?.path,
+    projectId: focusedSession?.projectId ?? activeProject?.id,
     modelId: focusedSession?.modelId ?? activeModelId,
   };
 }
@@ -76,25 +88,47 @@ function terminalOwnerFor(
   if (focusedSession) {
     const sessionKey = `session:${focusedSession.id}`;
     const piKey = focusedSession.piSessionId ? `pi:${focusedSession.piSessionId}` : null;
+    const title = focusedSession.title?.trim() || activeProject?.name || "Session terminal";
     return {
       mountKey: sessionKey,
       matchKeys: uniqueTerminalKeys([sessionKey, piKey ?? ""]),
-      cwd: activeProject?.path ?? focusedSession.cwd ?? null,
+      cwd: focusedSession.cwd ?? activeProject?.path ?? null,
+      title,
+      kind: "session",
+      sessionId: focusedSession.id,
+      piSessionId: focusedSession.piSessionId ?? null,
+      projectId: focusedSession.projectId ?? activeProject?.id ?? null,
     };
   }
   if (!activeProject) return null;
   const projectKey = `project:${activeProject.id}`;
-  return { mountKey: projectKey, matchKeys: [projectKey], cwd: activeProject.path };
+  return {
+    mountKey: projectKey,
+    matchKeys: [projectKey],
+    cwd: activeProject.path,
+    title: activeProject.name || "Project terminal",
+    kind: "project",
+    projectId: activeProject.id,
+  };
+}
+
+function terminalBridge() {
+  return (
+    window as unknown as {
+      localStudioDesktop?: { terminal?: { closeOwner?: (ownerKey: string) => Promise<void> } };
+    }
+  ).localStudioDesktop?.terminal;
 }
 
 function closePersistedTerminalOwners() {
   const closedOwners = clearPersistentTerminalOwners();
-  const terminalBridge = (
-    window as unknown as {
-      vllmStudioDesktop?: { terminal?: { closeOwner?: (ownerKey: string) => Promise<void> } };
-    }
-  ).vllmStudioDesktop?.terminal;
-  for (const owner of closedOwners) void terminalBridge?.closeOwner?.(owner.mountKey);
+  const bridge = terminalBridge();
+  for (const owner of closedOwners) void bridge?.closeOwner?.(owner.mountKey);
+}
+
+function closePersistedTerminalOwner(ownerKey: string) {
+  const owner = removePersistentTerminalOwner(ownerKey);
+  if (owner) void terminalBridge()?.closeOwner?.(owner.mountKey);
 }
 
 export function AgentBrowserPanel({
@@ -117,28 +151,80 @@ export function AgentBrowserPanel({
     () => terminalOwnerFor(activeProject, focusedSession),
     [activeProject, focusedSession],
   );
+  const terminalState = usePersistentTerminalOwners(
+    tools.computer.open && tools.computer.tab === "terminal",
+    terminalOwner,
+  );
+  const openTerminalForFocusedSession = useCallback(() => {
+    if (terminalOwner) rememberPersistentTerminalOwner(terminalOwner, { select: true });
+    tools.setComputerTab("terminal");
+  }, [terminalOwner, tools]);
+  const selectTerminalOwner = useCallback(
+    (ownerKey: string) => {
+      selectPersistentTerminalOwner(ownerKey);
+      tools.setComputerTab("terminal");
+    },
+    [tools],
+  );
+  const closeTerminalOwner = useCallback(
+    (ownerKey: string) => {
+      closePersistedTerminalOwner(ownerKey);
+      if (terminalState.owners.length <= 1) tools.closeComputerTab("terminal");
+    },
+    [terminalState.owners.length, tools],
+  );
+  const handleComputerKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLElement>) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.altKey) return;
+      const index = Number(event.key) - 1;
+      if (!Number.isInteger(index) || index < 0) return;
+      const owner = terminalState.owners[index];
+      if (!owner) return;
+      event.preventDefault();
+      selectTerminalOwner(owner.mountKey);
+    },
+    [selectTerminalOwner, terminalState.owners],
+  );
   const navigateBrowser = (value: string) => {
-    const next = normalizeBrowserInput(value, activeProject?.path ?? "");
+    const next = normalizeBrowserInput(value, focusedSession?.cwd ?? activeProject?.path ?? "");
     if (!next) return;
-    if (!sanitizePublicBrowserUrl(next)) {
-      tools.setBrowserUrl(next, next);
-    }
-    void runBrowserCommand("navigate", { url: next });
+    // Accept pane-eligible URLs (public + loopback) and local file:// URLs.
+    // Anything else (private LAN ranges, non-http(s)) is rejected before we
+    // commit it to the address bar or hand it to the browser host.
+    const accepted = /^file:\/\//i.test(next)
+      ? sanitizeLocalFileUrl(next)
+      : sanitizeBrowserPaneUrl(next);
+    if (!accepted) return;
+    tools.setBrowserUrl(accepted, accepted);
+    void runBrowserCommand("navigate", { url: accepted });
   };
-  const openSideChat = useCallback(() => {
-    setSideChatSession((current) =>
-      current.messages.length
-        ? current
-        : {
-            ...current,
-            status: current.status === "loading" ? "idle" : current.status,
-            cwd: activeProject?.path ?? focusedSession?.cwd,
-            projectId: activeProject?.id ?? focusedSession?.projectId,
-            modelId: current.modelId || focusedSession?.modelId || activeModelId,
-          },
-    );
-    tools.setComputerTab("side-chat");
-  }, [activeModelId, activeProject, focusedSession, tools]);
+  const openSideChat = useCallback(
+    (draft?: SideChatDraft) => {
+      if (draft) {
+        const next = createSideChatSession(activeProject ?? null, focusedSession, activeModelId);
+        setSideChatSession({
+          ...next,
+          title: draft.title.trim().slice(0, 80) || "Plan task",
+          input: draft.input,
+        });
+        tools.setComputerTab("side-chat");
+        return;
+      }
+      setSideChatSession((current) =>
+        current.messages.length
+          ? current
+          : {
+              ...current,
+              status: current.status === "loading" ? "idle" : current.status,
+              cwd: focusedSession?.cwd ?? activeProject?.path,
+              projectId: focusedSession?.projectId ?? activeProject?.id,
+              modelId: current.modelId || focusedSession?.modelId || activeModelId,
+            },
+      );
+      tools.setComputerTab("side-chat");
+    },
+    [activeModelId, activeProject, focusedSession, tools],
+  );
   const updateSideChatTabs = useCallback((nextTabsOrUpdater: SideChatTabsUpdater) => {
     setSideChatSession((current) => {
       const nextTabs =
@@ -168,8 +254,10 @@ export function AgentBrowserPanel({
   );
   return (
     <aside
-      className={`${tools.computer.open ? "relative flex" : "hidden"} shrink-0 flex-col border-l border-(--border) bg-(--agent-bg)`}
+      className={`${tools.computer.open ? "relative flex" : "hidden"} shrink-0 flex-col border-l border-(--border) bg-(--color-panel) shadow-[inset_1px_0_rgba(255,255,255,0.02)]`}
       ref={registerComputerAside}
+      tabIndex={-1}
+      onKeyDown={handleComputerKeyDown}
       style={{ width: `${tools.computer.width}px`, minWidth: "max(280px, 25%)", maxWidth: "65%" }}
     >
       <div
@@ -177,12 +265,16 @@ export function AgentBrowserPanel({
         aria-orientation="vertical"
         title="Resize computer"
         onMouseDown={startComputerResize}
-        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-(--accent)/20"
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-(--fg)/8"
       />
       <ComputerHeader
         tab={tools.computer.tab}
         openTabs={tools.computer.tabs}
+        terminalState={terminalState}
         onSelectTab={tools.setComputerTab}
+        onOpenCurrentTerminal={openTerminalForFocusedSession}
+        onSelectTerminalOwner={selectTerminalOwner}
+        onCloseTerminalOwner={closeTerminalOwner}
         onCloseTab={closeComputerTab}
         onShowLauncher={() => tools.setComputerTab("tools")}
       />
@@ -198,6 +290,7 @@ export function AgentBrowserPanel({
         onCompactSession={handles.compactFocusedSession}
         onNavigateBrowser={navigateBrowser}
         onOpenSideChat={openSideChat}
+        onOpenTerminal={openTerminalForFocusedSession}
         onRenameSideChat={renameSideChat}
         onUpdateSideChatTabs={updateSideChatTabs}
         registerBrowserHandle={registerBrowserHandle}
@@ -208,7 +301,8 @@ export function AgentBrowserPanel({
 
       <PersistentTerminals
         active={tools.computer.open && tools.computer.tab === "terminal"}
-        owner={terminalOwner}
+        activeOwnerKey={terminalState.activeOwnerKey}
+        terminals={terminalState.owners}
       />
     </aside>
   );
@@ -222,6 +316,7 @@ const TAB_LABELS: Record<ComputerTab, string> = {
   browser: "Browser",
   files: "Filesystem",
   diff: "Git",
+  plan: "Plan",
   terminal: "Terminal",
 };
 
@@ -229,7 +324,7 @@ const TAB_OPTIONS: Array<{
   tab: ComputerTab;
   label: string;
   description: string;
-  icon: LucideIcon;
+  icon?: LucideIcon;
 }> = [
   {
     tab: "canvas",
@@ -242,6 +337,11 @@ const TAB_OPTIONS: Array<{
     label: "Side chat",
     description: "Focused side conversation",
     icon: MessageSquarePlus,
+  },
+  {
+    tab: "plan",
+    label: "Plan",
+    description: "Plan and to-do checklist",
   },
   {
     tab: "browser",
@@ -262,28 +362,44 @@ const TAB_OPTIONS: Array<{
 function ComputerHeader({
   tab,
   openTabs,
+  terminalState,
   onSelectTab,
+  onOpenCurrentTerminal,
+  onSelectTerminalOwner,
+  onCloseTerminalOwner,
   onCloseTab,
   onShowLauncher,
 }: {
   tab: ComputerTab;
   openTabs: ComputerTab[];
+  terminalState: TerminalOwnersSnapshot;
   onSelectTab: (tab: ComputerTab) => void;
+  onOpenCurrentTerminal: () => void;
+  onSelectTerminalOwner: (ownerKey: string) => void;
+  onCloseTerminalOwner: (ownerKey: string) => void;
   onCloseTab: (tab: ComputerTab) => void;
   onShowLauncher: () => void;
 }) {
   // The launcher ("tools") is reached via the Plus button, so it never
-  // appears as a row entry. Status IS a real row tab again.
-  const visibleTabs = openTabs.filter((openTab) => openTab !== "tools");
+  // appears as a row entry. Status IS a real row tab again. Terminal owners get
+  // their own right-sidebar tabs, so the generic terminal tab is only shown
+  // before the first terminal has been created/restored.
+  const visibleTabs = openTabs.filter(
+    (openTab) =>
+      openTab !== "tools" && (openTab !== "terminal" || terminalState.owners.length === 0),
+  );
   const tabMeta = (candidate: ComputerTab) =>
     candidate === "status"
       ? { label: "Status", icon: Activity }
       : {
           label: TAB_LABELS[candidate],
-          icon: TAB_OPTIONS.find((item) => item.tab === candidate)?.icon ?? PanelRight,
+          icon:
+            candidate === "plan"
+              ? undefined
+              : (TAB_OPTIONS.find((item) => item.tab === candidate)?.icon ?? PanelRight),
         };
   return (
-    <div className="relative flex h-9 shrink-0 items-center gap-1 border-b border-(--border) px-1.5 text-[length:var(--fs-sm)]">
+    <div className="relative flex h-10 shrink-0 items-center gap-1 border-b border-(--border)/85 bg-(--color-header) px-1.5 text-[length:var(--fs-sm)]">
       <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:thin]">
         {visibleTabs.map((openTab) => {
           const meta = tabMeta(openTab);
@@ -294,17 +410,19 @@ function ComputerHeader({
               key={openTab}
               className={`group inline-flex h-8 min-w-0 shrink-0 items-center gap-0.5 rounded-md ${
                 tab === openTab
-                  ? "text-(--fg)/70 hover:bg-(--surface) hover:text-(--fg)/85"
+                  ? "bg-(--color-surface-hover) text-(--fg)/85 hover:text-(--fg)"
                   : "text-(--dim)/75 hover:bg-(--surface) hover:text-(--fg)/75"
               }`}
               title={meta.label}
             >
               <button
                 type="button"
-                onClick={() => onSelectTab(openTab)}
+                onClick={() =>
+                  openTab === "terminal" ? onOpenCurrentTerminal() : onSelectTab(openTab)
+                }
                 className="inline-flex h-full min-w-0 flex-1 items-center gap-1 rounded-md pl-1.5 pr-1 text-left"
               >
-                <Icon className="pointer-events-none h-3 w-3 shrink-0" />
+                {Icon ? <Icon className="pointer-events-none h-3 w-3 shrink-0" /> : null}
                 <span className="max-w-[7rem] truncate">{meta.label}</span>
               </button>
               {canClose ? (
@@ -324,6 +442,46 @@ function ComputerHeader({
             </div>
           );
         })}
+        {terminalState.owners.map((owner, index) => {
+          const label = terminalOwnerLabel(owner, index);
+          const selected = tab === "terminal" && terminalState.activeOwnerKey === owner.mountKey;
+          const shortcut = index < 9 ? `⌘⌥${index + 1}` : undefined;
+          return (
+            <div
+              key={owner.mountKey}
+              className={`group inline-flex h-8 min-w-0 shrink-0 items-center gap-0.5 rounded-md ${
+                selected
+                  ? "bg-(--color-surface-hover) text-(--fg)/85 hover:text-(--fg)"
+                  : "text-(--dim)/75 hover:bg-(--surface) hover:text-(--fg)/75"
+              }`}
+              title={shortcut ? `${label} (${shortcut})` : label}
+            >
+              <button
+                type="button"
+                onClick={() => onSelectTerminalOwner(owner.mountKey)}
+                className="inline-flex h-full min-w-0 flex-1 items-center gap-1 rounded-md pl-1.5 pr-1 text-left"
+              >
+                <TerminalSquare className="pointer-events-none h-3 w-3 shrink-0" />
+                <span className="max-w-[7rem] truncate">{label}</span>
+                {shortcut ? (
+                  <span className="text-[length:var(--fs-2xs)] text-(--dim)/70">{shortcut}</span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCloseTerminalOwner(owner.mountKey);
+                }}
+                className="inline-flex h-8 w-7 items-center justify-center rounded text-(--dim)/65 hover:bg-(--hover) hover:text-(--fg)/75"
+                aria-label={`Close ${label}`}
+                title={`Close ${label}`}
+              >
+                <CloseIcon className="pointer-events-none h-2 w-2" />
+              </button>
+            </div>
+          );
+        })}
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
         <button
@@ -331,7 +489,7 @@ function ComputerHeader({
           onClick={onShowLauncher}
           className={`relative z-10 -my-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors ${
             tab === "tools"
-              ? "text-(--fg)/70 hover:bg-(--surface) hover:text-(--fg)/85"
+              ? "bg-(--color-surface-hover) text-(--fg)/85 hover:text-(--fg)"
               : "text-(--dim)/75 hover:bg-(--surface) hover:text-(--fg)/75"
           }`}
           title="Show tools"

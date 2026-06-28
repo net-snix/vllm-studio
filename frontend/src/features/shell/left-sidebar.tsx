@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   useCallback,
   useRef,
@@ -25,10 +25,13 @@ import {
   Menu,
   PanelLeftOpen,
   Square,
+  SquarePen,
   X,
-} from "lucide-react";
+} from "@/ui/icon-registry";
 import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "@/store";
+import { useProjects } from "@/features/agent/projects/context";
+import { isChatsProject } from "@/features/agent/projects/types";
 import { ProjectsNavSection } from "@/features/agent/ui/projects-nav-section";
 import { SessionsCommand } from "@/features/agent/ui/sessions-command";
 import { ACTIVE_AGENT_SESSIONS_EVENT } from "@/lib/workspace-events";
@@ -54,9 +57,9 @@ const tabs = [
   { href: "/server", label: "Server", icon: Globe },
 ];
 
-const SIDEBAR_MIN_WIDTH = 180;
-const SIDEBAR_MAX_WIDTH = 340;
-const SIDEBAR_DEFAULT_WIDTH = 248;
+const SIDEBAR_MIN_WIDTH = 188;
+const SIDEBAR_MAX_WIDTH = 320;
+const SIDEBAR_DEFAULT_WIDTH = 224;
 
 function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
@@ -80,6 +83,8 @@ function isRouteActive(pathname: string, href: string): boolean {
  */
 export function LeftSidebar({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const chatsProjectId = useProjects().projects.find(isChatsProject)?.id ?? null;
   const { desktopSidebarPinnedOpen, setDesktopSidebarPinnedOpen, sidebarWidth, setSidebarWidth } =
     useAppStore(
       useShallow((s) => ({
@@ -172,7 +177,11 @@ export function LeftSidebar({ children }: { children: ReactNode }) {
     [clampedSidebarWidth, isExpanded, setSidebarWidth],
   );
 
-  if (pathname.startsWith("/setup")) {
+  if (
+    pathname.startsWith("/setup") ||
+    pathname.startsWith("/download") ||
+    pathname.startsWith("/agents")
+  ) {
     return <div className="h-full w-full">{children}</div>;
   }
 
@@ -191,7 +200,7 @@ export function LeftSidebar({ children }: { children: ReactNode }) {
         </div>
       ) : null}
       <aside
-        className={`relative hidden md:flex sticky top-0 h-[100dvh] border-r border-(--border) bg-(--sidebar-bg) flex-col shrink-0 z-40 overflow-hidden ${
+        className={`relative hidden md:flex sticky top-0 h-[100dvh] border-r border-(--border) bg-(--sidebar-bg) flex-col shrink-0 z-40 overflow-hidden shadow-[inset_-1px_0_rgba(255,255,255,0.02)] ${
           sidebarResizing ? "" : "transition-[width] duration-150 ease-out"
         } ${isExpanded ? "" : "w-0 border-r-0"}`}
         style={{
@@ -207,7 +216,7 @@ export function LeftSidebar({ children }: { children: ReactNode }) {
             title="Resize sidebar"
             onMouseDown={startSidebarResize}
             className={`absolute right-0 top-0 z-[60] h-full w-2 cursor-col-resize transition-colors ${
-              sidebarResizing ? "bg-(--accent)/25" : "hover:bg-(--accent)/20"
+              sidebarResizing ? "bg-(--fg)/10" : "hover:bg-(--fg)/8"
             }`}
           />
         ) : null}
@@ -218,8 +227,9 @@ export function LeftSidebar({ children }: { children: ReactNode }) {
         >
           {isExpanded ? (
             <>
-              {/* Header with window controls + nav arrows */}
-              <div className="sticky top-0 z-50 flex h-12 shrink-0 items-center justify-between px-1.5 bg-(--sidebar-bg)">
+              {/* Header — Codex idiom: panel toggle + back/forward arrows
+                  grouped on the left. */}
+              <div className="sticky top-0 z-50 flex h-10 shrink-0 items-center gap-1 border-b border-(--border)/35 bg-(--sidebar-bg) px-1.5">
                 <button
                   onClick={() => setDesktopSidebarPinnedOpen(false)}
                   className="flex h-7 w-7 items-center justify-center rounded-md text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
@@ -228,45 +238,59 @@ export function LeftSidebar({ children }: { children: ReactNode }) {
                 >
                   <Square className="h-3.5 w-3.5" />
                 </button>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => window.history.back()}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
-                    title="Go back"
-                    aria-label="Go back"
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => window.history.forward()}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
-                    title="Go forward"
-                    aria-label="Go forward"
-                  >
-                    <ChevronRight className="h-4 w-4" />
-                  </button>
-                </div>
+                <button
+                  onClick={() => window.history.back()}
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
+                  title="Go back"
+                  aria-label="Go back"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={() => window.history.forward()}
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
+                  title="Go forward"
+                  aria-label="Go forward"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
               </div>
 
               {/* Primary nav — Codex sidebar idiom: 14px rows with quiet icons,
-                  rounded-lg hover, normal-case muted section labels. */}
+                  rounded-md hover, normal-case muted section labels. */}
               <nav className="flex-1 min-h-0 flex flex-col px-2 py-0.5 overflow-y-auto overflow-x-hidden">
+                {chatsProjectId ? (
+                  <Link
+                    href={`/agent?project=${encodeURIComponent(chatsProjectId)}&new=1`}
+                    onClick={(event) => {
+                      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                      event.preventDefault();
+                      router.push(
+                        `/agent?project=${encodeURIComponent(chatsProjectId)}&new=${Date.now().toString(36)}`,
+                      );
+                    }}
+                    className="mb-0.5 flex h-8 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-(--color-foreground-subtle) transition-colors hover:bg-(--color-surface-hover) hover:text-(--fg)"
+                    title="New chat"
+                  >
+                    <SquarePen className="h-4 w-4 shrink-0 opacity-60" strokeWidth={1.5} />
+                    <span className="flex-1 truncate text-left text-[length:var(--fs-lg)] font-normal">
+                      New chat
+                    </span>
+                  </Link>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => setSearchOpen(true)}
-                  className="mb-1 flex h-8 shrink-0 items-center gap-2.5 rounded-lg px-2.5 text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)/90"
+                  className="mb-1 flex h-8 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-(--color-foreground-subtle) transition-colors hover:bg-(--color-surface-hover) hover:text-(--fg)"
                   title="Search sessions (⌘K)"
                 >
                   <SearchIcon className="h-4 w-4 shrink-0 opacity-60" strokeWidth={1.5} />
                   <span className="flex-1 truncate text-left text-[length:var(--fs-lg)] font-normal">
                     Search
                   </span>
-                  <kbd className="rounded-md border border-(--border)/40 bg-transparent px-1.5 py-0.5 font-mono text-[length:var(--fs-xs)] text-(--dim)/50">
-                    ⌘K
-                  </kbd>
                 </button>
 
-                <div className="mb-1 mt-4 px-2.5 text-[length:var(--fs-sm)] font-medium text-(--dim)/65">
+                <div className="mb-1 mt-4 px-2.5 text-[length:var(--fs-sm)] font-normal text-(--color-foreground-subtlest)">
                   Workspace
                 </div>
                 {tabs.map((tab) => (
@@ -286,17 +310,23 @@ export function LeftSidebar({ children }: { children: ReactNode }) {
                 <Link
                   href="/settings"
                   title="Settings"
-                  className={`group relative flex h-8 shrink-0 items-center gap-2.5 rounded-lg px-2.5 transition-colors ${
+                  className={`group relative flex h-8 shrink-0 items-center gap-2.5 rounded-md px-2.5 transition-colors ${
                     isRouteActive(pathname, "/settings")
-                      ? "bg-(--fg)/8 font-medium text-(--fg)"
-                      : "text-(--dim) hover:bg-(--hover) hover:text-(--fg)/90"
+                      ? "bg-(--color-surface-hover) font-medium text-(--fg)"
+                      : "text-(--color-foreground-subtle) hover:bg-(--color-surface-hover) hover:text-(--fg)"
                   }`}
                 >
+                  {isRouteActive(pathname, "/settings") ? (
+                    <span
+                      aria-hidden
+                      className="absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-full bg-(--fg)/50"
+                    />
+                  ) : null}
                   <Settings
                     className={`h-4 w-4 shrink-0 ${
-                      isRouteActive(pathname, "/settings") ? "opacity-90" : "opacity-60"
+                      isRouteActive(pathname, "/settings") ? "text-(--fg)/85" : "opacity-60"
                     }`}
-                    strokeWidth={1.5}
+                    strokeWidth={1.75}
                   />
                   <span className="whitespace-nowrap text-[length:var(--fs-lg)] font-normal">
                     Settings
@@ -453,15 +483,22 @@ function NavItemDesktop({
     <Link
       href={href}
       title={label}
-      className={`group relative flex h-8 items-center gap-2.5 rounded-lg px-2.5 transition-colors shrink-0 ${
+      className={`group relative flex h-8 items-center gap-2.5 rounded-md px-2.5 transition-colors shrink-0 ${
         active
-          ? "bg-(--fg)/8 font-medium text-(--fg)"
-          : "text-(--dim) hover:bg-(--hover) hover:text-(--fg)/90"
+          ? "bg-(--color-surface-hover) font-medium text-(--fg)"
+          : "text-(--color-foreground-subtle) hover:bg-(--color-surface-hover) hover:text-(--fg)"
       }`}
     >
+      {/* Codex idiom: a quiet left-edge hairline marks the active route. */}
+      {active ? (
+        <span
+          aria-hidden
+          className="absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-full bg-(--fg)/50"
+        />
+      ) : null}
       <Icon
-        className={`h-4 w-4 shrink-0 ${active ? "opacity-90" : "opacity-60"}`}
-        strokeWidth={1.5}
+        className={`h-4 w-4 shrink-0 ${active ? "text-(--fg)/85" : "opacity-60"}`}
+        strokeWidth={1.75}
       />
       <span
         className={`text-[length:var(--fs-lg)] whitespace-nowrap transition-opacity duration-100 ${

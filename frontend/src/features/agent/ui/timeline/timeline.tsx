@@ -3,6 +3,7 @@
 import { memo, useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { AssistantBlock, ChatMessage } from "@/features/agent/messages";
 import { SessionPaneBlockRouter } from "@/features/agent/ui/timeline/session-pane-block-router";
+import { ChevronDownIcon } from "@/ui/icons";
 
 // Mirrors `groupAssistantBlocks`: a message renders something only if it has a
 // non-empty text block or any tool/thinking/event block. Assistant messages
@@ -61,7 +62,10 @@ export function Timeline({
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   const [bottom, setBottom] = useState<HTMLDivElement | null>(null);
 
-  const visibleMessages = useMemo(() => messages.filter(messageRenders), [messages]);
+  const visibleMessages = useMemo(
+    () => mergeConsecutiveAssistantMessages(messages.filter(messageRenders)),
+    [messages],
+  );
 
   useTimelineScrollEffects({
     scroller,
@@ -86,42 +90,223 @@ export function Timeline({
   }
 
   return (
-    <div
-      ref={setScroller}
-      data-timeline-scroller
-      className="agent-chat-scroller min-h-0 flex-1 overflow-y-auto bg-(--agent-bg) px-6 pb-1 pt-2 [overflow-anchor:none] [overscroll-behavior:contain] [scroll-behavior:auto] [scrollbar-gutter:stable_both-edges]"
-    >
-      <div data-timeline-list className="agent-thread-shell mx-auto flex flex-col">
-        {visibleMessages.map((message, index) => {
-          const isLast = index === visibleMessages.length - 1;
-          const prevRole = index > 0 ? visibleMessages[index - 1].role : null;
-          const isGrouped = message.role === prevRole;
-          return (
-            <div
-              key={message.id}
-              className={`[overflow-anchor:none] ${isGrouped ? "pt-2" : "pt-6"} ${isLast ? "pb-4" : ""}`}
-            >
-              <MemoMessage
-                message={message}
-                live={isLast && running}
-                running={running}
-                onForkSession={onForkSession}
-              />
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <div
+        ref={setScroller}
+        data-timeline-scroller
+        // `min-w-0` is load-bearing: without it this flex child keeps its
+        // `min-width: auto` and a single wide code block (long unwrapped lines)
+        // forces the whole column past the window width — the chat ends up
+        // blank with content shoved off the right. min-w-0 lets the scroller
+        // shrink so the inner `<pre overflow-auto>` clips instead.
+        // overflow-anchor:auto (the browser default, set explicitly) lets native
+        // scroll anchoring absorb size changes ABOVE the viewport — reasoning
+        // collapsing, a tool result expanding, a preview decoding — by adjusting
+        // scrollTop so the visible content stays put instead of jumping. The
+        // message wrappers are anchor candidates; only the bottom sentinel opts
+        // out (below) so anchoring never fights the manual stick-to-bottom pin,
+        // which still owns following new content while the view is at the bottom.
+        // (Measured: a 150px above-viewport growth went from CLS 0.037 → 0.)
+        className="agent-chat-scroller min-h-0 min-w-0 flex-1 overflow-y-auto bg-(--agent-bg) px-6 pb-1 pt-2 [overflow-anchor:auto] [overscroll-behavior:contain] [scroll-behavior:auto] [scrollbar-gutter:stable_both-edges]"
+      >
+        <div data-timeline-list className="agent-thread-shell mx-auto flex flex-col">
+          {visibleMessages.map((message, index) => {
+            const isLast = index === visibleMessages.length - 1;
+            const prevRole = index > 0 ? visibleMessages[index - 1].role : null;
+            const isGrouped = message.role === prevRole;
+            return (
+              <div
+                key={message.id}
+                data-timeline-message-id={message.id}
+                // No overflow-anchor:none here — these wrappers must be anchor
+                // candidates so the browser can hold one steady when content
+                // above it grows/shrinks (see the scroller comment).
+                className={`${isGrouped ? "pt-2" : "pt-6"} ${isLast ? "pb-4" : ""}`}
+              >
+                <MemoMessage
+                  message={message}
+                  live={isLast && running}
+                  running={running}
+                  onForkSession={onForkSession}
+                />
+              </div>
+            );
+          })}
+          {running && visibleMessages[visibleMessages.length - 1]?.role !== "assistant" ? (
+            // Codex waiting state: a cadenced text shimmer, no spinner. Only shown
+            // before the assistant produces its first block — once blocks stream,
+            // the activity rows carry their own live states.
+            <div className="pt-6 pb-4">
+              <span className="codex-shimmer-text text-[13px] font-medium leading-5">Thinking</span>
             </div>
-          );
-        })}
-        {running && visibleMessages[visibleMessages.length - 1]?.role !== "assistant" ? (
-          // Codex waiting state: a cadenced text shimmer, no spinner. Only shown
-          // before the assistant produces its first block — once blocks stream,
-          // the activity rows carry their own live states.
-          <div className="pt-6 pb-4 [overflow-anchor:none]">
-            <span className="codex-shimmer-text text-[13px] font-medium leading-5">Thinking</span>
-          </div>
-        ) : null}
-        <div ref={setBottom} aria-hidden="true" className="[overflow-anchor:none]" />
+          ) : null}
+          {/* The one element that KEEPS overflow-anchor:none: the browser must
+              not anchor to this zero-height bottom sentinel (doing so would
+              re-introduce the bottom-edge fights the manual pin was built to
+              own). Real message wrappers above are the anchor candidates. */}
+          <div ref={setBottom} aria-hidden="true" className="[overflow-anchor:none]" />
+        </div>
       </div>
+      <PromptMarkers scroller={scroller} messages={visibleMessages} />
+      {!stickToBottom && visibleMessages.length > 0 ? (
+        <ScrollToBottomButton
+          running={running}
+          onClick={() => {
+            scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
+            onStickToBottomChange?.(true);
+          }}
+        />
+      ) : null}
     </div>
   );
+}
+
+/** Floating "jump to latest" affordance, shown only when the user has scrolled
+ * up off the bottom. Nudges to "New messages" while a turn is streaming. */
+function ScrollToBottomButton({ running, onClick }: { running: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="absolute bottom-3 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-(--border) bg-(--surface) px-3 py-1 text-[length:var(--fs-xs)] text-(--fg)/85 shadow-[0_6px_20px_rgba(0,0,0,0.35)] backdrop-blur-sm transition-colors hover:text-(--fg)"
+      aria-label="Scroll to latest"
+    >
+      {running ? "New messages" : "Latest"}
+      <ChevronDownIcon className="h-3 w-3" />
+    </button>
+  );
+}
+
+const PROMPT_MARKER_HEIGHT_PX = 16;
+const PROMPT_MARKER_GAP_PX = 10;
+const PROMPT_MARKER_MAX_RATIO = 0.6;
+
+type PromptMarkerEntry = {
+  id: string;
+  label: string;
+  time: string;
+};
+
+function PromptMarkers({
+  scroller,
+  messages,
+}: {
+  scroller: HTMLDivElement | null;
+  messages: ChatMessage[];
+}) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const prompts = useMemo(
+    () =>
+      messages
+        .filter((message) => message.role === "user" && userPromptLabel(message).length > 0)
+        .map((message) => ({
+          id: message.id,
+          label: userPromptLabel(message),
+          time: formatPromptTime(message.timestamp),
+        })),
+    [messages],
+  );
+  const viewportHeight = useScrollerViewportHeight(scroller);
+  if (!scroller || prompts.length === 0) return null;
+  const maxCount = Math.max(
+    1,
+    Math.floor(
+      (viewportHeight * PROMPT_MARKER_MAX_RATIO + PROMPT_MARKER_GAP_PX) /
+        (PROMPT_MARKER_HEIGHT_PX + PROMPT_MARKER_GAP_PX),
+    ),
+  );
+  const visible = prompts.length > maxCount ? prompts.slice(-maxCount) : prompts;
+  const scrollToPrompt = (id: string) => {
+    const node = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-timeline-message-id]"),
+    ).find((element) => element.dataset.timelineMessageId === id);
+    node?.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  return (
+    <nav className="prompt-minimap" aria-label="Session prompts">
+      {visible.map((marker) => {
+        const active = hoveredId === marker.id;
+        return (
+          <button
+            key={marker.id}
+            type="button"
+            className="prompt-minimap-marker"
+            aria-label={`Scroll to prompt: ${marker.label}`}
+            onMouseEnter={() => setHoveredId(marker.id)}
+            onMouseLeave={() => setHoveredId((value) => (value === marker.id ? null : value))}
+            onFocus={() => setHoveredId(marker.id)}
+            onBlur={() => setHoveredId((value) => (value === marker.id ? null : value))}
+            onClick={() => scrollToPrompt(marker.id)}
+          >
+            <span className="prompt-minimap-line" />
+            {active ? (
+              <span className="prompt-minimap-card" role="tooltip">
+                <span className="prompt-minimap-card-text">{marker.label}</span>
+                <span className="prompt-minimap-card-time">{marker.time || "Prompt"}</span>
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function useScrollerViewportHeight(scroller: HTMLDivElement | null): number {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      if (!scroller) return () => undefined;
+      const resizeObserver = new ResizeObserver(onStoreChange);
+      resizeObserver.observe(scroller);
+      return () => resizeObserver.disconnect();
+    },
+    [scroller],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => scroller?.clientHeight ?? 0,
+    () => 0,
+  );
+}
+
+function userPromptLabel(message: ChatMessage): string {
+  const text = message.text.trim();
+  if (text) return text.replace(/\s+/g, " ");
+  if (message.attachments?.length) {
+    return message.attachments.map((attachment) => attachment.name).join(", ");
+  }
+  return "";
+}
+
+function formatPromptTime(timestamp?: string): string {
+  const value = timestamp?.trim() ?? "";
+  if (!value) return "";
+  if (/^\d{1,2}:\d{2}(?:\s?[AP]M)?$/i.test(value)) return value;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(
+    new Date(parsed),
+  );
+}
+
+function mergeConsecutiveAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
+  const merged: ChatMessage[] = [];
+  for (const message of messages) {
+    const previous = merged[merged.length - 1];
+    if (message.role !== "assistant" || previous?.role !== "assistant") {
+      merged.push(message);
+      continue;
+    }
+    merged[merged.length - 1] = {
+      ...previous,
+      id: `${previous.id}:${message.id}`,
+      text: [previous.text, message.text].filter(Boolean).join("\n"),
+      blocks: [...(previous.blocks ?? []), ...(message.blocks ?? [])],
+      streamCalls: [...(previous.streamCalls ?? []), ...(message.streamCalls ?? [])],
+      timestamp: message.timestamp ?? previous.timestamp,
+    };
+  }
+  return merged;
 }
 
 const AT_BOTTOM_THRESHOLD_PX = 80;
@@ -136,9 +321,11 @@ const getTimelineScrollSnapshot = (): number => 0;
  *
  * Proximity to the bottom is the single source of truth: if the viewport is at
  * the bottom we follow new content, otherwise we leave the user where they are.
- * Content growth neither moves `scrollTop` nor fires a scroll event, so it can
- * never be misread as "the user scrolled up"; only genuine user scrolls and our
- * own pin writes change `scrollTop`, and both classify correctly via `atBottom`.
+ * `scrollTop` can move from three sources — a genuine user scroll, our own pin
+ * write, and now native scroll anchoring compensating for above-viewport growth
+ * — but all three classify correctly via `atBottom()`: an anchoring adjustment
+ * while scrolled up keeps us off-bottom (stays detached), and while pinned the
+ * next pin write re-asserts the bottom, so neither is misread as "scrolled up".
  *
  * Upward gestures (wheel/touch/keys) detach synchronously with a short hold
  * window, so the user can still escape mid-stream even when a synchronous DOM
@@ -187,6 +374,14 @@ function useTimelineScrollEffects({
 
     const pinToBottom = () => {
       el.scrollTop = el.scrollHeight;
+    };
+    let pinFrame: number | null = null;
+    const schedulePinToBottom = () => {
+      if (!stickRef.current || pinFrame !== null) return;
+      pinFrame = window.requestAnimationFrame(() => {
+        pinFrame = null;
+        if (stickRef.current) pinToBottom();
+      });
     };
     const setStick = (next: boolean) => {
       if (stickRef.current === next) return;
@@ -240,28 +435,30 @@ function useTimelineScrollEffects({
     el.addEventListener("touchstart", onTouchStart, { passive: true });
     el.addEventListener("touchmove", onTouchMove, { passive: true });
 
-    // Follow content + viewport growth while pinned. Running synchronously in the
-    // observer callback (before paint) means streaming text and expanding a
-    // reasoning block re-pin without a visible shift.
+    // Follow content + viewport growth while pinned. Coalesce observer bursts to
+    // one scroll write per animation frame; streamed tool/thinking text can
+    // otherwise trigger a scrollTop write for every token and make the timeline
+    // look like it is flickering or fighting itself.
     const listEl = bottom?.parentElement ?? el;
     const resizeObserver =
       typeof ResizeObserver === "undefined"
         ? null
         : new ResizeObserver(() => {
-            if (stickRef.current) pinToBottom();
+            schedulePinToBottom();
           });
     resizeObserver?.observe(el);
     if (listEl !== el) resizeObserver?.observe(listEl);
 
-    // Streamed text mutates existing nodes without resizing the observed boxes;
-    // keep following those too while pinned.
+    // Structural timeline changes need following; characterData streaming is
+    // deliberately excluded and left to ResizeObserver so we don't do a DOM
+    // scroll write on every token.
     const mutationObserver =
       typeof MutationObserver === "undefined"
         ? null
         : new MutationObserver(() => {
-            if (stickRef.current) pinToBottom();
+            schedulePinToBottom();
           });
-    mutationObserver?.observe(listEl, { childList: true, subtree: true, characterData: true });
+    mutationObserver?.observe(listEl, { childList: true, subtree: true });
 
     // Initial alignment (also covers async-loaded history once it renders, via
     // the ResizeObserver above).
@@ -275,6 +472,7 @@ function useTimelineScrollEffects({
       el.removeEventListener("touchmove", onTouchMove);
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
+      if (pinFrame !== null) window.cancelAnimationFrame(pinFrame);
     };
   }, [bottom, scroller]);
 

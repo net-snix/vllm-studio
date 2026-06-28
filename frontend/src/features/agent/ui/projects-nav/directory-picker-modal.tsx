@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { Button, UiModal, UiModalHeader } from "@/ui";
+import { Button, ErrorBox, UiModal, UiModalHeader } from "@/ui";
 import { Folder } from "@/ui/icons";
 import { useProjectDirectoryPickerModalEffects } from "@/features/agent/ui/projects-nav/use-projects-nav-effects";
 import type { DirectoryBrowserEntry, DirectoryBrowserPayload } from "./types";
@@ -61,7 +61,7 @@ export function ProjectDirectoryPickerModal({
       />
       <div className="space-y-4 p-5 text-sm text-(--fg)">
         <p className="text-xs leading-5 text-(--dim)">
-          Browse folders on the machine running vLLM Studio, or paste an absolute path.
+          Browse folders on the machine running Local Studio, or paste an absolute path.
         </p>
         <div className="flex gap-2">
           <input
@@ -123,11 +123,7 @@ export function ProjectDirectoryPickerModal({
             ))
           )}
         </div>
-        {(browseError || error) && (
-          <div className="rounded border border-(--err)/30 bg-(--err)/10 px-3 py-2 text-xs text-(--err)">
-            {browseError || error}
-          </div>
-        )}
+        {(browseError || error) && <ErrorBox>{browseError || error}</ErrorBox>}
         <div className="flex justify-end gap-2 border-t border-(--border) pt-4">
           <Button variant="ghost" onClick={onClose}>
             Cancel

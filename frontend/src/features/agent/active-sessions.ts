@@ -11,11 +11,27 @@ export type ActiveAgentSessionSnapshot = {
   title: string;
   status: string;
   focused?: boolean;
+  /**
+   * The session produced activity (streaming, or it just finished) while it was
+   * NOT the focused session — i.e. there's something the user hasn't looked at.
+   * Set when a non-focused session is active or transitions to settled; cleared
+   * the moment the session becomes focused. Drives the sidebar "unseen" dot.
+   */
+  unseen?: boolean;
   startedAt?: string;
   updatedAt: string;
   plugins?: ComposerPluginRef[];
   skills?: ComposerSkillRef[];
   usedSkills?: ComposerSkillRef[];
+  /**
+   * Identifies the app instance (window) that wrote this entry. The persist path
+   * stamps every entry it writes; on the next write the merge drops THIS
+   * instance's previously-persisted entries (its `incoming` set is authoritative,
+   * so an entry it no longer lists was closed) while keeping entries written by
+   * other instances (cross-window union). Legacy entries written before this
+   * field existed have no writerId and are preserved.
+   */
+  writerId?: string;
 };
 
 export type ActiveSessionPrefs = Record<string, { hidden?: boolean; pinned?: boolean }>;
@@ -73,6 +89,27 @@ function preferNullable<T>(value: T | null | undefined, fallback: T | null): T |
   return value ?? fallback;
 }
 
+function isActiveStatus(status: string): boolean {
+  return status !== "idle" && status !== "done" && status !== "";
+}
+
+function nextUnseen(
+  session: ActiveAgentSessionSnapshot,
+  existing: ActiveAgentSessionSnapshot | undefined,
+): boolean {
+  // Focusing a session means the user is now looking at it — nothing unseen.
+  if (session.focused === true) return false;
+  // Sticky once set, until the session is focused again.
+  if (existing?.unseen) return true;
+  // A non-focused session that is currently working, or whose activity just
+  // advanced (new content / a settle transition) since we last saw it, has
+  // something unseen.
+  if (isActiveStatus(session.status)) return true;
+  if (existing && session.updatedAt !== existing.updatedAt) return true;
+  if (existing && isActiveStatus(existing.status) && !isActiveStatus(session.status)) return true;
+  return false;
+}
+
 function applyIncomingSnapshot(
   session: ActiveAgentSessionSnapshot,
   target: MergeTarget,
@@ -80,6 +117,7 @@ function applyIncomingSnapshot(
   return {
     ...target.existing,
     ...session,
+    unseen: nextUnseen(session, target.existing),
     piSessionId: preferNullable(session.piSessionId, target.existing?.piSessionId ?? null),
     runtimeSessionId:
       session.runtimeSessionId || target.existing?.runtimeSessionId || session.tabId,
@@ -97,10 +135,16 @@ export function mergeActiveAgentSessions(
   previous: ActiveAgentSessionSnapshot[],
   incoming: ActiveAgentSessionSnapshot[],
   prefs: ActiveSessionPrefs = {},
+  ownWriterId?: string,
 ): ActiveAgentSessionSnapshot[] {
   const byKey = new Map<string, ActiveAgentSessionSnapshot>();
   let focusedKey: string | null = null;
   for (const session of previous) {
+    // `incoming` is the authoritative current set for THIS app instance, so its
+    // own previously-persisted entries are replaced wholesale below — a previous
+    // entry this instance no longer lists was closed/pruned and must not linger.
+    // Entries from other instances (or legacy ones with no writerId) are kept.
+    if (ownWriterId && session.writerId === ownWriterId) continue;
     if (!isHidden(session, prefs)) byKey.set(sessionStorageKey(session), session);
   }
   for (const session of incoming) {
@@ -123,7 +167,10 @@ function normalizeFocusedSession(
   if (!focusedKey) return sessions;
   return sessions.map((session) => {
     const focused = sessionStorageKey(session) === focusedKey;
-    return session.focused === focused ? session : { ...session, focused };
+    // The focused session is being looked at — it can never be "unseen".
+    const unseen = focused ? false : session.unseen;
+    if (session.focused === focused && session.unseen === unseen) return session;
+    return { ...session, focused, unseen };
   });
 }
 

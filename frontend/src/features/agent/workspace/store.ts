@@ -5,7 +5,7 @@ import {
   type ActiveAgentSessionSnapshot,
   type ActiveSessionPrefs,
 } from "@/features/agent/active-sessions";
-import { cleanSessionTitle, makeFreshTab } from "@/features/agent/messages/helpers";
+import { cleanSessionTitle, makeFreshTab, newId } from "@/features/agent/messages/helpers";
 import type { Session, SessionId } from "@/features/agent/runtime/types";
 import type { ToolSelection } from "@/features/agent/tools/types";
 import type { ComposerPluginRef, ComposerSkillRef } from "@/features/agent/composer-context";
@@ -20,10 +20,10 @@ import type {
 
 export { isEmptyStarterTab } from "@/features/agent/workspace/pane-controller";
 
-export const PANE_LAYOUT_KEY = "vllm-studio.agent.paneLayout";
-export const PANE_STATE_KEY = "vllm-studio.agent.paneState";
-export const ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY = "vllm-studio.agent.activeSessions.snapshot";
-export const SESSION_PREFS_KEY = "vllm-studio.agent.sessionPrefs";
+export const PANE_LAYOUT_KEY = "local-studio.agent.paneLayout";
+export const PANE_STATE_KEY = "local-studio.agent.paneState";
+export const ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY = "local-studio.agent.activeSessions.snapshot";
+export const SESSION_PREFS_KEY = "local-studio.agent.sessionPrefs";
 
 export type WorkspaceStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -341,17 +341,34 @@ export function loadPersistedActiveAgentSessions(
   }
 }
 
+// One id per app instance (window), minted lazily on the first client-side
+// write. Stamped onto every entry this instance persists so the merge can
+// authoritatively replace its own entries (dropping closed sessions) while
+// preserving entries written by other windows.
+let activeSessionsWriterId: string | null = null;
+function ownActiveSessionsWriterId(): string {
+  return (activeSessionsWriterId ??= newId("writer"));
+}
+
+// Hard ceiling on the persisted snapshot so the blob can never grow unbounded
+// over a long-lived app session (legacy/other-window entries included). Entries
+// are sorted most-recent-first by the merge, so the cap keeps the freshest ones.
+const MAX_PERSISTED_ACTIVE_SESSIONS = 50;
+
 export function persistActiveAgentSessions(
   sessions: ActiveAgentSessionSnapshot[],
   storage: WorkspaceStorage | null = defaultWorkspaceStorage(),
 ): void {
   if (!storage) return;
   const prefs = loadSessionPrefs(storage);
+  const writerId = ownActiveSessionsWriterId();
+  const stamped = sessions.map((session) => ({ ...session, writerId }));
   const merged = mergeActiveAgentSessions(
     loadPersistedActiveAgentSessions(storage),
-    sessions,
+    stamped,
     prefs,
-  );
+    writerId,
+  ).slice(0, MAX_PERSISTED_ACTIVE_SESSIONS);
   if (merged.length > 0) {
     storage.setItem(ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY, JSON.stringify(merged));
   } else {

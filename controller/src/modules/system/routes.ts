@@ -54,6 +54,7 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
       process: current,
       inference_port: context.config.inference_port,
       launching: context.launchState.getLaunchingRecipeId(),
+      launch_failures: context.launchFailureBudget.listActive(),
     });
   });
 

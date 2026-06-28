@@ -1,6 +1,13 @@
-appId: org.vllm.studio.desktop
-productName: vLLM Studio
+appId: org.local.studio.desktop
+productName: Local Studio
 asar: true
+
+# Postflight guard: assert the packed app actually contains the embedded Next
+# standalone server before signing. electron-builder can silently skip the
+# extraResources copy of .next/standalone (logging "file source doesn't exist")
+# yet still exit 0 — afterPack runs before signing, so throwing aborts the build
+# instead of shipping a broken signed bundle. See the hook for details.
+afterPack: ./scripts/electron-builder-after-pack.mjs
 
 asarUnpack:
   - "node_modules/@lydell/**/*.node"
@@ -20,6 +27,7 @@ extraResources:
       # Never bundle runtime state into the shipped app — standalone/**/data can
       # contain api-settings.json (live API key) and pi-agent/auth.json.
       - "!**/data/**"
+      - "!**/dist-desktop/**"
       - "!**/*.log"
   - from: .next/static
     to: app/frontend/.next/standalone/.next/static
@@ -39,6 +47,10 @@ extraResources:
       - "**/*"
   - from: desktop/resources/pi-extensions
     to: desktop/resources/pi-extensions
+    filter:
+      - "**/*"
+  - from: desktop/resources/mcp
+    to: desktop/resources/mcp
     filter:
       - "**/*"
   - from: desktop/resources/skills

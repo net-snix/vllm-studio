@@ -10,7 +10,7 @@ import { ADD_PROJECT_EVENT, SESSIONS_CHANGED_EVENT } from "@/lib/workspace-event
 import type { Project as ProjectEntry } from "@/features/agent/projects/types";
 import type { ActiveAgentSession, SessionSummary } from "./types";
 
-const SESSION_NAV_TITLE_PREFIX = "vllm-studio.agent.sessionNavTitle:";
+const SESSION_NAV_TITLE_PREFIX = "local-studio.agent.sessionNavTitle:";
 
 export function setAgentSessionDragData(
   event: DragEvent,
@@ -71,7 +71,9 @@ export function relativeAge(value?: string | null): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  return days === 1 ? "1 day" : `${days} days`;
+  if (days < 7) return `${days}d`;
+  const weeks = Math.floor(days / 7);
+  return `${weeks}w`;
 }
 
 export function sessionDedupeKey(session: SessionSummary): string {
@@ -85,6 +87,39 @@ export function sessionDedupeKey(session: SessionSummary): string {
 export function triggerAddProjectFlow() {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new Event(ADD_PROJECT_EVENT));
+}
+
+/**
+ * Append a short, monotonic `open=` nonce so a repeat click on the *same*
+ * session still produces a distinct href (Next would otherwise dedupe the URL).
+ */
+export function hrefWithOpenNonce(href: string): string {
+  const separator = href.includes("?") ? "&" : "?";
+  return `${href}${separator}open=${Date.now().toString(36)}`;
+}
+
+/**
+ * Open a session by href. Next 16's App Router silently no-ops a `router.push`
+ * to the same `/agent` route when only the `session`/`open` searchParams change
+ * — so clicking a session in the sidebar did nothing (the conversation never
+ * loaded, and a running session looked like it reset). We try the soft push
+ * first (instant where it works), then verify the URL actually moved to the
+ * target session and fall back to a real navigation if it didn't. The hard nav
+ * reliably loads the session — and reattaches a live in-flight turn via the
+ * reload path.
+ */
+export function navigateToSessionHref(
+  router: { push: (href: string) => void },
+  href: string,
+): void {
+  router.push(href);
+  if (typeof window === "undefined") return;
+  const want = new URLSearchParams(href.split("?")[1] ?? "").get("session");
+  if (!want) return;
+  window.setTimeout(() => {
+    const have = new URLSearchParams(window.location.search).get("session");
+    if (have !== want) window.location.assign(href);
+  }, 70);
 }
 
 export function rememberAgentSessionNavTitle(sessionId: string | null | undefined, title: string) {

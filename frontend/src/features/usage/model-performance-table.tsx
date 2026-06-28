@@ -2,7 +2,7 @@
 
 import type { PeakMetrics, SortDirection, SortField } from "@/lib/types";
 import { Fragment, type ReactNode } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp } from "@/ui/icon-registry";
 import { Table, TBody, TCell, THead, TH, TRow } from "@/ui";
 import { formatNumber, formatDurationOrUnavailable } from "@/lib/formatters";
 import { getModelColor } from "@/features/usage/colors";

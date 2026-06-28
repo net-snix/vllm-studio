@@ -15,13 +15,11 @@ import type {
   ComposerSkillRef,
 } from "@/features/agent/composer-context";
 
-export type RuntimeContextUsage = {
-  tokens: number | null;
-  contextWindow: number;
-  percent: number | null;
-  shouldCompact: boolean;
-};
-
+import {
+  decodeRuntimeEventPayload,
+  type RuntimeContextUsage,
+} from "@/features/agent/runtime/runtime-schema";
+export type { RuntimeContextUsage };
 export type RuntimeStatus = {
   active?: boolean;
   running?: boolean;
@@ -198,13 +196,19 @@ export function subscribeRuntimeEvents(
   if (piSessionId) params.set("piSessionId", piSessionId);
   const source = new EventSource(`/api/agent/runtime/events?${params.toString()}`);
   source.onmessage = (event) => {
-    let payload: RuntimeEventPayload;
+    // Validate the SSE frame at the boundary via the Effect schema. Malformed
+    // or unrecognized payloads are dropped silently (matching the legacy
+    // JSON.parse-cast behavior, but now without untrusted data reaching the
+    // reducer).
+    let parsed: unknown;
     try {
-      payload = JSON.parse(event.data) as RuntimeEventPayload;
+      parsed = JSON.parse(event.data);
     } catch {
       return;
     }
-    handlers.onPayload(payload);
+    const payload = decodeRuntimeEventPayload(parsed);
+    if (!payload) return;
+    handlers.onPayload(payload as unknown as RuntimeEventPayload);
   };
   source.onerror = handlers.onError;
   return {

@@ -6,6 +6,7 @@ import { DESKTOP_CONFIG, resolveStandaloneBaseDir, resolveStaticAssetsSource } f
 import type { DesktopServerRuntime } from "../types";
 import { log } from "../helpers/logger";
 import { resolveStablePort } from "../helpers/ports";
+import { resolveAugmentedPath } from "../helpers/resolve-path";
 
 interface ServerHandle {
   runtime: DesktopServerRuntime;
@@ -130,7 +131,7 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
 export async function startFrontendServer(
   options: StartFrontendServerOptions = {},
 ): Promise<ServerHandle> {
-  if (process.env.VLLM_STUDIO_DESKTOP_DEV_SERVER_URL) {
+  if (process.env.LOCAL_STUDIO_DESKTOP_DEV_SERVER_URL) {
     const runtime: DesktopServerRuntime = {
       mode: "dev-server",
       port: Number(new URL(DESKTOP_CONFIG.devServerUrl).port || "3000"),
@@ -173,26 +174,37 @@ export async function startFrontendServer(
   const child = fork(serverScript, {
     cwd: serverRoot,
     stdio: "pipe",
+    // Electron's bundled Node/undici races IPv4/IPv6 with a 250ms per-attempt
+    // connect timeout. On hosts with broken IPv6 (or slow Cloudflare-fronted
+    // backends that need ~1s to connect), every outbound fetch from the embedded
+    // server aborts with ETIMEDOUT, surfacing as 500/502 from the proxy. Give the
+    // family-autoselection enough time to fall back to a working address.
+    execArgv: ["--network-family-autoselection-attempt-timeout=2000"],
     // Keep the embedded Next server attached to Electron. A detached child can
     // survive a main-process exit with closed stdio pipes and spin while the
     // desktop app itself is gone.
     detached: false,
     env: {
       ...process.env,
+      // Restore the user's real login-shell PATH. A Finder/Dock/`open`-launched
+      // app inherits a stripped PATH, so MCP servers spawned by the agent (e.g.
+      // `npx -y <server>`) would otherwise fail with ENOENT and the model would
+      // silently fall back to shell commands instead of the plugin's tools.
+      PATH: resolveAugmentedPath(),
       NODE_ENV: "production",
       PORT: String(port),
       HOSTNAME: "127.0.0.1",
       NEXT_TELEMETRY_DISABLED: "1",
-      VLLM_STUDIO_DATA_DIR: DESKTOP_CONFIG.userDataDir,
-      VLLM_STUDIO_RESOURCES_PATH: process.resourcesPath,
+      LOCAL_STUDIO_DATA_DIR: DESKTOP_CONFIG.userDataDir,
+      LOCAL_STUDIO_RESOURCES_PATH: process.resourcesPath,
       // In packaged Electron, process.cwd() is "/" — pi-runtime.resolveDefaultAgentCwd
       // does the right thing (prefers the most-recently-added project, falls back
       // to $HOME) when this env is empty, so leave it unset unless the operator
       // explicitly supplied one.
-      VLLM_STUDIO_AGENT_CWD: process.env.VLLM_STUDIO_AGENT_CWD || app.getPath("home"),
+      LOCAL_STUDIO_AGENT_CWD: process.env.LOCAL_STUDIO_AGENT_CWD || app.getPath("home"),
       // Expose the embedded server's own URL so the pi browser extension can
       // call back into /api/agent/browser/*.
-      VLLM_STUDIO_FRONTEND_BASE: url,
+      LOCAL_STUDIO_FRONTEND_BASE: url,
     },
   });
 

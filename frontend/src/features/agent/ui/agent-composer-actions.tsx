@@ -1,9 +1,9 @@
 "use client";
 
 import type { ReactNode, RefObject } from "react";
-import { Code2, Loader2, Plus } from "lucide-react";
+import { Code2, Loader2, Plus } from "@/ui/icon-registry";
 import type { BrowserBackend } from "@/features/agent/tools/types";
-import { GlobeIcon, SendIcon, StopIcon } from "@/ui/icons";
+import { GlobeIcon, PanelIcon, SendIcon, SitegeistIcon, StopIcon } from "@/ui/icons";
 
 export function AgentComposerActions({
   fileInputRef,
@@ -42,8 +42,11 @@ export function AgentComposerActions({
 }) {
   const inputHasText = Boolean(input.trim());
   const starting = status === "starting";
-  const browserBackendLabel = browserBackend === "parchi" ? "Parchi relay" : "embedded panel";
-  const browserBackendTarget = browserBackend === "parchi" ? "embedded panel" : "Parchi relay";
+  const usingSitegeist = browserBackend === "sitegeist";
+  const browserBackendLabel = usingSitegeist ? "Sitegeist relay" : "embedded panel";
+  const browserBackendTarget = usingSitegeist ? "embedded panel" : "Sitegeist relay";
+  const inactiveIconClass = "text-(--dim)/75 hover:bg-(--hover) hover:text-(--fg)/85";
+  const activeIconClass = "bg-(--hover) text-(--fg)/85 hover:text-(--fg)";
 
   return (
     <div className="agent-composer-actions-row flex min-h-8 items-center gap-1.5 bg-transparent px-3 pb-1.5 pt-0.5 text-xs">
@@ -58,7 +61,7 @@ export function AgentComposerActions({
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={readingAttachments || running}
-        className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center text-(--dim) hover:text-(--fg)/80 disabled:opacity-30"
+        className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md text-(--dim)/75 hover:bg-(--hover) hover:text-(--fg)/85 disabled:opacity-30"
         aria-label="Attach files"
         title="Attach files (or paste/drop into composer)"
       >
@@ -74,7 +77,7 @@ export function AgentComposerActions({
             ? "Browser tool: ON — agent can drive the browser"
             : "Browser tool: OFF — click to let the agent navigate, click, fill, and read pages"
         }
-        className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md ${browserToolEnabled ? "text-(--accent)/70 hover:text-(--accent)" : "text-(--dim)/75 hover:text-(--fg)/80"}`}
+        className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md ${browserToolEnabled ? activeIconClass : inactiveIconClass}`}
       >
         <span className="relative inline-flex">
           <GlobeIcon className="h-3.5 w-3.5" />
@@ -85,14 +88,14 @@ export function AgentComposerActions({
           type="button"
           onClick={onToggleBrowserBackend}
           aria-label={`Browser backend: ${browserBackendLabel}. Switch to ${browserBackendTarget}.`}
-          className="inline-flex !h-7 !min-h-7 shrink-0 items-center rounded-md px-1.5 font-mono text-[10px] uppercase tracking-normal text-(--dim) hover:bg-(--hover) hover:text-(--fg)/85"
-          title={
-            browserBackend === "parchi"
-              ? "Browser backend: Parchi relay. Click to use embedded panel."
-              : "Browser backend: embedded panel. Click to use Parchi relay."
-          }
+          className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md ${usingSitegeist ? activeIconClass : inactiveIconClass}`}
+          title={`Browser: ${browserBackendLabel}. Click to use ${browserBackendTarget}.`}
         >
-          {browserBackend === "parchi" ? "Parchi" : "Panel"}
+          {usingSitegeist ? (
+            <SitegeistIcon className="h-3.5 w-3.5" />
+          ) : (
+            <PanelIcon className="h-3.5 w-3.5" />
+          )}
         </button>
       ) : null}
       <button
@@ -105,14 +108,12 @@ export function AgentComposerActions({
             ? "Canvas: ON — shared scratchboard tools loaded; model reads/writes the canvas"
             : "Canvas: OFF — click to share a scratchboard with the model (notes, plans, links, state)"
         }
-        className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md ${canvasEnabled ? "text-(--accent)/70 hover:text-(--accent)" : "text-(--dim)/75 hover:text-(--fg)/80"}`}
+        className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-md ${canvasEnabled ? activeIconClass : inactiveIconClass}`}
       >
         <Code2 className="h-3.5 w-3.5" />
       </button>
-      {modelSelector ? (
-        <div className="agent-model-slot min-w-0 shrink">{modelSelector}</div>
-      ) : null}
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        {modelSelector}
         {running ? (
           <>
             {starting ? (
@@ -135,7 +136,7 @@ export function AgentComposerActions({
                 </button>
                 <button
                   type="submit"
-                  className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1 rounded-md bg-(--accent)/10 px-2 text-[length:var(--fs-sm)] text-(--accent)/75 hover:bg-(--accent)/15 hover:text-(--fg)/85"
+                  className="inline-flex !h-7 !min-h-7 shrink-0 items-center gap-1 rounded-md bg-(--hover) px-2 text-[length:var(--fs-sm)] text-(--fg)/80 hover:text-(--fg)"
                   title="Steer (Enter): interrupt current turn and send"
                 >
                   <SendIcon className="h-3 w-3" /> Steer

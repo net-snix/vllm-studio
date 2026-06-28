@@ -82,6 +82,14 @@ export type Recipe = RecipePayload;
 
 export interface RecipeWithStatus extends RecipeBase {
   status: "running" | "stopped" | "starting" | "error";
+  crash_loop?: {
+    recipe_id: string;
+    failure_count: number;
+    limit: number;
+    window_ms: number;
+    reset_at: string;
+    blocked: boolean;
+  } | null;
   tp?: number;
   pp?: number;
 }
@@ -132,4 +140,7 @@ export interface HuggingFaceModel {
   createdAt?: string;
   author?: string;
   private: boolean;
+  /** Total weight-file size in bytes (from HF siblings with full=true).
+   * Present when the API route enriches results; used for accurate VRAM sizing. */
+  weightBytes?: number;
 }

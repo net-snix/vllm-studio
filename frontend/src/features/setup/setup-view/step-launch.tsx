@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Rocket } from "lucide-react";
+import { Loader2, Rocket } from "@/ui/icon-registry";
 import { Alert, Button, Card, FactGrid } from "@/ui";
 
 export function StepLaunch({
@@ -24,7 +24,7 @@ export function StepLaunch({
           <h2 className="text-lg font-medium">Configure and Launch</h2>
         </div>
         <p className="text-sm text-(--dim)">
-          vLLM Studio will create a starter recipe for{" "}
+          Local Studio will create a starter recipe for{" "}
           <span className="text-(--fg)">{selectedModel}</span>, keep the safe local defaults, and
           launch it immediately.
         </p>

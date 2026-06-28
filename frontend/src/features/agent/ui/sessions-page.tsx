@@ -2,40 +2,22 @@
 
 import Link from "next/link";
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { ChevronDown, Folder, RefreshCw, Search as SearchIcon } from "lucide-react";
+import { ChevronDown, Folder, RefreshCw, Search as SearchIcon } from "@/ui/icon-registry";
+import { Table, THead, TBody, TRow, TH, TCell } from "@/ui";
 import { cleanSessionTitle } from "@/features/agent/messages/helpers";
 import { safeJson } from "@/features/agent/safe-json";
 import { ACTIVE_AGENT_SESSIONS_EVENT } from "@/lib/workspace-events";
 
 // Mirrors the API payload from /api/agent/sessions/all. Kept inline so this
-// page doesn't import server-only modules into the client bundle.
-type AggregatedSession = {
-  id: string;
-  projectId: string;
-  projectName: string;
-  projectPath: string;
-  modelId: string | null;
-  firstUserMessage: string | null;
-  turnCount: number;
-  startedAt: string;
-  updatedAt: string;
-  filename: string;
-};
-
-type ActiveSession = {
-  projectId: string;
-  cwd: string;
-  paneId: string;
-  tabId: string;
-  piSessionId: string | null;
-  title: string;
-  status: string;
-  focused?: boolean;
-  updatedAt: string;
-};
+// Re-export shared session contracts for the local module surface.
+import {
+  type ActiveSession,
+  type AggregatedSession,
+  type SessionSortField,
+  indexActiveByPiId,
+} from "@/features/agent/session-contracts";
 
 type StatusFilter = "all" | "running" | "idle";
-type SortField = "updatedAt" | "turnCount" | "projectName";
 
 function isRunning(status: string): boolean {
   return Boolean(status) && status !== "idle" && status !== "done";
@@ -58,7 +40,7 @@ export default function AgentSessionsPage() {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [projectFilter, setProjectFilter] = useState<string>("all");
-  const [sortField, setSortField] = useState<SortField>("updatedAt");
+  const [sortField, setSessionSortField] = useState<SessionSortField>("updatedAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const reload = useCallback(async () => {
@@ -94,13 +76,7 @@ export default function AgentSessionsPage() {
   useSyncExternalStore(subscribeSessionRows, getAgentSessionsSnapshot, getAgentSessionsSnapshot);
   useSyncExternalStore(subscribeActiveSessions, getAgentSessionsSnapshot, getAgentSessionsSnapshot);
 
-  const activeByPiId = useMemo(() => {
-    const map = new Map<string, ActiveSession>();
-    for (const session of activeSessions) {
-      if (session.piSessionId) map.set(session.piSessionId, session);
-    }
-    return map;
-  }, [activeSessions]);
+  const activeByPiId = useMemo(() => indexActiveByPiId(activeSessions), [activeSessions]);
 
   const projects = useMemo(() => {
     const seen = new Map<string, string>();
@@ -142,11 +118,11 @@ export default function AgentSessionsPage() {
     return { total, visible, runningCount, projectsCount };
   }, [sessions, rows.length, activeSessions, projects]);
 
-  function toggleSort(field: SortField) {
+  function toggleSort(field: SessionSortField) {
     if (field === sortField) {
       setSortDir(sortDir === "asc" ? "desc" : "asc");
     } else {
-      setSortField(field);
+      setSessionSortField(field);
       setSortDir("desc");
     }
   }
@@ -224,114 +200,115 @@ export default function AgentSessionsPage() {
           />
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-lg bg-(--surface)">
-          <table className="w-full text-left text-[length:var(--fs-base)]">
-            <thead className="bg-(--surface-2) text-[length:var(--fs-xs)] uppercase tracking-[0.14em] text-(--dim)">
-              <tr>
-                <th className="w-10 px-3 py-2"></th>
-                <th className="px-3 py-2">Title</th>
-                <SortHeader
-                  label="Project"
-                  field="projectName"
-                  sortField={sortField}
-                  sortDir={sortDir}
-                  onClick={toggleSort}
-                />
-                <th className="px-3 py-2">Model</th>
-                <SortHeader
-                  label="Turns"
-                  field="turnCount"
-                  sortField={sortField}
-                  sortDir={sortDir}
-                  onClick={toggleSort}
-                  align="right"
-                />
-                <SortHeader
-                  label="Updated"
-                  field="updatedAt"
-                  sortField={sortField}
-                  sortDir={sortDir}
-                  onClick={toggleSort}
-                  align="right"
-                />
-              </tr>
-            </thead>
-            <tbody>
-              {sessions === null ? (
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="px-3 py-8 text-center text-[length:var(--fs-md)] text-(--dim)"
+        <Table
+          className="mt-4 rounded-lg bg-(--surface)"
+          tableClassName="text-[length:var(--fs-base)]"
+        >
+          <THead className="bg-(--surface-2) text-[length:var(--fs-xs)] uppercase tracking-[0.14em] text-(--dim)">
+            <TRow className="border-none hover:bg-transparent">
+              <TH className="w-10 px-3 py-2"></TH>
+              <TH className="px-3 py-2">Title</TH>
+              <SortHeader
+                label="Project"
+                field="projectName"
+                sortField={sortField}
+                sortDir={sortDir}
+                onClick={toggleSort}
+              />
+              <TH className="px-3 py-2">Model</TH>
+              <SortHeader
+                label="Turns"
+                field="turnCount"
+                sortField={sortField}
+                sortDir={sortDir}
+                onClick={toggleSort}
+                align="right"
+              />
+              <SortHeader
+                label="Updated"
+                field="updatedAt"
+                sortField={sortField}
+                sortDir={sortDir}
+                onClick={toggleSort}
+                align="right"
+              />
+            </TRow>
+          </THead>
+          <TBody className="[&>tr]:border-[--separator]">
+            {sessions === null ? (
+              <TRow>
+                <TCell
+                  colSpan={6}
+                  className="px-3 py-8 text-center text-[length:var(--fs-md)] text-(--dim)"
+                >
+                  Loading…
+                </TCell>
+              </TRow>
+            ) : rows.length === 0 ? (
+              <TRow>
+                <TCell
+                  colSpan={6}
+                  className="px-3 py-10 text-center text-[length:var(--fs-md)] text-(--dim)"
+                >
+                  No sessions match these filters.
+                </TCell>
+              </TRow>
+            ) : (
+              rows.map((session) => {
+                const running = activeByPiId.has(session.id);
+                const status = activeByPiId.get(session.id)?.status ?? "idle";
+                const label =
+                  cleanSessionTitle(session.firstUserMessage) ||
+                  `Session ${session.id.slice(0, 8)}`;
+                return (
+                  <TRow
+                    key={session.id}
+                    className="border-t border-(--separator) hover:bg-(--surface-2)"
                   >
-                    Loading…
-                  </td>
-                </tr>
-              ) : rows.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="px-3 py-10 text-center text-[length:var(--fs-md)] text-(--dim)"
-                  >
-                    No sessions match these filters.
-                  </td>
-                </tr>
-              ) : (
-                rows.map((session) => {
-                  const running = activeByPiId.has(session.id);
-                  const status = activeByPiId.get(session.id)?.status ?? "idle";
-                  const label =
-                    cleanSessionTitle(session.firstUserMessage) ||
-                    `Session ${session.id.slice(0, 8)}`;
-                  return (
-                    <tr
-                      key={session.id}
-                      className="border-t border-(--separator) hover:bg-(--surface-2)"
-                    >
-                      <td className="px-3 py-2">
-                        <span
-                          className={`inline-block h-1.5 w-1.5 rounded-full ${
-                            running ? "bg-(--hl2) animate-pulse" : "bg-(--dim)"
-                          }`}
-                          title={running ? `Running: ${status}` : "Idle"}
-                          aria-hidden
-                        />
-                      </td>
-                      <td className="px-3 py-2 text-(--fg)">
-                        <Link
-                          href={`/agent?project=${encodeURIComponent(session.projectId)}&session=${encodeURIComponent(session.id)}`}
-                          className="line-clamp-1 hover:underline"
-                          title={label}
-                        >
-                          {label}
-                        </Link>
-                        {running ? (
-                          <span className="ml-2 text-[length:var(--fs-xs)] text-(--dim)">
-                            {status}
-                          </span>
-                        ) : null}
-                      </td>
-                      <td className="px-3 py-2 text-(--dim)">
-                        <span className="inline-flex items-center gap-1.5">
-                          <Folder className="h-3 w-3" />
-                          {session.projectName}
+                    <TCell className="px-3 py-2">
+                      <span
+                        className={`inline-block h-1.5 w-1.5 rounded-full ${
+                          running ? "bg-(--hl2) animate-pulse" : "bg-(--dim)"
+                        }`}
+                        title={running ? `Running: ${status}` : "Idle"}
+                        aria-hidden
+                      />
+                    </TCell>
+                    <TCell className="px-3 py-2 text-(--fg)">
+                      <Link
+                        href={`/agent?project=${encodeURIComponent(session.projectId)}&session=${encodeURIComponent(session.id)}`}
+                        className="line-clamp-1 hover:underline"
+                        title={label}
+                      >
+                        {label}
+                      </Link>
+                      {running ? (
+                        <span className="ml-2 text-[length:var(--fs-xs)] text-(--dim)">
+                          {status}
                         </span>
-                      </td>
-                      <td className="px-3 py-2 font-mono text-[length:var(--fs-sm)] text-(--dim)">
-                        {session.modelId ?? "—"}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums text-(--dim)">
-                        {session.turnCount}
-                      </td>
-                      <td className="px-3 py-2 text-right text-(--dim)">
-                        {formatRelative(session.updatedAt)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                      ) : null}
+                    </TCell>
+                    <TCell className="px-3 py-2 text-(--dim)">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Folder className="h-3 w-3" />
+                        {session.projectName}
+                      </span>
+                    </TCell>
+                    <TCell className="px-3 py-2 font-mono text-[length:var(--fs-sm)] text-(--dim)">
+                      {session.modelId ?? "—"}
+                    </TCell>
+                    <TCell className="px-3 py-2 text-right tabular-nums text-(--dim)">
+                      {session.turnCount}
+                    </TCell>
+                    <TCell className="px-3 py-2 text-right text-(--dim)">
+                      {formatRelative(session.updatedAt)}
+                    </TCell>
+                  </TRow>
+                );
+              })
+            )}
+          </TBody>
+        </Table>
       </div>
     </div>
   );
@@ -428,15 +405,15 @@ function SortHeader({
   align = "left",
 }: {
   label: string;
-  field: SortField;
-  sortField: SortField;
+  field: SessionSortField;
+  sortField: SessionSortField;
   sortDir: "asc" | "desc";
-  onClick: (field: SortField) => void;
+  onClick: (field: SessionSortField) => void;
   align?: "left" | "right";
 }) {
   const active = field === sortField;
   return (
-    <th className={`px-3 py-2 ${align === "right" ? "text-right" : "text-left"}`}>
+    <TH className={`px-3 py-2 ${align === "right" ? "text-right" : "text-left"}`}>
       <button
         type="button"
         onClick={() => onClick(field)}
@@ -449,6 +426,6 @@ function SortHeader({
           } ${active ? "opacity-100" : "opacity-30"}`}
         />
       </button>
-    </th>
+    </TH>
   );
 }

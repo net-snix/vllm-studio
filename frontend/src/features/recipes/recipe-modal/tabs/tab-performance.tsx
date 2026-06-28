@@ -1,41 +1,46 @@
 "use client";
 
-import { Clock, Database, Zap } from "lucide-react";
+import { Clock, Database, Settings, Zap } from "@/ui/icon-registry";
 import { CheckboxRow, FormField, FormSection, Input, Select } from "@/ui";
 import type { RecipeEditor } from "@/features/recipes/recipe-editor";
-import { LlamacppOptionsSection } from "../llamacpp-options-section";
+import { ENGINE_LABEL, getEngineOptions } from "@/features/recipes/engine-capabilities";
+import { EngineOptionsSection } from "../engine-options-section";
+import type { RecipeModalSectionProps, RecipeModalTabProps } from "./tab-props";
 
 export function RecipeModalTabPerformance({
   recipe,
   onChange,
-  isLlamacpp,
+  capabilities,
   getExtraArgValueForKey,
   setExtraArgValueForKey,
-}: {
-  recipe: RecipeEditor;
-  onChange: (next: RecipeEditor) => void;
-  isLlamacpp: boolean;
-  getExtraArgValueForKey: (key: string) => unknown;
-  setExtraArgValueForKey: (key: string, value: unknown) => void;
-}) {
-  if (isLlamacpp) {
-    return (
-      <div className="space-y-6">
-        <LlamacppOptionsSection
-          tab="performance"
+}: RecipeModalTabProps) {
+  const options = getEngineOptions(capabilities.options, "performance");
+  return (
+    <div className="space-y-6">
+      {capabilities.cudaGraphs ? <CudaGraphsSection recipe={recipe} onChange={onChange} /> : null}
+      <KvCacheSection recipe={recipe} onChange={onChange} capabilities={capabilities} />
+      <SchedulerSection recipe={recipe} onChange={onChange} capabilities={capabilities} />
+      {options.length ? (
+        <EngineOptionsSection
+          title={`${ENGINE_LABEL[capabilities.backend]} Performance Options`}
+          icon={<Settings className="h-4 w-4" />}
+          options={options}
           getValueForKey={getExtraArgValueForKey}
           setValueForKey={setExtraArgValueForKey}
         />
-      </div>
-    );
-  }
+      ) : null}
+    </div>
+  );
+}
 
+type SectionProps = RecipeModalSectionProps;
+
+function KvCacheSection({ recipe, onChange, capabilities }: SectionProps) {
+  if (!capabilities.kvCacheDtype && !capabilities.blockSize && !capabilities.caching) return null;
   return (
-    <div className="space-y-6">
-      <CudaGraphsSection recipe={recipe} onChange={onChange} />
-
-      <FormSection icon={<Database className="h-4 w-4" />} title="KV Cache & Memory">
-        <div className="grid grid-cols-2 gap-3">
+    <FormSection icon={<Database className="h-4 w-4" />} title="KV Cache & Memory">
+      <div className="grid grid-cols-2 gap-3">
+        {capabilities.kvCacheDtype ? (
           <FormField label="KV Cache Dtype">
             <Select
               value={recipe.kv_cache_dtype || "auto"}
@@ -52,6 +57,8 @@ export function RecipeModalTabPerformance({
               <option value="fp8_e4m3">FP8 E4M3</option>
             </Select>
           </FormField>
+        ) : null}
+        {capabilities.blockSize ? (
           <FormField label="Block Size">
             <Select
               value={recipe.block_size || "16"}
@@ -64,8 +71,9 @@ export function RecipeModalTabPerformance({
               <option value="32">32</option>
             </Select>
           </FormField>
-        </div>
-
+        ) : null}
+      </div>
+      {capabilities.caching ? (
         <div className="grid grid-cols-2 gap-3">
           <CheckboxRow
             checked={recipe.enable_prefix_caching || false}
@@ -80,11 +88,21 @@ export function RecipeModalTabPerformance({
             description="Interleave prefill/decode"
           />
         </div>
-      </FormSection>
+      ) : null}
+    </FormSection>
+  );
+}
 
-      <FormSection icon={<Clock className="h-4 w-4" />} title="Scheduler & Batching">
-        <div className="grid grid-cols-3 gap-3">
-          <FormField label="Max Sequences">
+function SchedulerSection({ recipe, onChange, capabilities }: SectionProps) {
+  if (!capabilities.maxNumSeqs && !capabilities.schedulerAdvanced) return null;
+  return (
+    <FormSection icon={<Clock className="h-4 w-4" />} title="Scheduler & Batching">
+      <div className="grid grid-cols-3 gap-3">
+        {capabilities.maxNumSeqs ? (
+          <FormField
+            label="Max Sequences"
+            description={capabilities.backend === "sglang" ? "--max-running-requests" : undefined}
+          >
             <Input
               type="number"
               value={recipe.max_num_seqs || ""}
@@ -94,28 +112,36 @@ export function RecipeModalTabPerformance({
               placeholder="256"
             />
           </FormField>
-          <FormField label="Max Batched Tokens">
-            <Input
-              type="number"
-              value={recipe.max_num_batched_tokens || ""}
-              onChange={(e) =>
-                onChange({ ...recipe, max_num_batched_tokens: Number(e.target.value) || undefined })
-              }
-              placeholder="Auto"
-            />
-          </FormField>
-          <FormField label="Max Paddings">
-            <Input
-              type="number"
-              value={recipe.max_paddings || ""}
-              onChange={(e) =>
-                onChange({ ...recipe, max_paddings: Number(e.target.value) || undefined })
-              }
-              placeholder="Auto"
-            />
-          </FormField>
-        </div>
-
+        ) : null}
+        {capabilities.schedulerAdvanced ? (
+          <>
+            <FormField label="Max Batched Tokens">
+              <Input
+                type="number"
+                value={recipe.max_num_batched_tokens || ""}
+                onChange={(e) =>
+                  onChange({
+                    ...recipe,
+                    max_num_batched_tokens: Number(e.target.value) || undefined,
+                  })
+                }
+                placeholder="Auto"
+              />
+            </FormField>
+            <FormField label="Max Paddings">
+              <Input
+                type="number"
+                value={recipe.max_paddings || ""}
+                onChange={(e) =>
+                  onChange({ ...recipe, max_paddings: Number(e.target.value) || undefined })
+                }
+                placeholder="Auto"
+              />
+            </FormField>
+          </>
+        ) : null}
+      </div>
+      {capabilities.schedulerAdvanced ? (
         <FormField label="Scheduling Policy">
           <Select
             value={recipe.scheduling_policy || ""}
@@ -133,8 +159,8 @@ export function RecipeModalTabPerformance({
             <option value="priority">Priority</option>
           </Select>
         </FormField>
-      </FormSection>
-    </div>
+      ) : null}
+    </FormSection>
   );
 }
 

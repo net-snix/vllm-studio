@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { GitBranchIcon, ReloadIcon } from "@/ui/icons";
+import { ErrorBox, Input, Button } from "@/ui";
 import type { GitAction, GitRef, GitState } from "@/features/agent/contracts";
 import { safeJson } from "@/features/agent/safe-json";
 import {
@@ -55,7 +56,7 @@ export function GitDiffPanel({ cwd }: { cwd: string | null }) {
   const files = useMemo(() => parseUnifiedDiff(payload?.diff ?? ""), [payload?.diff]);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col">
+    <section className="flex min-h-0 flex-1 flex-col bg-(--color-panel)">
       <GitPanelHeader cwd={cwd} loading={loading} payload={payload} onReload={load} />
       <GitWorkflowBar
         payload={payload}
@@ -91,7 +92,7 @@ function GitPanelHeader({
   onReload: () => Promise<void>;
 }) {
   return (
-    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-(--border) px-3 text-xs">
+    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-(--border)/80 bg-(--color-header) px-3 text-xs">
       <GitBranchIcon className="h-3.5 w-3.5 text-(--dim)" />
       <span className="min-w-0 flex-1 truncate text-(--fg)" title={cwd ?? ""}>
         {gitDiffHeaderTitle(payload, cwd)}
@@ -100,7 +101,7 @@ function GitPanelHeader({
         type="button"
         onClick={() => void onReload()}
         disabled={loading || !cwd}
-        className="rounded p-1 text-(--dim) hover:bg-(--surface) hover:text-(--fg) disabled:opacity-40"
+        className="rounded-md p-1 text-(--dim) hover:bg-(--hover) hover:text-(--fg) disabled:opacity-40"
         title="Refresh git state"
       >
         <ReloadIcon className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -129,7 +130,7 @@ function GitWorkflowBar({
   if (!payload?.isRepo) return null;
   const dirty = (payload.status?.length ?? 0) > 0;
   return (
-    <div className="grid gap-2 border-b border-(--border) bg-(--surface)/35 p-2 text-[length:var(--fs-sm)] text-(--dim)">
+    <div className="grid gap-2 border-b border-(--border)/80 bg-(--color-panel) p-2 text-[length:var(--fs-sm)] text-(--dim)">
       <div className="flex flex-wrap items-center gap-2">
         <RefSelect
           refs={payload.refs ?? []}
@@ -137,31 +138,31 @@ function GitWorkflowBar({
           loading={loading}
           onRun={onRun}
         />
-        <input
+        <Input
           value={draftBranch}
           onChange={(event) => onDraftBranch(event.target.value)}
           placeholder="new branch"
-          className="h-7 min-w-0 flex-1 rounded border border-(--border) bg-(--bg) px-2 text-(--fg) outline-none"
+          className="h-7 min-w-0 flex-1 rounded-md border border-(--border)/80 bg-(--color-input) px-2 text-(--fg) outline-none focus:border-(--border-hover)"
         />
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           disabled={loading || !draftBranch.trim()}
           onClick={() => void onRun({ action: "createBranch", branch: draftBranch.trim() })}
-          className="h-7 rounded border border-(--border) px-2 text-(--fg) disabled:opacity-40"
         >
           Branch
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
           disabled={loading || !payload.branch}
           onClick={() => void onRun({ action: "push" })}
-          className="h-7 rounded border border-(--border) px-2 text-(--fg) disabled:opacity-40"
         >
           Push
-        </button>
+        </Button>
         {payload.prUrl ? (
           <a
-            className="h-7 rounded border border-(--border) px-2 leading-7 text-(--fg)"
+            className="h-7 rounded-md border border-(--border)/80 px-2 leading-7 text-(--fg) hover:bg-(--hover)"
             href={payload.prUrl}
             target="_blank"
           >
@@ -170,22 +171,22 @@ function GitWorkflowBar({
         ) : null}
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <input
+        <Input
           value={commitMessage}
           onChange={(event) => onCommitMessage(event.target.value)}
           placeholder={dirty ? "commit message" : "working tree clean"}
           disabled={!dirty}
-          className="h-7 min-w-0 flex-1 rounded border border-(--border) bg-(--bg) px-2 text-(--fg) outline-none disabled:opacity-45"
+          className="h-7 min-w-0 flex-1 rounded-md border border-(--border)/80 bg-(--color-input) px-2 text-(--fg) outline-none disabled:opacity-45 focus:border-(--border-hover)"
         />
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           disabled={loading || !dirty || !commitMessage.trim()}
           onClick={() => void onRun({ action: "commit", message: commitMessage.trim(), paths: [] })}
-          className="h-7 rounded border border-(--border) px-2 text-(--fg) disabled:opacity-40"
           title="Stage all current changes and commit"
         >
           Commit all
-        </button>
+        </Button>
         <span className="font-mono">
           <span className="text-emerald-400">+{payload.additions ?? 0}</span>{" "}
           <span className="text-red-400">-{payload.deletions ?? 0}</span>{" "}
@@ -215,7 +216,7 @@ function RefSelect({
         event.currentTarget.value &&
         void onRun({ action: "checkout", ref: event.currentTarget.value })
       }
-      className="h-7 min-w-[9rem] rounded border border-(--border) bg-(--bg) px-2 text-(--fg)"
+      className="h-7 min-w-[9rem] rounded-md border border-(--border)/80 bg-(--color-input) px-2 text-(--fg)"
       title="Switch branch"
     >
       <option value="">{branch ?? "detached"}</option>
@@ -252,12 +253,7 @@ function GitDiffPanelBody({
         Choose a project directory to view git changes.
       </div>
     );
-  if (payload?.error)
-    return (
-      <div className="m-3 rounded border border-(--err)/30 bg-(--err)/10 p-3 text-xs text-(--err)">
-        {payload.error}
-      </div>
-    );
+  if (payload?.error) return <ErrorBox className="m-3 p-3">{payload.error}</ErrorBox>;
   if (payload?.isRepo === false) return <InitializeGitPanel initGit={initGit} loading={loading} />;
   if (files.length === 0)
     return <EmptyDiffPanel loading={loading} status={payload?.status ?? []} />;
@@ -274,14 +270,15 @@ function InitializeGitPanel({
   return (
     <div className="flex flex-col gap-3 p-4 text-xs text-(--dim)">
       <span>This directory is not a git repository.</span>
-      <button
-        type="button"
+      <Button
+        variant="secondary"
+        size="sm"
         onClick={() => void initGit()}
         disabled={loading}
-        className="w-fit rounded border border-(--border) bg-(--surface) px-2 py-1 text-(--fg) hover:bg-(--bg) disabled:opacity-50"
+        className="w-fit"
       >
         Initialize git repository
-      </button>
+      </Button>
     </div>
   );
 }
@@ -291,7 +288,7 @@ function EmptyDiffPanel({ loading, status }: { loading: boolean; status: string[
     <div className="p-4 text-xs text-(--dim)">
       {loading ? "Loading diff…" : "No unstaged tracked-file changes."}
       {status.length > 0 ? (
-        <pre className="mt-3 overflow-auto rounded border border-(--border) bg-(--surface) p-2 font-mono text-[length:var(--fs-sm)] text-(--fg)">
+        <pre className="mt-3 overflow-auto rounded-md border border-(--border)/80 bg-(--color-input) p-2 font-mono text-[length:var(--fs-sm)] text-(--fg)">
           {status.join("\n")}
         </pre>
       ) : null}
@@ -310,7 +307,7 @@ function DiffFileList({
 }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto p-2 font-mono text-[length:var(--fs-sm)] leading-5">
-      <div className="sticky top-0 z-10 mb-2 flex items-center justify-end gap-1 bg-(--bg)/95 py-1">
+      <div className="sticky top-0 z-10 mb-2 flex items-center justify-end gap-1 bg-(--color-panel)/95 py-1 backdrop-blur">
         <DiffModeButton active={viewMode === "unified"} onClick={() => onViewMode("unified")}>
           Unified
         </DiffModeButton>
@@ -328,11 +325,11 @@ function DiffFileList({
         {files.map((file, fileIndex) => (
           <details
             key={file.path}
-            className="overflow-hidden rounded-md border border-(--border) bg-(--bg)"
+            className="overflow-hidden rounded-md border border-(--border)/80 bg-(--color-panel)"
             open={fileIndex === 0}
           >
             <summary
-              className="flex cursor-pointer list-none items-center gap-2 border-b border-(--border) bg-(--surface)/70 px-2 py-1.5 text-xs text-(--fg) hover:bg-(--surface)"
+              className="flex cursor-pointer list-none items-center gap-2 border-b border-(--border)/80 bg-(--color-header) px-2 py-1.5 text-xs text-(--fg) hover:bg-(--color-surface-hover)"
               title={file.path}
             >
               <span className="min-w-0 flex-1 truncate">{file.path}</span>
@@ -369,7 +366,7 @@ function DiffModeButton({
       type="button"
       onClick={onClick}
       className={`h-6 rounded px-2 text-[length:var(--fs-xs)] ${
-        active ? "bg-(--surface) text-(--fg)" : "text-(--dim) hover:text-(--fg)"
+        active ? "bg-(--hover) text-(--fg)" : "text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
       }`}
     >
       {children}
@@ -441,7 +438,7 @@ function StackedDiff({ file }: { file: DiffFile }) {
 
 function DiffCell({ line, side }: { line?: DiffFile["lines"][number]; side: "old" | "new" }) {
   if (!line) {
-    return <div className="min-h-5 border-r border-(--border)/20 bg-(--surface)/20" />;
+    return <div className="min-h-5 border-r border-(--border)/20 bg-(--color-surface)" />;
   }
   const lineNumber = side === "old" ? line.oldLine : line.newLine;
   return (

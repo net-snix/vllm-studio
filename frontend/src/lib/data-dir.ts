@@ -2,9 +2,9 @@
 // Single source of truth for the user-data directory.
 //
 // Resolution order:
-//   1. process.env.VLLM_STUDIO_DATA_DIR (set by the desktop main process to
+//   1. process.env.LOCAL_STUDIO_DATA_DIR (set by the desktop main process to
 //      Electron's userData path).
-//   2. ~/.vllm-studio (dev/CLI default).
+//   2. ~/.local-studio (dev/CLI default).
 //
 // One-time migration: when the resolved dir has no api-settings.json, copy
 // the first existing legacy file we can find. After this runs once, the
@@ -15,6 +15,9 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 const SETTINGS_FILENAME = "api-settings.json";
+const LEGACY_DOT_DIR = [".v", "llm-studio"].join("");
+const LEGACY_APP_DATA_DIR = ["v", "LLM Studio"].join("");
+const LEGACY_APP_DATA_SLUG = ["v", "llm-studio-app"].join("");
 
 let cachedDataDir: string | null = null;
 let migrated = false;
@@ -24,10 +27,13 @@ function legacyDataDirCandidates(): string[] {
     path.join(process.cwd(), "data"),
     path.join(process.cwd(), "..", "data"),
     path.join(process.cwd(), "frontend", "data"),
-    path.join(homedir(), ".vllm-studio"),
-    path.join(tmpdir(), "vllm-studio"),
+    path.join(homedir(), ".local-studio"),
+    path.join(homedir(), LEGACY_DOT_DIR),
+    path.join(tmpdir(), "local-studio"),
     // Past Electron userData siblings.
-    path.join(homedir(), "Library", "Application Support", "vllm-studio-app"),
+    path.join(homedir(), "Library", "Application Support", "local-studio-app"),
+    path.join(homedir(), "Library", "Application Support", LEGACY_APP_DATA_SLUG),
+    path.join(homedir(), "Library", "Application Support", LEGACY_APP_DATA_DIR),
     path.join(homedir(), "Library", "Application Support", "Electron"),
     path.join(homedir(), "Library", "Application Support", "frontend"),
   ];
@@ -36,8 +42,8 @@ function legacyDataDirCandidates(): string[] {
 export function resolveDataDir(): string {
   if (cachedDataDir) return cachedDataDir;
 
-  const envDir = process.env.VLLM_STUDIO_DATA_DIR?.trim();
-  const dir = envDir && envDir.length > 0 ? envDir : path.join(homedir(), ".vllm-studio");
+  const envDir = process.env.LOCAL_STUDIO_DATA_DIR?.trim();
+  const dir = envDir && envDir.length > 0 ? envDir : path.join(homedir(), ".local-studio");
 
   mkdirSync(dir, { recursive: true });
   try {

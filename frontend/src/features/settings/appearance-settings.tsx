@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useCallback } from "react";
-import { Check, ChevronDown, Laptop, Moon, RotateCcw, Search, Sun, X } from "lucide-react";
+import { Check, ChevronDown, Laptop, Moon, RotateCcw, Search, Sun, X } from "@/ui/icon-registry";
 import { useAppStore } from "@/store";
 import {
   FONT_FAMILY_OPTIONS,
@@ -18,9 +18,9 @@ import { ColorField, ListGroup, ListRow, SegmentedControl, type SegmentedItem, S
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
 
-const CUSTOM_THEME_TOKEN_KEY = "vllm-studio.customThemeTokens";
-const LIGHT_THEME_ID = "omlx-light";
-const DARK_THEME_ID = "omlx-dark";
+const CUSTOM_THEME_TOKEN_KEY = "local-studio.customThemeTokens";
+const LIGHT_THEME_ID = "zai-light";
+const DARK_THEME_ID = "zai-dark";
 
 type ThemeMode = "light" | "dark" | "system";
 
@@ -326,7 +326,7 @@ export function AppearanceSettings() {
         />
         <ListRow
           label="UI font size"
-          description="Base size for the vLLM Studio UI"
+          description="Base size for the Local Studio UI"
           control={
             <div className="flex w-full items-center gap-3">
               <Slider

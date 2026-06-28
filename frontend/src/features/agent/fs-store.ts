@@ -1,6 +1,7 @@
 import { existsSync, promises as fs, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { FsEntry } from "@/features/agent/filesystem-types";
+import { listProjectsFromStore } from "./projects-store";
 
 const IGNORE_DIRS = new Set([
   ".git",
@@ -13,7 +14,7 @@ const IGNORE_DIRS = new Set([
   "__pycache__",
   ".venv",
   "venv",
-  ".vllm-studio",
+  ".local-studio",
 ]);
 
 // Filesystem roots and top-level system directories that must never serve as a
@@ -57,6 +58,29 @@ export function assertWorkspaceRoot(rootCwd: string): string {
   return real;
 }
 
+function resolveRealPath(candidate: string): string {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return path.resolve(candidate);
+  }
+}
+
+// Trust boundary: agent filesystem list/read operates inside the caller's
+// current workspace cwd, while still rejecting filesystem roots and system
+// directories. Registered projects remain accepted, but exact registration is
+// not required: sessions may run from the repo opened by the app, a project
+// subdirectory, or a newly selected cwd before the project registry refreshes.
+function resolveWorkspaceRoot(cwd: string): string {
+  const requestedReal = resolveRealPath(cwd);
+  for (const project of listProjectsFromStore()) {
+    if (!project.exists) continue;
+    const projectReal = resolveRealPath(project.path);
+    if (projectReal === requestedReal) return projectReal;
+  }
+  return assertWorkspaceRoot(requestedReal);
+}
+
 // Reject any path that escapes the project root, resolving symlinks on both the
 // root and the target so a symlink inside the root cannot point outside it.
 function ensureInside(rootCwd: string, target: string): string {
@@ -76,7 +100,8 @@ function ensureInside(rootCwd: string, target: string): string {
 }
 
 export function listDirectory(rootCwd: string, relPath: string): FsEntry[] {
-  const target = ensureInside(rootCwd, path.resolve(rootCwd, relPath || "."));
+  const root = resolveWorkspaceRoot(rootCwd);
+  const target = ensureInside(root, path.resolve(root, relPath || "."));
   if (!existsSync(target)) throw new Error("Not found");
   const stats = statSync(target);
   if (!stats.isDirectory()) throw new Error("Not a directory");
@@ -96,7 +121,7 @@ export function listDirectory(rootCwd: string, relPath: string): FsEntry[] {
     entries.push({
       name,
       path: abs,
-      rel: path.relative(rootCwd, abs),
+      rel: path.relative(root, abs),
       kind: s.isDirectory() ? "directory" : "file",
       size: s.isFile() ? s.size : undefined,
       modifiedAt: s.mtime.toISOString(),
@@ -114,7 +139,8 @@ export async function readFileSnippet(
   relPath: string,
   maxBytes = 5 * 1024 * 1024,
 ): Promise<{ content: string; truncated: boolean; size: number }> {
-  const target = ensureInside(rootCwd, path.resolve(rootCwd, relPath));
+  const root = resolveWorkspaceRoot(rootCwd);
+  const target = ensureInside(root, path.resolve(root, relPath));
   const stats = await fs.stat(target);
   if (!stats.isFile()) throw new Error("Not a file");
   if (stats.size > maxBytes) {
@@ -128,4 +154,16 @@ export async function readFileSnippet(
     return { content: "", truncated: true, size: stats.size };
   }
   return { content: buf.toString("utf-8"), truncated: false, size: stats.size };
+}
+
+export async function writeFileContent(
+  rootCwd: string,
+  relPath: string,
+  content: string,
+): Promise<void> {
+  const root = resolveWorkspaceRoot(rootCwd);
+  const target = ensureInside(root, path.resolve(root, relPath));
+  const stats = await fs.stat(target);
+  if (!stats.isFile()) throw new Error("Not a file");
+  await fs.writeFile(target, content, "utf8");
 }

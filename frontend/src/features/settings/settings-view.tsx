@@ -9,7 +9,7 @@ import {
   type LucideIcon,
   Paintbrush,
   ServerCog,
-} from "lucide-react";
+} from "@/ui/icon-registry";
 import { SettingsLayout, type SettingsSectionDef, type SettingsSectionId } from "@/ui";
 import type { CompatibilityReport, ConfigData } from "@/lib/types";
 import type { ApiConnectionSettings, ConnectionStatus } from "./types";
@@ -48,7 +48,7 @@ const SECTIONS: SettingsSectionDef[] = [
   ["system", "System", "Runtime targets, services, storage, hardware.", Cpu],
   ["appearance", "Appearance", "Theme variables, typography, density.", Paintbrush],
   ["archive", "Archived chats", "Pi sessions kept out of normal chat lists.", Archive],
-  ["plugins", "Plugins", "Codex plugin discovery and composer availability.", Plug],
+  ["plugins", "Plugins", "MCP server catalog, OAuth connections, and composer availability.", Plug],
   [
     "skills",
     "Skills",

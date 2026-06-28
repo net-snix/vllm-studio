@@ -55,7 +55,7 @@ const createAppSlice: StateCreator<AppSlice, [], [], AppSlice> = (set) => ({
     }),
   toggleSidebarMobileOpen: () =>
     set((state) => ({ sidebar: { ...state.sidebar, mobileOpen: !state.sidebar.mobileOpen } })),
-  sidebarWidth: 204,
+  sidebarWidth: 224,
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   fileViewerFontSize: 12,
   setFileViewerFontSize: (fileViewerFontSize) => set({ fileViewerFontSize }),
@@ -78,7 +78,7 @@ export interface ThemeSlice {
 }
 
 const createThemeSlice: StateCreator<ThemeSlice, [], [], ThemeSlice> = (set) => ({
-  themeId: "omlx-dark",
+  themeId: "zai-dark",
   fontFamilyId: DEFAULT_FONT_FAMILY_ID,
   fontSizeId: DEFAULT_FONT_SIZE_ID,
   setThemeId: (themeId: ThemeId) => {
@@ -117,7 +117,7 @@ const storage = createJSONStorage(() =>
 export const useAppStore = create<AppStore>()(
   devtools(
     persist(createAppStoreImpl, {
-      name: "vllm-studio-state",
+      name: "local-studio-state",
       storage,
       skipHydration: true,
       partialize: (state) => ({
@@ -136,11 +136,13 @@ export const useAppStore = create<AppStore>()(
         return {
           ...current,
           ...persistedStore,
-          // 240px/220px were old defaults. Keep genuinely custom widths, but
+          // 240px/220px/204px were old defaults. Keep genuinely custom widths, but
           // migrate default-width sidebars to the tighter desktop rail.
           sidebarWidth:
-            persistedRecord.sidebarWidth === 240 || persistedRecord.sidebarWidth === 220
-              ? 204
+            persistedRecord.sidebarWidth === 240 ||
+            persistedRecord.sidebarWidth === 220 ||
+            persistedRecord.sidebarWidth === 204
+              ? 224
               : (persistedStore.sidebarWidth ?? current.sidebarWidth),
           sidebar: {
             ...current.sidebar,
@@ -155,7 +157,7 @@ export const useAppStore = create<AppStore>()(
         applyStoredUiControls();
       },
     }),
-    { name: "vllm-studio" },
+    { name: "local-studio" },
   ),
 );
 

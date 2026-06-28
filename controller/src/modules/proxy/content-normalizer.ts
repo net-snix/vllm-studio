@@ -1,44 +1,112 @@
 export const normalizeToolRequest = (
   payload: Record<string, unknown>,
   options: { supportsTools?: boolean } = {}
-): boolean => {
-  let changed = false;
+): Record<string, unknown> => {
   const supportsTools = options.supportsTools !== false;
 
   if (payload["functions"] && !payload["tools"] && Array.isArray(payload["functions"])) {
     payload["tools"] = (payload["functions"] as Array<Record<string, unknown>>).map(
       (functionDefinition) => ({
         type: "function",
-        function: functionDefinition,
+        function: canonicalizeFunction(functionDefinition),
       })
     );
     delete payload["functions"];
-    changed = true;
   }
   if (Array.isArray(payload["tools"]) && payload["tools"].length === 0) {
     delete payload["tools"];
-    changed = true;
   }
   if (!supportsTools) {
-    if (payload["functions"] !== undefined) {
-      delete payload["functions"];
-      changed = true;
-    }
-    if (payload["tools"] !== undefined) {
-      delete payload["tools"];
-      changed = true;
-    }
-    if (payload["tool_choice"] !== undefined) {
-      delete payload["tool_choice"];
-      changed = true;
-    }
-    return changed;
+    delete payload["functions"];
+    delete payload["tools"];
+    delete payload["tool_choice"];
+    return payload;
   }
+
+  const tools = payload["tools"];
+  if (Array.isArray(tools)) {
+    payload["tools"] = tools
+      .map((tool) => {
+        if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+          return tool;
+        }
+        const toolRecord = tool as Record<string, unknown>;
+        const functionDefinition = toolRecord["function"];
+        if (
+          functionDefinition &&
+          typeof functionDefinition === "object" &&
+          !Array.isArray(functionDefinition)
+        ) {
+          return {
+            ...toolRecord,
+            function: canonicalizeFunction(functionDefinition as Record<string, unknown>),
+          };
+        }
+        return tool;
+      })
+      .sort((left, right) => {
+        const leftName = getFunctionName(left);
+        const rightName = getFunctionName(right);
+        if (leftName === null && rightName === null) {
+          return 0;
+        }
+        if (leftName === null) {
+          return 1;
+        }
+        if (rightName === null) {
+          return -1;
+        }
+        return leftName.localeCompare(rightName);
+      });
+  }
+
   if (payload["tool_choice"] === "auto") {
     delete payload["tool_choice"];
-    changed = true;
   }
-  return changed;
+  return payload;
+};
+
+const canonicalizeFunction = (
+  functionDefinition: Record<string, unknown>
+): Record<string, unknown> => {
+  const rest: Record<string, unknown> = {};
+  for (const key of Object.keys(functionDefinition)) {
+    if (key !== "name" && key !== "description" && key !== "parameters") {
+      rest[key] = functionDefinition[key];
+    }
+  }
+
+  const canonical: Record<string, unknown> = {};
+  if ("name" in functionDefinition) {
+    canonical["name"] = functionDefinition["name"];
+  }
+  if ("description" in functionDefinition) {
+    canonical["description"] = functionDefinition["description"];
+  }
+  if ("parameters" in functionDefinition) {
+    canonical["parameters"] = functionDefinition["parameters"];
+  }
+  for (const key of Object.keys(rest).sort()) {
+    canonical[key] = rest[key];
+  }
+  return canonical;
+};
+
+const getFunctionName = (tool: unknown): string | null => {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+    return null;
+  }
+  const toolRecord = tool as Record<string, unknown>;
+  const functionDefinition = toolRecord["function"];
+  if (
+    !functionDefinition ||
+    typeof functionDefinition !== "object" ||
+    Array.isArray(functionDefinition)
+  ) {
+    return null;
+  }
+  const name = (functionDefinition as Record<string, unknown>)["name"];
+  return typeof name === "string" ? name : null;
 };
 
 const collapseTextContentParts = (content: unknown): string | null => {

@@ -5,12 +5,12 @@ import { normalizeBrowserInput } from "@/features/agent/tools/browser-url";
 import { parseArgsText } from "@/features/plugins/plugins-utils";
 
 declare global {
-  var __VLLM_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST:
+  var __LOCAL_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST:
     | ((
         hostname: string,
       ) => Promise<(string | { address: string; family: 4 | 6 })[]>)
     | undefined;
-  var __VLLM_STUDIO_BROWSER_READER_REQUEST_FOR_TEST:
+  var __LOCAL_STUDIO_BROWSER_READER_REQUEST_FOR_TEST:
     | ((
         url: string,
         address: { address: string; family: 4 | 6 },
@@ -49,6 +49,25 @@ test("browser navigate primes the URL while the browser surface is mounting", as
   assert.equal((result.data as { pending?: boolean }).pending, true);
 });
 
+test("browser navigate opens the agent's own localhost dev servers but not the LAN", async () => {
+  const navigate = (url: string) =>
+    runBrowserPanelCommand(
+      "navigate",
+      { url },
+      { browser: null, currentUrl: "", isElectron: true, setBrowserUrl: () => undefined },
+    );
+
+  // The pane exists to preview dev servers the agent just started — loopback
+  // must work, or "build the app and open it" is dead on arrival.
+  assert.equal((await navigate("http://localhost:8765/index.html")).ok, true);
+  assert.equal((await navigate("http://127.0.0.1:3005")).ok, true);
+
+  // Other private/LAN hosts stay blocked — the agent drives this browser; don't
+  // hand it the local network.
+  assert.equal((await navigate("http://192.168.1.50:8080")).ok, false);
+  assert.equal((await navigate("http://10.0.0.5")).ok, false);
+});
+
 test("free-text browser searches avoid Google webview refresh loops", () => {
   assert.equal(
     normalizeBrowserInput("latest vllm docs", "/workspace/project"),
@@ -57,11 +76,11 @@ test("free-text browser searches avoid Google webview refresh loops", () => {
 });
 
 test("desktop browser reader fetch renders public markdown and rejects private urls", async () => {
-  const previousDataDir = process.env.VLLM_STUDIO_DATA_DIR;
+  const previousDataDir = process.env.LOCAL_STUDIO_DATA_DIR;
   let requestCount = 0;
   const connectedAddresses: string[] = [];
-  process.env.VLLM_STUDIO_DATA_DIR = "/tmp/vllm-studio-desktop-test";
-  globalThis.__VLLM_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST = async (
+  process.env.LOCAL_STUDIO_DATA_DIR = "/tmp/local-studio-desktop-test";
+  globalThis.__LOCAL_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST = async (
     hostname,
   ) =>
     hostname === "private-dns.test"
@@ -69,7 +88,7 @@ test("desktop browser reader fetch renders public markdown and rejects private u
       : hostname === "mapped-private.test"
         ? ["::ffff:127.0.0.1"]
         : ["93.184.216.34"];
-  globalThis.__VLLM_STUDIO_BROWSER_READER_REQUEST_FOR_TEST = async (
+  globalThis.__LOCAL_STUDIO_BROWSER_READER_REQUEST_FOR_TEST = async (
     url,
     address,
   ) => {
@@ -175,15 +194,15 @@ test("desktop browser reader fetch renders public markdown and rejects private u
       "93.184.216.34",
     ]);
   } finally {
-    delete globalThis.__VLLM_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST;
-    delete globalThis.__VLLM_STUDIO_BROWSER_READER_REQUEST_FOR_TEST;
-    if (previousDataDir === undefined) delete process.env.VLLM_STUDIO_DATA_DIR;
-    else process.env.VLLM_STUDIO_DATA_DIR = previousDataDir;
+    delete globalThis.__LOCAL_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST;
+    delete globalThis.__LOCAL_STUDIO_BROWSER_READER_REQUEST_FOR_TEST;
+    if (previousDataDir === undefined) delete process.env.LOCAL_STUDIO_DATA_DIR;
+    else process.env.LOCAL_STUDIO_DATA_DIR = previousDataDir;
   }
 });
 
 test("curated local MCP servers require explicit target args", async () => {
-  const { handleMcpAction } = await import("@/features/agent/mcp/api");
+  const { handleMcpAction } = await import("@/features/agent/mcp/service");
   const missing = handleMcpAction({
     action: "add_from_catalogue",
     catalogueId: "catalogue:filesystem",

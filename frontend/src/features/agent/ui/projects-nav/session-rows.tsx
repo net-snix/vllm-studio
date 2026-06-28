@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { safeJson } from "@/features/agent/safe-json";
+import { sessionRuntimeController } from "@/features/agent/runtime/session-runtime-controller";
 import { cleanSessionTitle } from "@/features/agent/messages/helpers";
 import {
   patchSessionPref,
@@ -25,6 +26,29 @@ import {
 } from "./helpers";
 import { SessionNavRow } from "./session-nav-row";
 import type { ActiveAgentSession, SessionSummary } from "./types";
+
+/**
+ * The set of session ids the runtime currently reports as actively working —
+ * including sessions running in the BACKGROUND (not open in any pane). Lets the
+ * sidebar show a working indicator on history rows so a turn started in another
+ * chat isn't invisible after you switch away.
+ */
+function useActiveRuntimeIds(): ReadonlySet<string> {
+  return useSyncExternalStore(
+    (notify) => sessionRuntimeController().subscribeActiveRuntimeIds(notify),
+    () => sessionRuntimeController().getActiveRuntimeIds(),
+    () => sessionRuntimeController().getActiveRuntimeIds(),
+  );
+}
+
+/** Session ids that finished working while you weren't looking — the dot. */
+function useUnseenFinishedIds(): ReadonlySet<string> {
+  return useSyncExternalStore(
+    (notify) => sessionRuntimeController().subscribeActiveRuntimeIds(notify),
+    () => sessionRuntimeController().getUnseenFinishedIds(),
+    () => sessionRuntimeController().getUnseenFinishedIds(),
+  );
+}
 
 export function ProjectRow({
   project,
@@ -59,7 +83,7 @@ export function ProjectRow({
 
   return (
     <div className="flex flex-col">
-      <div className="group relative flex h-7 items-center rounded-md pl-2 pr-1.5 text-(--dim)/70 transition-colors hover:bg-(--hover) hover:text-(--fg)/80">
+      <div className="group relative flex h-7 items-center rounded-md pl-2 pr-1.5 text-(--dim)/70 transition-colors hover:bg-(--color-surface-hover) hover:text-(--fg)/80">
         <button
           type="button"
           onClick={handleToggle}
@@ -78,12 +102,12 @@ export function ProjectRow({
               />
             </span>
           )}
-          <span className="truncate text-[length:var(--fs-base)] font-normal text-(--dim) transition-colors group-hover:text-(--fg)/85">
+          <span className="truncate text-[length:var(--fs-lg)] font-normal text-(--dim) transition-colors group-hover:text-(--fg)/85">
             {project.name}
           </span>
           {!project.exists ? (
             <span
-              className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-(--warn)"
               title={project.path}
               aria-label={`Folder not found at ${project.path}`}
             />
@@ -114,7 +138,7 @@ export function ProjectRow({
         ) : null}
       </div>
       {missingErrorVisible && !project.exists ? (
-        <div className="pl-12 pr-2 pb-1 text-[length:var(--fs-md)] text-red-400">
+        <div className="pl-12 pr-2 pb-1 text-[length:var(--fs-md)] text-(--err)">
           <span>Folder not found at {project.path}</span>
           <button
             type="button"
@@ -151,6 +175,8 @@ export function ProjectSessions({
 }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const activeRuntimeIds = useActiveRuntimeIds();
+  const unseenFinishedIds = useUnseenFinishedIds();
   const projectActiveSessions = useMemo(
     () => activeSessions.filter((session) => session.projectId === project.id),
     [activeSessions, project.id],
@@ -209,33 +235,82 @@ export function ProjectSessions({
     return recentSessions;
   }, [sessions, activePiSessionIds, excludedIds, prefs]);
 
+  // Original start time per session id, from the server history list (stable —
+  // it does not change when a session is opened). Used to anchor an open
+  // session to its real position even if its live snapshot's startedAt was
+  // reset on open.
+  const historyStartByPiId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const session of sessions ?? []) {
+      const at = Date.parse(session.startedAt) || 0;
+      if (at) map.set(session.id, at);
+    }
+    return map;
+  }, [sessions]);
+
+  // ONE list ordered by stable start time. Open sessions are NOT promoted to a
+  // separate top block — that made opening a chat reshuffle the sidebar and lose
+  // the user's place. Each session keeps its position whether or not it's open;
+  // the open one just renders as a live ActiveSessionRow in situ.
+  const orderedRows = useMemo<NavRow[]>(() => {
+    const rows: NavRow[] = [];
+    for (const session of visibleActiveSessions) {
+      const historyStart = session.piSessionId
+        ? historyStartByPiId.get(session.piSessionId)
+        : undefined;
+      rows.push({
+        kind: "active",
+        key: `${session.paneId}:${session.tabId}`,
+        sortAt: historyStart ?? (Date.parse(session.startedAt ?? session.updatedAt) || 0),
+        active: session,
+      });
+    }
+    for (const session of recent) {
+      rows.push({
+        kind: "recent",
+        key: session.id,
+        sortAt: Date.parse(session.startedAt) || 0,
+        recent: session,
+      });
+    }
+    rows.sort((a, b) => b.sortAt - a.sortAt);
+    return rows;
+  }, [visibleActiveSessions, recent, historyStartByPiId]);
+
   return (
     <div className="flex flex-col">
-      {visibleActiveSessions.map((session) => (
-        <ActiveSessionRow
-          key={`${session.paneId}:${session.tabId}`}
-          project={project}
-          session={session}
-          pref={activeSessionPref(session, prefs)}
-        />
-      ))}
       {loading && !sessions ? (
         <div className="pl-2 pr-2 py-0.5 text-[length:var(--fs-sm)] text-(--dim)">Loading...</div>
-      ) : recent.length === 0 && visibleActiveSessions.length === 0 ? (
+      ) : orderedRows.length === 0 ? (
         <div className="pl-2 pr-2 py-0.5 text-[length:var(--fs-sm)] text-(--dim)">No chats</div>
       ) : (
-        recent.map((session) => (
-          <SessionRow
-            key={session.id}
-            project={project}
-            session={session}
-            pref={prefs[session.id] ?? {}}
-          />
-        ))
+        orderedRows.map((row) =>
+          row.kind === "active" ? (
+            <ActiveSessionRow
+              key={row.key}
+              project={project}
+              session={row.active}
+              pref={activeSessionPref(row.active, prefs)}
+            />
+          ) : (
+            <SessionRow
+              key={row.key}
+              project={project}
+              session={row.recent}
+              pref={prefs[row.recent.id] ?? {}}
+              isRunning={activeRuntimeIds.has(row.recent.id)}
+              unseen={unseenFinishedIds.has(row.recent.id)}
+            />
+          ),
+        )
       )}
     </div>
   );
 }
+
+type NavRow =
+  | { kind: "active"; key: string; sortAt: number; active: ActiveAgentSession }
+  | { kind: "recent"; key: string; sortAt: number; recent: SessionSummary };
 
 export function ActiveSessionRow({
   project,
@@ -249,7 +324,7 @@ export function ActiveSessionRow({
   const label =
     cleanSessionTitle(pref.title) || cleanSessionTitle(session.title) || "Current session";
   const isFocused = session.focused === true;
-  const rowClass = `group relative flex h-6 items-center rounded-md pl-3 pr-0 transition-colors ${isFocused ? "bg-(--hover) text-(--fg)" : "text-(--fg)/72 hover:bg-(--hover) hover:text-(--fg)/95"}`;
+  const rowClass = `group relative flex h-6 items-center rounded-md pl-3 pr-0 transition-colors ${isFocused ? "bg-(--color-surface-hover) text-(--fg)" : "text-(--fg)/72 hover:bg-(--color-surface-hover) hover:text-(--fg)/95"}`;
 
   return (
     <SessionNavRow
@@ -275,6 +350,7 @@ export function ActiveSessionRow({
       onRememberTitle={() => rememberAgentSessionNavTitle(session.piSessionId, label)}
       onDragStart={(event) => setAgentSessionDragData(event, session)}
       isRunning={session.status !== "idle" && session.status !== "done"}
+      unseen={session.unseen === true && !isFocused}
       canDoubleClickRename
       menuIconClass="h-3.5 w-3.5"
       renameInputClass="text-[length:var(--fs-xs)]"
@@ -286,10 +362,14 @@ export function SessionRow({
   project,
   session,
   pref,
+  isRunning = false,
+  unseen = false,
 }: {
   project: ProjectEntry;
   session: SessionSummary;
   pref: SessionPref;
+  isRunning?: boolean;
+  unseen?: boolean;
 }) {
   const label =
     cleanSessionTitle(pref.title) ||
@@ -302,7 +382,9 @@ export function SessionRow({
       label={label}
       initialDraft={cleanSessionTitle(pref.title) || cleanSessionTitle(session.firstUserMessage)}
       age={relativeAge(session.startedAt)}
-      rowClass="group relative flex h-6 items-center rounded-md pl-3 pr-0 text-(--fg)/72 transition-colors hover:bg-(--hover) hover:text-(--fg)/95"
+      isRunning={isRunning}
+      unseen={unseen}
+      rowClass="group relative flex h-6 items-center rounded-md pl-3 pr-0 text-(--fg)/72 transition-colors hover:bg-(--color-surface-hover) hover:text-(--fg)/95"
       renameRowClass="flex h-6 items-center rounded-md bg-(--surface)/40 pl-3 pr-1"
       href={`/agent?project=${encodeURIComponent(project.id)}&session=${encodeURIComponent(session.id)}`}
       onPatchPref={(patch) => patchSessionPref(session.id, patch)}
@@ -313,7 +395,10 @@ export function SessionRow({
             console.warn("[agent] failed to archive session", error);
           });
       }}
-      onRememberTitle={() => rememberAgentSessionNavTitle(session.id, label)}
+      onRememberTitle={() => {
+        rememberAgentSessionNavTitle(session.id, label);
+        sessionRuntimeController().markRuntimeSeen(session.id);
+      }}
       onDragStart={(event) => {
         setAgentSessionDragData(event, {
           piSessionId: session.id,

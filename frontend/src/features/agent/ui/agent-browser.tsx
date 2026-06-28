@@ -41,6 +41,8 @@ export type WebviewElement = HTMLElement & {
   goBack: () => void;
   goForward: () => void;
   reload: () => void;
+  canGoBack: () => boolean;
+  canGoForward: () => boolean;
   src: string;
   loadURL: (url: string) => Promise<void>;
   getURL: () => string;
@@ -103,7 +105,6 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
   const [localSites, setLocalSites] = useState<LocalhostSite[]>([]);
   const [localSitesLoading, setLocalSitesLoading] = useState(false);
   const [localSitesError, setLocalSitesError] = useState<string | null>(null);
-  const [contextOpen, setContextOpen] = useState(false);
   const showStartPage = !hasOpenedUrl && url === DEFAULT_BROWSER_URL;
   const addressValue = showStartPage && inputValue === DEFAULT_BROWSER_URL ? "" : inputValue;
 
@@ -147,6 +148,7 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
     webviewRef,
     fetchReadable,
     onLocationChange,
+    onNavState: setNavState,
     enabled: !showStartPage,
   });
   useLocalhostSitesEffects({
@@ -161,10 +163,18 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
   }, []);
   const handleBack = () => {
     if (readingMode) return;
+    if (isElectron) {
+      webviewRef.current?.goBack();
+      return;
+    }
     postLiveVerb("back");
   };
   const handleForward = () => {
     if (readingMode) return;
+    if (isElectron) {
+      webviewRef.current?.goForward();
+      return;
+    }
     postLiveVerb("forward");
   };
   const handleReload = () => {
@@ -186,6 +196,10 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
     }
     if (readingMode) {
       void fetchReadable(url);
+      return;
+    }
+    if (isElectron) {
+      webviewRef.current?.reload();
       return;
     }
     postLiveVerb("reload");
@@ -279,17 +293,6 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
         </button>
       </form>
 
-      {!showStartPage ? (
-        <BrowserContextStrip
-          url={url}
-          readingMode={readingMode}
-          page={readable}
-          loading={readingLoading}
-          open={contextOpen}
-          onToggle={() => setContextOpen((value) => !value)}
-        />
-      ) : null}
-
       <div className="min-h-0 flex-1 bg-(--bg)">
         {showStartPage ? (
           <LocalhostStartPage
@@ -308,6 +311,25 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
             loading={readingLoading}
             onLinkClick={onNavigate}
           />
+        ) : isElectron ? (
+          // Desktop: a real embedded Chromium webview. Loads file://, localhost,
+          // and the public web directly — the same surface the agent drives.
+          (() => {
+            type AnyTag = "webview";
+            const Tag = "webview" as AnyTag;
+            return (
+              <Tag
+                ref={(node: WebviewElement | null) => {
+                  webviewRef.current = node;
+                }}
+                src={url}
+                // @ts-expect-error — Electron-specific attribute.
+                allowpopups="true"
+                className="size-full"
+                style={{ width: "100%", height: "100%", display: "flex" }}
+              />
+            );
+          })()
         ) : (
           <ScreencastSurface
             url={url}
@@ -325,85 +347,6 @@ export const AgentBrowser = forwardRef<AgentBrowserHandle, Props>(function Agent
     </section>
   );
 });
-
-function BrowserContextStrip({
-  url,
-  readingMode,
-  page,
-  loading,
-  open,
-  onToggle,
-}: {
-  url: string;
-  readingMode: boolean;
-  page: ReadablePage | null;
-  loading: boolean;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const host = browserHost(url);
-  const readerChars = page ? (page.markdown ?? page.text).length : 0;
-  return (
-    <div className="shrink-0 border-b border-(--border) bg-(--surface)/45 px-3 py-2 text-[length:var(--fs-xs)] text-(--dim)">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 text-left"
-        aria-expanded={open}
-      >
-        <span className="min-w-0">
-          <span className="font-medium text-(--fg)">Model context</span>
-          <span className="ml-2 truncate font-mono">{host}</span>
-        </span>
-        <span className="shrink-0 text-(--dim)">{open ? "Hide" : "Show"}</span>
-      </button>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        <ContextPill>browser tools active</ContextPill>
-        <ContextPill>{readingMode ? "reader" : "live"}</ContextPill>
-        <ContextPill>
-          {readingMode
-            ? loading
-              ? "reading..."
-              : `${readerChars.toLocaleString()} chars`
-            : "DOM + screenshot on demand"}
-        </ContextPill>
-      </div>
-      {open ? (
-        <dl className="mt-2 grid gap-1.5 font-mono text-[length:var(--fs-xs)]">
-          <ContextRow label="url" value={url} />
-          <ContextRow
-            label="title"
-            value={page?.title || (readingMode && loading ? "loading" : "")}
-          />
-          <ContextRow
-            label="type"
-            value={page?.contentType || (readingMode ? "unknown" : "live browser")}
-          />
-        </dl>
-      ) : null}
-    </div>
-  );
-}
-
-function ContextPill({ children }: { children: string }) {
-  return (
-    <span className="rounded border border-(--border) bg-(--bg)/70 px-1.5 py-0.5 text-(--dim)">
-      {children}
-    </span>
-  );
-}
-
-function ContextRow({ label, value }: { label: string; value: string }) {
-  if (!value) return null;
-  return (
-    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)] gap-2">
-      <dt className="text-(--dim)">{label}</dt>
-      <dd className="truncate text-(--fg)/80" title={value}>
-        {value}
-      </dd>
-    </div>
-  );
-}
 
 function LocalhostStartPage({
   sites,
@@ -534,7 +477,7 @@ function LocalhostSiteRow({
           This chat
         </span>
       ) : null}
-      <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400" />
+      <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-(--ok)" />
     </button>
   );
 }
@@ -606,14 +549,6 @@ function resolveBrowserHref(href: string, baseUrl: string): string {
   }
 }
 
-function browserHost(url: string): string {
-  try {
-    return new URL(url).host || url;
-  } catch {
-    return url;
-  }
-}
-
 type UseLocalhostSitesEffectsParams = {
   enabled: boolean;
   onLoadingChange: Dispatch<SetStateAction<boolean>>;
@@ -666,6 +601,9 @@ const getLocalhostSitesSnapshot = (): number => 0;
 type BrowserWebview = HTMLElement & {
   executeJavaScript: (script: string, userGesture?: boolean) => Promise<unknown>;
   getURL: () => string;
+  getTitle?: () => string;
+  canGoBack?: () => boolean;
+  canGoForward?: () => boolean;
 };
 
 type UseAgentBrowserEffectsParams = {
@@ -675,6 +613,7 @@ type UseAgentBrowserEffectsParams = {
   webviewRef: RefObject<BrowserWebview | null>;
   fetchReadable: (target: string) => Promise<void>;
   onLocationChange?: (value: string) => void;
+  onNavState?: (state: BrowserPaneState) => void;
   enabled?: boolean;
 };
 
@@ -685,6 +624,7 @@ function useAgentBrowserEffects({
   webviewRef,
   fetchReadable,
   onLocationChange,
+  onNavState,
   enabled = true,
 }: UseAgentBrowserEffectsParams): void {
   const subscribeReadable = useCallback(
@@ -699,25 +639,34 @@ function useAgentBrowserEffects({
 
   const subscribeLocationSync = useCallback(
     (_notify: () => void) => {
-      if (!enabled || !isElectron || readingMode || !onLocationChange) return () => {};
+      if (!enabled || !isElectron || readingMode) return () => {};
       const webview = webviewRef.current;
       if (!webview) return () => {};
-      const syncUrl = () => {
+      const sync = () => {
         try {
           const current = webview.getURL();
-          if (current) onLocationChange(current);
+          if (current) onLocationChange?.(current);
+          onNavState?.({
+            url: current || url,
+            title: typeof webview.getTitle === "function" ? webview.getTitle() : "",
+            canGoBack: typeof webview.canGoBack === "function" ? webview.canGoBack() : false,
+            canGoForward:
+              typeof webview.canGoForward === "function" ? webview.canGoForward() : false,
+          });
         } catch {
           // Ignore transient webview state while navigating.
         }
       };
-      webview.addEventListener("did-navigate", syncUrl as EventListener);
-      webview.addEventListener("did-navigate-in-page", syncUrl as EventListener);
+      webview.addEventListener("did-navigate", sync as EventListener);
+      webview.addEventListener("did-navigate-in-page", sync as EventListener);
+      webview.addEventListener("did-stop-loading", sync as EventListener);
       return () => {
-        webview.removeEventListener("did-navigate", syncUrl as EventListener);
-        webview.removeEventListener("did-navigate-in-page", syncUrl as EventListener);
+        webview.removeEventListener("did-navigate", sync as EventListener);
+        webview.removeEventListener("did-navigate-in-page", sync as EventListener);
+        webview.removeEventListener("did-stop-loading", sync as EventListener);
       };
     },
-    [enabled, isElectron, onLocationChange, readingMode, url, webviewRef],
+    [enabled, isElectron, onLocationChange, onNavState, readingMode, url, webviewRef],
   );
 
   useSyncExternalStore(subscribeReadable, getAgentBrowserSnapshot, getAgentBrowserSnapshot);

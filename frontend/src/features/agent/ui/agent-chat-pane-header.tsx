@@ -1,8 +1,10 @@
 "use client";
 
 import { useRef, useState, type ReactNode } from "react";
-import { PanelRightClose, PanelRightOpen } from "lucide-react";
+import { PanelRightClose, PanelRightOpen } from "@/ui/icon-registry";
 import { useClickOutside } from "@/features/agent/hooks/use-click-outside";
+import { setReasoningVisible } from "@/features/agent/messages/reasoning-pref";
+import { useReasoningVisible } from "@/features/agent/messages/use-reasoning-visible";
 import { useAppStore } from "@/store";
 import { CloseIcon, MoreIcon } from "@/ui/icons";
 
@@ -17,9 +19,11 @@ export function AgentChatPaneHeader({
   rightPanelOpen,
   canFork,
   canClose,
+  canExport = false,
   onTogglePinned,
   onRename,
   onFork,
+  onExport,
   onClose,
   onToggleRightPanel,
 }: {
@@ -28,9 +32,11 @@ export function AgentChatPaneHeader({
   rightPanelOpen: boolean;
   canFork: boolean;
   canClose: boolean;
+  canExport?: boolean;
   onTogglePinned: () => void;
   onRename: (title: string) => void;
   onFork?: () => void;
+  onExport?: () => void;
   onClose?: () => void;
   onToggleRightPanel: () => void;
 }) {
@@ -39,6 +45,7 @@ export function AgentChatPaneHeader({
   const [draftTitle, setDraftTitle] = useState(title);
   const ref = useRef<HTMLDivElement>(null);
   useClickOutside(ref, open, () => setOpen(false));
+  const reasoningVisible = useReasoningVisible();
   // When the left sidebar is collapsed, the fixed "expand sidebar" button sits
   // over the top-left corner. Pad the header so the title never renders under it.
   const sidebarCollapsed = useAppStore((s) => !s.desktopSidebarPinnedOpen);
@@ -55,7 +62,7 @@ export function AgentChatPaneHeader({
   };
   return (
     <div
-      className={`grid h-9 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-(--border) py-0 pr-2 text-xs ${
+      className={`grid h-10 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-(--border)/85 bg-(--color-header) py-0 pr-2 text-xs ${
         sidebarCollapsed ? "pl-12" : "pl-2"
       }`}
     >
@@ -78,7 +85,7 @@ export function AgentChatPaneHeader({
           />
         ) : (
           <span
-            className="block min-w-0 truncate whitespace-nowrap text-[length:var(--fs-md)] font-medium leading-none text-(--fg)"
+            className="block min-w-0 truncate whitespace-nowrap text-[length:var(--fs-lg)] font-medium leading-none text-(--fg)"
             title={title}
           >
             {title}
@@ -120,6 +127,23 @@ export function AgentChatPaneHeader({
               }}
             >
               Fork
+            </HeaderMenuItem>
+            <HeaderMenuItem
+              disabled={!canExport || !onExport}
+              onClick={() => {
+                onExport?.();
+                setOpen(false);
+              }}
+            >
+              Export as Markdown
+            </HeaderMenuItem>
+            <HeaderMenuItem
+              onClick={() => {
+                setReasoningVisible(!reasoningVisible);
+                setOpen(false);
+              }}
+            >
+              {reasoningVisible ? "Hide reasoning" : "Show reasoning"}
             </HeaderMenuItem>
           </div>
         ) : null}

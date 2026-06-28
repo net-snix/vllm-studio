@@ -10,8 +10,8 @@ import {
   type ThemeTokens,
 } from "@/lib/themes";
 
-const STORE_KEY = "vllm-studio-state";
-const DEFAULT_THEME_ID: ThemeId = "omlx-dark";
+const STORE_KEY = "local-studio-state";
+const DEFAULT_THEME_ID: ThemeId = "zai-dark";
 
 const THEME_TOKENS_BY_ID = Object.fromEntries(
   Array.from(THEME_BY_ID.entries()).map(([id, theme]) => [id, theme.tokens]),
@@ -48,11 +48,11 @@ function deriveThemeUiTokens(tokens: ThemeTokens): Record<string, string> {
     separator: `rgba(${ink}, ${isLight ? "0.18" : "0.18"})`,
     hover: `rgba(${ink}, ${isLight ? "0.055" : "0.07"})`,
     active: `rgba(${ink}, ${isLight ? "0.085" : "0.11"})`,
-    composer: "color-mix(in srgb, var(--surface) 92%, var(--bg) 8%)",
+    composer: "color-mix(in srgb, var(--surface) 88%, var(--bg) 12%)",
     "composer-footer": "color-mix(in srgb, var(--surface) 72%, var(--bg) 28%)",
     "composer-shadow": isLight
-      ? "0 12px 36px rgba(0, 0, 0, 0.08)"
-      : "0 18px 60px rgba(0, 0, 0, 0.45)",
+      ? "0 12px 30px rgba(0, 0, 0, 0.07)"
+      : "0 18px 42px rgba(0, 0, 0, 0.42)",
   };
 }
 
@@ -116,7 +116,7 @@ export function applyTokensToDocument(tokens: ThemeTokens): void {
    These set the canonical CSS variables that the whole UI derives from, so a
    handful of values re-theme everything uniformly. Persisted to localStorage and
    re-applied on load. */
-const UI_CONTROLS_KEY = "vllm-studio.uiControls";
+const UI_CONTROLS_KEY = "local-studio.uiControls";
 
 export function applyUiControl(name: string, value: string): void {
   if (typeof document === "undefined") return;

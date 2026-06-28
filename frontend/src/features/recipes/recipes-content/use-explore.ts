@@ -70,14 +70,23 @@ export function derivativeScore(model: HuggingFaceModel, search: string): number
 export function useExplore() {
   const [gpus, setGpus] = useState<GPU[]>([]);
   const [apiMaxVramGb, setApiMaxVramGb] = useState(0);
-  const [poolOverrideGb, setPoolOverrideGbState] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+  const [task, setTask] = useState("text-generation");
+  const [library, setLibrary] = useState("");
+  const [sort, setSort] = useState("");
+  const [poolOverrideGb, setPoolOverrideGbState] = useState<number | null>(null);
   const [recommendations, setRecommendations] = useState<ModelRecommendation[]>([]);
 
-  const configureExploreParams = useCallback((params: URLSearchParams, isBrowsing: boolean) => {
-    params.set("filter", "text-generation");
-    params.set("sort", isBrowsing ? RECENT_HF_MODEL_SORT : "downloads");
-  }, []);
+  const configureExploreParams = useCallback(
+    (params: URLSearchParams, isBrowsing: boolean) => {
+      // HF `filter` is repeatable (AND logic). task defaults to text-generation
+      // so the browse list stays relevant; clearing it shows all task types.
+      if (task) params.append("filter", task);
+      if (library) params.append("filter", library);
+      params.set("sort", isBrowsing ? RECENT_HF_MODEL_SORT : sort || "downloads");
+    },
+    [task, library, sort],
+  );
 
   const { models, loading, error, hasMore, loadMore, fetchModels } = useHuggingFaceModelSearch(
     search,
@@ -215,36 +224,58 @@ export function useExplore() {
   }, [models, recByKey, search, hardwareProfile]);
 
   const sortedGroups = useMemo(() => {
+    const isSearching = search.trim().length > 0;
     return [...groupedModels].sort((a, b) => {
+      // Spotlight recommendations always float to the top in both modes.
       const aSpot = spotlightRecKeys.has(a.key);
       const bSpot = spotlightRecKeys.has(b.key);
       if (aSpot && !bSpot) return -1;
       if (!aSpot && bSpot) return 1;
 
+      if (isSearching) {
+        // SEARCH MODE: HF already ranked these by relevance (it matched the
+        // search term server-side and returned them in downloads order within
+        // that match set). Preserve HF's order — only break ties by downloads
+        // then recency. The old code discarded HF's relevance ranking and
+        // re-sorted by raw likes, which buried exact matches under popular
+        // unrelated models.
+        if (b.maxDownloads !== a.maxDownloads) return b.maxDownloads - a.maxDownloads;
+        const ta = a.lastModifiedMs;
+        const tb = b.lastModifiedMs;
+        if (tb !== ta) return tb - ta;
+        return 0;
+      }
+
+      // BROWSE MODE (no search): engagement + freshness matter since there's no
+      // query to prioritize. Likes are a stronger quality signal than downloads
+      // for browsing, so they lead.
       if (b.maxLikes !== a.maxLikes) return b.maxLikes - a.maxLikes;
       if (b.maxDownloads !== a.maxDownloads) return b.maxDownloads - a.maxDownloads;
       const ta = a.lastModifiedMs;
       const tb = b.lastModifiedMs;
       if (tb !== ta) return tb - ta;
 
+      // Final tie-break: prefer models that fit the VRAM pool.
       if (poolGb > 0) {
         const ea = a.needGb;
         const eb = b.needGb;
         const fitA = ea != null && ea <= poolGb;
         const fitB = eb != null && eb <= poolGb;
         if (fitA !== fitB) return fitA ? -1 : 1;
-        if (ea != null && eb != null) {
-          if (fitA) return ea - eb;
-          return ea - poolGb - (eb - poolGb);
-        }
       }
       return 0;
     });
-  }, [groupedModels, spotlightRecKeys, poolGb]);
+  }, [groupedModels, spotlightRecKeys, poolGb, search]);
 
+  // VRAM-tier interleaving only makes sense when browsing — when the user has
+  // searched for something specific, scrambling the relevance order to mix
+  // footprint sizes would bury the match they typed.
   const mixedGroups = useMemo(
-    () => interleaveExploreGroupsByVramTier(sortedGroups, poolGb),
-    [sortedGroups, poolGb],
+    () =>
+      search.trim().length > 0
+        ? sortedGroups
+        : interleaveExploreGroupsByVramTier(sortedGroups, poolGb),
+    [sortedGroups, poolGb, search],
   );
 
   const visibleGroups = useMemo(() => {
@@ -269,9 +300,15 @@ export function useExplore() {
     loading,
     error,
     search,
+    task,
+    library,
+    sort,
     hasMore,
     recommendations,
     setSearch,
+    setTask,
+    setLibrary,
+    setSort,
     loadMore,
     refresh,
   };

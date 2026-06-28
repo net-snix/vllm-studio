@@ -27,11 +27,17 @@ export type RuntimePromptTemplateRef = {
 export type RuntimeStartOptions = {
   browserToolEnabled?: boolean;
   browserSessionId?: string;
-  browserBackend?: "embedded" | "parchi";
+  browserBackend?: "embedded" | "sitegeist";
+  // Runtime (focused) session id, so the plan extension writes the plan the
+  // Plan panel reads for the same session.
+  planSessionId?: string;
   canvasEnabled?: boolean;
   plugins?: RuntimePluginRef[];
   skills?: RuntimeSkillRef[];
   promptTemplates?: RuntimePromptTemplateRef[];
+  // Changes only when a managed OAuth token is refreshed, so the runtime
+  // restarts (respawning MCP servers) once a prior token has expired.
+  managedTokenFingerprint?: string;
 };
 
 type RuntimeMcpConfig = {
@@ -57,7 +63,7 @@ export type AgentSessionOptions = {
 };
 
 function resolveDefaultAgentCwd(): string {
-  if (process.env.VLLM_STUDIO_AGENT_CWD) return process.env.VLLM_STUDIO_AGENT_CWD;
+  if (process.env.LOCAL_STUDIO_AGENT_CWD) return process.env.LOCAL_STUDIO_AGENT_CWD;
 
   try {
     const usable = listProjectsFromStore().find((entry) => entry.exists);
@@ -127,37 +133,44 @@ export function resolveBundledPiExtensionPath(
 export function resolveBrowserExtensionPath(): string | null {
   return resolveBundledPiExtensionPath(
     "browser.ts",
-    process.env.VLLM_STUDIO_BROWSER_EXTENSION_PATH,
+    process.env.LOCAL_STUDIO_BROWSER_EXTENSION_PATH,
   );
 }
 
-export function resolveParchiBrowserExtensionPath(): string | null {
+export function resolveSitegeistBrowserExtensionPath(): string | null {
   return resolveBundledPiExtensionPath(
-    "parchi-browser.ts",
-    process.env.VLLM_STUDIO_PARCHI_BROWSER_EXTENSION_PATH,
+    "sitegeist-browser.ts",
+    process.env.LOCAL_STUDIO_SITEGEIST_BROWSER_EXTENSION_PATH,
   );
 }
 
 export function resolveCanvasExtensionPath(): string | null {
-  return resolveBundledPiExtensionPath("canvas.ts", process.env.VLLM_STUDIO_CANVAS_EXTENSION_PATH);
+  return resolveBundledPiExtensionPath("canvas.ts", process.env.LOCAL_STUDIO_CANVAS_EXTENSION_PATH);
+}
+
+export function resolvePlanExtensionPath(): string | null {
+  return resolveBundledPiExtensionPath("plan.ts", process.env.LOCAL_STUDIO_PLAN_EXTENSION_PATH);
 }
 
 export function resolveTimeoutExtensionPath(): string | null {
   return resolveBundledPiExtensionPath(
-    "vllm-studio-timeouts.ts",
-    process.env.VLLM_STUDIO_TIMEOUT_EXTENSION_PATH,
+    "local-studio-timeouts.ts",
+    process.env.LOCAL_STUDIO_TIMEOUT_EXTENSION_PATH,
   );
 }
 
 export function resolveAgentPolicyExtensionPath(): string | null {
   return resolveBundledPiExtensionPath(
-    "vllm-studio-agent-policy.ts",
-    process.env.VLLM_STUDIO_AGENT_POLICY_EXTENSION_PATH,
+    "local-studio-agent-policy.ts",
+    process.env.LOCAL_STUDIO_AGENT_POLICY_EXTENSION_PATH,
   );
 }
 
 export function resolveMcpExtensionPath(): string | null {
-  return resolveBundledPiExtensionPath("mcp-plugin.ts", process.env.VLLM_STUDIO_MCP_EXTENSION_PATH);
+  return resolveBundledPiExtensionPath(
+    "mcp-plugin.ts",
+    process.env.LOCAL_STUDIO_MCP_EXTENSION_PATH,
+  );
 }
 
 // Locate a bundled skill directory (contains SKILL.md). Searched only when the
@@ -180,18 +193,22 @@ function resolveBundledSkillPath(name: string, override?: string): string | null
 }
 
 export function resolveBrowserSkillPath(): string | null {
-  return resolveBundledSkillPath("browser", process.env.VLLM_STUDIO_BROWSER_SKILL_PATH);
+  return resolveBundledSkillPath("browser", process.env.LOCAL_STUDIO_BROWSER_SKILL_PATH);
 }
 
-export function resolveParchiBrowserSkillPath(): string | null {
+export function resolveSitegeistBrowserSkillPath(): string | null {
   return resolveBundledSkillPath(
-    "parchi-browser",
-    process.env.VLLM_STUDIO_PARCHI_BROWSER_SKILL_PATH,
+    "sitegeist-browser",
+    process.env.LOCAL_STUDIO_SITEGEIST_BROWSER_SKILL_PATH,
   );
 }
 
 export function resolveCanvasSkillPath(): string | null {
-  return resolveBundledSkillPath("canvas", process.env.VLLM_STUDIO_CANVAS_SKILL_PATH);
+  return resolveBundledSkillPath("canvas", process.env.LOCAL_STUDIO_CANVAS_SKILL_PATH);
+}
+
+export function resolvePlanSkillPath(): string | null {
+  return resolveBundledSkillPath("plan", process.env.LOCAL_STUDIO_PLAN_SKILL_PATH);
 }
 
 export function pluginFingerprint(options: RuntimeStartOptions): string {
@@ -215,6 +232,7 @@ export function pluginFingerprint(options: RuntimeStartOptions): string {
     plugins: names,
     skills,
     promptTemplates,
+    managedToken: options.managedTokenFingerprint ?? "",
   });
 }
 
@@ -271,19 +289,19 @@ function shouldLoadBrowserTool(options: RuntimeStartOptions): boolean {
   return options.browserToolEnabled === true;
 }
 
-function browserBackend(options: RuntimeStartOptions): "embedded" | "parchi" {
-  const backend = options.browserBackend ?? process.env.VLLM_STUDIO_BROWSER_BACKEND;
-  if (backend === "parchi") return "parchi";
+function browserBackend(options: RuntimeStartOptions): "embedded" | "sitegeist" {
+  const backend = options.browserBackend ?? process.env.LOCAL_STUDIO_BROWSER_BACKEND;
+  if (backend === "sitegeist") return "sitegeist";
   return "embedded";
 }
 
-function browserExtensionPathFor(backend: "embedded" | "parchi"): string | null {
-  if (backend === "parchi") return resolveParchiBrowserExtensionPath();
+function browserExtensionPathFor(backend: "embedded" | "sitegeist"): string | null {
+  if (backend === "sitegeist") return resolveSitegeistBrowserExtensionPath();
   return resolveBrowserExtensionPath();
 }
 
-function browserSkillPathFor(backend: "embedded" | "parchi"): string | null {
-  if (backend === "parchi") return resolveParchiBrowserSkillPath();
+function browserSkillPathFor(backend: "embedded" | "sitegeist"): string | null {
+  if (backend === "sitegeist") return resolveSitegeistBrowserSkillPath();
   return resolveBrowserSkillPath();
 }
 
@@ -299,6 +317,9 @@ function runtimeExtensionPaths(
   return uniqueExistingPaths([
     timeoutExtensionPath,
     agentPolicyExtensionPath,
+    // Plan tools are always available: the Plan panel is a core surface, so the
+    // model can always populate it instead of writing a plan file to the repo.
+    resolvePlanExtensionPath(),
     mcpConfigs.length ? resolveMcpExtensionPath() : null,
     browserExtensionPath,
     options.canvasEnabled === true ? resolveCanvasExtensionPath() : null,
@@ -312,6 +333,7 @@ function runtimeSkillPaths(options: RuntimeStartOptions, plugins: RuntimePluginR
     ...pluginSkillPaths(plugins),
     ...selectedSkillPaths(options.skills ?? []),
     loadBrowser ? browserSkillPathFor(backend) : null,
+    resolvePlanSkillPath(),
     options.canvasEnabled === true ? resolveCanvasSkillPath() : null,
   ]);
 }
@@ -321,27 +343,22 @@ function runtimeEnvInjections(
   mcpConfigs: RuntimeMcpConfig[],
   env: NodeJS.ProcessEnv,
 ): Record<string, string> {
-  const frontendBase = env.VLLM_STUDIO_FRONTEND_BASE ?? deriveFrontendBase(env);
-  const parchiRelay = readParchiRelayEnv(env);
+  const frontendBase = env.LOCAL_STUDIO_FRONTEND_BASE ?? deriveFrontendBase(env);
+  const relay = readSitegeistRelayEnv(env);
   return {
-    VLLM_STUDIO_BROWSER_SESSION_ID: options.browserSessionId ?? "",
-    VLLM_STUDIO_FRONTEND_BASE: frontendBase,
-    VLLM_STUDIO_MCP_PLUGIN_CONFIGS: JSON.stringify(mcpConfigs),
-    PARCHI_RELAY_URL:
-      env.PARCHI_RELAY_RPC ??
-      env.PARCHI_RELAY_URL ??
-      parchiRelay.PARCHI_RELAY_RPC ??
-      parchiRelay.PARCHI_RELAY_URL ??
-      "",
-    PARCHI_RELAY_TOKEN: env.PARCHI_RELAY_TOKEN ?? parchiRelay.PARCHI_RELAY_TOKEN ?? "",
-    PARCHI_RELAY_ORIGIN: env.PARCHI_RELAY_ORIGIN ?? frontendBase,
-    PARCHI_RELAY_SESSION_ID: options.browserSessionId ?? "",
+    LOCAL_STUDIO_BROWSER_SESSION_ID: options.browserSessionId ?? "",
+    LOCAL_STUDIO_PLAN_SESSION_ID: options.planSessionId ?? "",
+    LOCAL_STUDIO_FRONTEND_BASE: frontendBase,
+    LOCAL_STUDIO_MCP_PLUGIN_CONFIGS: JSON.stringify(mcpConfigs),
+    SITEGEIST_RELAY_URL: env.SITEGEIST_RELAY_URL ?? relay.SITEGEIST_RELAY_URL ?? "",
+    SITEGEIST_RELAY_TOKEN: env.SITEGEIST_RELAY_TOKEN ?? relay.SITEGEIST_RELAY_TOKEN ?? "",
+    SITEGEIST_RELAY_SESSION_ID: options.browserSessionId ?? "",
   };
 }
 
-function readParchiRelayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+function readSitegeistRelayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const filePath = expandHome(
-    env.VLLM_STUDIO_PARCHI_RELAY_ENV_PATH ?? "~/.config/parchi-relay/env",
+    env.LOCAL_STUDIO_SITEGEIST_RELAY_ENV_PATH ?? "~/.config/sitegeist-relay/env",
   );
   if (!existsSync(filePath)) return {};
   try {
@@ -359,7 +376,7 @@ function readParchiRelayEnv(env: NodeJS.ProcessEnv): Record<string, string> {
             .slice(index + 1)
             .trim()
             .replace(/^['"]|['"]$/g, "");
-          return key.startsWith("PARCHI_RELAY_") ? [[key, value]] : [];
+          return key.startsWith("SITEGEIST_RELAY_") ? [[key, value]] : [];
         }),
     );
   } catch {

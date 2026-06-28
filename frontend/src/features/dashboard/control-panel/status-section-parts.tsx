@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Info, Moon, Square, Sun } from "lucide-react";
+import { Info, Moon, Square, Sun } from "@/ui/icon-registry";
 import { useShallow } from "zustand/react/shallow";
 import { ModelStopConfirm } from "@/ui/model-stop-confirm";
 import { useModelLifecycle } from "@/features/dashboard/use-model-lifecycle";
@@ -163,12 +163,17 @@ function HeaderThemeToggle() {
   const { themeId, setThemeId } = useAppStore(
     useShallow((s) => ({ themeId: s.themeId, setThemeId: s.setThemeId })),
   );
-  const isDark = themeId === "omlx-dark";
+  const isDark =
+    themeId === "zai-dark" ||
+    themeId === "zai-sky" ||
+    themeId === "zai-violet" ||
+    themeId === "zai-emerald" ||
+    themeId === "zai-rose";
   const Icon = isDark ? Sun : Moon;
   return (
     <button
       type="button"
-      onClick={() => setThemeId(isDark ? "omlx-light" : "omlx-dark")}
+      onClick={() => setThemeId(isDark ? "zai-light" : "zai-dark")}
       className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
       title={isDark ? "Light mode" : "Dark mode"}
     >

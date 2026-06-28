@@ -7,7 +7,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { ChevronRight, Copy, GitFork } from "lucide-react";
+import { ChevronRight, Copy, GitFork } from "@/ui/icon-registry";
 import type {
   AssistantBlock,
   ChatMessage,
@@ -17,6 +17,7 @@ import type {
   ThinkingBlock,
   ToolBlock,
 } from "@/features/agent/messages";
+import { useReasoningVisible } from "@/features/agent/messages/use-reasoning-visible";
 import { traceAgentReasoning } from "@/features/agent/trace-reasoning";
 import { AssistantMarkdown } from "@/features/agent/ui/assistant-markdown";
 import { ToolBlockView } from "@/features/agent/ui/timeline/tool-block-view";
@@ -36,68 +37,71 @@ type RoutedBlock =
   | { kind: "content"; block: TextBlock }
   | { kind: "event"; block: EventBlock };
 
+// Every run of thinking + tool blocks between two content/event blocks folds
+// into ONE activity-group whose segments stay in chronological order. The group
+// renders as a single Codex-style "Worked for…" disclosure — reasoning never
+// gets its own top-level row, so the chat alternates cleanly between answer text
+// and one collapsible work summary. Ids derive from the first underlying block
+// so collapse state survives snapshot rebuilds and ordering normalization.
 export function groupAssistantBlocks(blocks: AssistantBlock[]): RoutedBlock[] {
   const routed: RoutedBlock[] = [];
-  const activitySegments: ActivitySegment[] = [];
-  let reasoningGroup: ThinkingBlock[] = [];
-  let toolGroup: ToolBlock[] = [];
+  let segments: ActivitySegment[] = [];
+  let reasoning: ThinkingBlock[] = [];
+  let tools: ToolBlock[] = [];
 
-  // Segment ids come from underlying block ids so collapsed reasoning state
-  // survives snapshot rebuilds and ordering normalization during long streams.
-  const flushReasoningSegment = () => {
-    if (reasoningGroup.length === 0) return;
-    activitySegments.push({
+  const flushReasoning = () => {
+    if (reasoning.length === 0) return;
+    segments.push({
       kind: "reasoning",
-      id: `reasoning-${reasoningGroup[0]?.id ?? activitySegments.length}`,
-      blocks: reasoningGroup,
+      id: `reasoning-seg-${reasoning[0]?.id ?? segments.length}`,
+      blocks: reasoning,
     });
-    reasoningGroup = [];
+    reasoning = [];
   };
-
-  const flushToolSegment = () => {
-    if (toolGroup.length === 0) return;
-    activitySegments.push({
+  const flushTools = () => {
+    if (tools.length === 0) return;
+    segments.push({
       kind: "tools",
-      id: `tools-${toolGroup[0]?.id ?? activitySegments.length}`,
-      blocks: toolGroup,
+      id: `tools-seg-${tools[0]?.id ?? segments.length}`,
+      blocks: tools,
     });
-    toolGroup = [];
+    tools = [];
   };
-
-  const flushActivityGroup = () => {
-    flushReasoningSegment();
-    flushToolSegment();
-    if (activitySegments.length === 0) return;
+  const flushActivity = () => {
+    flushReasoning();
+    flushTools();
+    if (segments.length === 0) return;
     routed.push({
       kind: "activity-group",
-      id: `activity-${activitySegments[0]?.id ?? routed.length}`,
-      segments: activitySegments.splice(0),
+      id: `activity-${segments[0]?.id ?? routed.length}`,
+      segments,
     });
+    segments = [];
   };
 
   for (const block of blocks) {
     if (block.kind === "tool") {
-      flushReasoningSegment();
-      toolGroup.push(block);
+      flushReasoning();
+      tools.push(block);
       continue;
     }
     if (block.kind === "thinking") {
-      flushToolSegment();
-      reasoningGroup.push(block);
+      flushTools();
+      reasoning.push(block);
       continue;
     }
     if (block.kind === "text" && block.text.trim() === "") {
-      // Empty text blocks shouldn't split an activity group — keep reasoning+tools together.
+      // Empty text blocks shouldn't split a run — keep the surrounding activity together.
       continue;
     }
-    flushActivityGroup();
+    flushActivity();
     if (block.kind === "text") {
       routed.push({ kind: "content", block });
     } else {
       routed.push({ kind: "event", block });
     }
   }
-  flushActivityGroup();
+  flushActivity();
 
   return routed;
 }
@@ -125,22 +129,7 @@ function SessionPaneBlockRouterInner({
   onForkSession?: () => void;
 }) {
   if (message.role === "user") {
-    // User turns: a quiet foreground-tinted block sized to its content,
-    // capped at 60% of the composer column.
-    return (
-      <article className="flex justify-start">
-        <div className="min-w-0 max-w-[60%] rounded-2xl bg-(--fg)/5 px-4 py-2.5 text-[length:var(--codex-chat-font-size)] leading-[1.625] text-(--fg)/90">
-          <div className="whitespace-pre-wrap break-words">{message.text}</div>
-          {message.attachments?.length ? (
-            <div className="mt-2 grid gap-2">
-              {message.attachments.map((attachment) => (
-                <UserAttachmentPreview key={attachment.id} attachment={attachment} />
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </article>
-    );
+    return <UserMessage message={message} />;
   }
 
   return (
@@ -304,7 +293,10 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
         <img
           src={attachment.previewUrl}
           alt={attachment.name}
-          className="max-h-72 w-full object-contain"
+          // Reserve vertical space so the async image decode doesn't grow from
+          // 0 → up to 288px and shove the whole transcript below it (the scroller
+          // runs overflow-anchor:none, so nothing absorbs that reflow).
+          className="max-h-72 min-h-40 w-full object-contain"
         />
         <figcaption className="truncate px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
           {attachment.name} · {size}
@@ -320,6 +312,16 @@ function UserAttachmentPreview({ attachment }: { attachment: ChatMessageAttachme
       >
         <video src={attachment.previewUrl} className="max-h-72 w-full" controls />
         <figcaption className="truncate px-2 py-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
+          {attachment.name} · {size}
+        </figcaption>
+      </figure>
+    );
+  }
+  if (attachment.previewKind === "audio" && attachment.previewUrl) {
+    return (
+      <figure className="rounded-md border border-(--border) bg-black/30 p-2" title={title}>
+        <audio src={attachment.previewUrl} className="w-full" controls />
+        <figcaption className="truncate pt-1 font-mono text-[length:var(--fs-xs)] text-(--dim)">
           {attachment.name} · {size}
         </figcaption>
       </figure>
@@ -370,13 +372,29 @@ type ActivityItem =
   | { kind: "tool"; id: string; block: ToolBlock }
   | { kind: "explore"; id: string; blocks: ToolBlock[] };
 
+// A reasoning segment is one continuous burst of model chain-of-thought (no
+// tools between). Some backends stream it as MANY tiny thinking blocks, and a
+// reasoning model can leak stub fragments (e.g. a lone "The") or empty parts,
+// which previously rendered as a stack of duplicate, nested "Thought" rows.
+// Collapse the whole burst into ONE disclosure: drop empties and consecutive
+// duplicates, then join the distinct fragments.
+function mergeReasoningBlocks(blocks: ThinkingBlock[]): ThinkingBlock | null {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    const text = block.text.trim();
+    if (!text || parts[parts.length - 1] === text) continue;
+    parts.push(text);
+  }
+  if (parts.length === 0) return null;
+  return { kind: "thinking", id: blocks[0]?.id ?? "reasoning", text: parts.join("\n\n") };
+}
+
 function buildActivityItems(segments: ActivitySegment[]): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const segment of segments) {
     if (segment.kind === "reasoning") {
-      for (const block of segment.blocks) {
-        items.push({ kind: "reasoning", id: block.id, block });
-      }
+      const merged = mergeReasoningBlocks(segment.blocks);
+      if (merged) items.push({ kind: "reasoning", id: merged.id, block: merged });
       continue;
     }
     let run: ToolBlock[] = [];
@@ -411,18 +429,51 @@ const AssistantActivityGroup = memo(function AssistantActivityGroup({
   live,
 }: {
   segments: ActivitySegment[];
+  // `live`: this group is the actively streaming block (drives the "Working"
+  // shimmer + live preview).
   live: boolean;
 }) {
-  const items = useMemo(() => buildActivityItems(segments), [segments]);
-  const [expanded, setExpanded] = useState(false);
+  // Global "show reasoning" preference: when off, drop reasoning segments so the
+  // group shows tools only (and disappears entirely for thinking-only turns).
+  const showReasoning = useReasoningVisible();
+  const visibleSegments = useMemo(
+    () => (showReasoning ? segments : segments.filter((segment) => segment.kind !== "reasoning")),
+    [segments, showReasoning],
+  );
+  const items = useMemo(() => buildActivityItems(visibleSegments), [visibleSegments]);
+  // Keep live work collapsed by default. Streaming reasoning/tool previews can
+  // grow by hundreds of pixels and update every token; auto-opening them makes
+  // the transcript visibly jump and flicker. The summary row stays one line and
+  // users can still expand details explicitly.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const expanded = userExpanded ?? false;
   const working =
     live &&
-    segments.some(
+    visibleSegments.some(
       (segment) =>
         segment.kind === "tools" && segment.blocks.some((block) => block.status === "running"),
     );
-  const summary = useMemo(() => summarizeActivity(segments), [segments]);
-  const preview = live ? activityPreview(segments) : null;
+  const summary = useMemo(() => summarizeActivity(visibleSegments), [visibleSegments]);
+  const preview = live ? activityPreview(visibleSegments) : null;
+
+  // Reasoning hidden + nothing else to show → render nothing. The turn's
+  // "Working for…"/"Worked for…" divider still signals that the model worked.
+  if (items.length === 0) return null;
+
+  // A reasoning-only burst (no tools) needs no "Worked for…" wrapper, which
+  // would nest a "Thought" summary around a "Thought" disclosure. Render the
+  // single merged thought directly so the chat shows one clean, top-level row.
+  if (items.every((item) => item.kind === "reasoning")) {
+    return (
+      <div className="flex min-w-0 flex-col gap-0.5">
+        {items.map((item) =>
+          item.kind === "reasoning" ? (
+            <ReasoningDisclosure key={item.id} block={item.block} active={working || live} />
+          ) : null,
+        )}
+      </div>
+    );
+  }
 
   return (
     <details className="group min-w-0" open={expanded}>
@@ -430,7 +481,7 @@ const AssistantActivityGroup = memo(function AssistantActivityGroup({
         className="flex min-h-6 min-w-0 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden"
         onClick={(event) => {
           event.preventDefault();
-          setExpanded((value) => !value);
+          setUserExpanded(!expanded);
         }}
       >
         <span
@@ -449,20 +500,22 @@ const AssistantActivityGroup = memo(function AssistantActivityGroup({
         )}
         <ChevronRight className="h-3 w-3 shrink-0 text-(--dim)/50 transition-transform group-open:rotate-90" />
       </summary>
-      <div className="mb-1.5 ml-2 mt-1 flex min-w-0 flex-col gap-0.5 border-l border-(--border)/50 pl-2">
-        {items.map((item, index) => {
-          const isLastItem = index === items.length - 1;
-          if (item.kind === "reasoning") {
-            return (
-              <ReasoningDisclosure key={item.id} block={item.block} active={live && isLastItem} />
-            );
-          }
-          if (item.kind === "explore") {
-            return <ExploreAccordion key={item.id} blocks={item.blocks} live={live} />;
-          }
-          return <ToolBlockView key={item.id} block={item.block} />;
-        })}
-      </div>
+      {expanded ? (
+        <div className="mb-1.5 ml-2 mt-1 flex min-w-0 flex-col gap-0.5 border-l border-(--border)/50 pl-2">
+          {items.map((item, index) => {
+            const isLastItem = index === items.length - 1;
+            if (item.kind === "reasoning") {
+              return (
+                <ReasoningDisclosure key={item.id} block={item.block} active={live && isLastItem} />
+              );
+            }
+            if (item.kind === "explore") {
+              return <ExploreAccordion key={item.id} blocks={item.blocks} live={live} />;
+            }
+            return <ToolBlockView key={item.id} block={item.block} />;
+          })}
+        </div>
+      ) : null}
     </details>
   );
 });
@@ -498,31 +551,39 @@ function summarizeActivity(segments: ActivitySegment[]): string {
   return joined.charAt(0).toUpperCase() + joined.slice(1);
 }
 
-/* Latest in-flight action, for the live preview in the collapsed summary. */
+/* Latest in-flight action, for the live preview in the collapsed summary.
+   Reasoning is deliberately excluded — model chain-of-thought should never
+   leak into the visible chat, even as a one-line preview; the user can still
+   expand the activity group to read it if they want. */
 function activityPreview(segments: ActivitySegment[]): string | null {
   for (let index = segments.length - 1; index >= 0; index -= 1) {
     const segment = segments[index];
-    if (!segment) continue;
-    if (segment.kind === "tools") {
-      const runningTool = [...segment.blocks].reverse().find((block) => block.status === "running");
-      const latestTool = runningTool ?? segment.blocks[segment.blocks.length - 1];
-      if (latestTool) {
-        const detail = toolArg(latestTool, ["cmd", "command", "path", "file_path", "query", "url"]);
-        return [toolVerb(latestTool), compactToolText(detail, 72)].filter(Boolean).join(" ");
-      }
-      continue;
+    if (!segment || segment.kind === "reasoning") continue;
+    const runningTool = [...segment.blocks].reverse().find((block) => block.status === "running");
+    const latestTool = runningTool ?? segment.blocks[segment.blocks.length - 1];
+    if (latestTool) {
+      const detail = toolArg(latestTool, ["cmd", "command", "path", "file_path", "query", "url"]);
+      return [toolVerb(latestTool), compactToolText(detail, 72)].filter(Boolean).join(" ");
     }
-    const latestReasoning = segment.blocks[segment.blocks.length - 1];
-    const text = compactToolText(latestReasoning?.text, 72);
-    if (text) return text;
   }
   return null;
 }
 
+/* Each thinking block is its own collapsible disclosure, shown inline between
+   tool calls inside the activity group. It stays collapsed by default even while
+   live so streaming thought text doesn't continuously resize the transcript. */
 function ReasoningDisclosure({ block, active }: { block: ThinkingBlock; active: boolean }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? false;
   return (
-    <details className="group min-w-0">
-      <summary className="flex min-h-6 cursor-pointer list-none items-center gap-1.5 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden">
+    <details className="group min-w-0" open={open}>
+      <summary
+        className="flex min-h-6 cursor-pointer list-none items-center gap-1.5 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden"
+        onClick={(event) => {
+          event.preventDefault();
+          setUserOpen(!open);
+        }}
+      >
         <span
           className={`text-[13px] font-medium leading-5 ${
             active ? "codex-shimmer-text" : "text-(--fg)/55"
@@ -532,19 +593,28 @@ function ReasoningDisclosure({ block, active }: { block: ThinkingBlock; active: 
         </span>
         <ChevronRight className="h-3 w-3 text-(--dim)/50 transition-transform group-open:rotate-90" />
       </summary>
-      <div className="mb-1.5 ml-1.5 mt-1 min-w-0 whitespace-pre-wrap border-l-2 border-(--border) pl-3 text-[13px] leading-[1.6] text-(--fg)/60">
-        {block.text}
-      </div>
+      {open ? (
+        <div className="mb-1.5 ml-1.5 mt-1 max-h-[320px] min-w-0 overflow-auto whitespace-pre-wrap border-l-2 border-(--border) pl-3 text-[13px] leading-[1.6] text-(--fg)/60">
+          {block.text}
+        </div>
+      ) : null}
     </details>
   );
 }
 
 function ExploreAccordion({ blocks, live }: { blocks: ToolBlock[]; live: boolean }) {
+  const [open, setOpen] = useState(false);
   const running = live && blocks.some((block) => block.status === "running");
   const counts = exploreCounts(blocks);
   return (
-    <details className="group min-w-0">
-      <summary className="flex min-h-6 min-w-0 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden">
+    <details className="group min-w-0" open={open}>
+      <summary
+        className="flex min-h-6 min-w-0 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden"
+        onClick={(event) => {
+          event.preventDefault();
+          setOpen((value) => !value);
+        }}
+      >
         <span
           className={`shrink-0 text-[13px] font-medium leading-5 ${
             running ? "codex-shimmer-text" : "text-(--fg)/55"
@@ -557,11 +627,13 @@ function ExploreAccordion({ blocks, live }: { blocks: ToolBlock[]; live: boolean
         </span>
         <ChevronRight className="h-3 w-3 shrink-0 text-(--dim)/50 transition-transform group-open:rotate-90" />
       </summary>
-      <div className="mb-1.5 ml-2 mt-1 flex min-w-0 flex-col gap-0.5 border-l border-(--border)/50 pl-2">
-        {blocks.map((block) => (
-          <ToolBlockView key={block.id} block={block} />
-        ))}
-      </div>
+      {open ? (
+        <div className="mb-1.5 ml-2 mt-1 flex min-w-0 flex-col gap-0.5 border-l border-(--border)/50 pl-2">
+          {blocks.map((block) => (
+            <ToolBlockView key={block.id} block={block} />
+          ))}
+        </div>
+      ) : null}
     </details>
   );
 }
@@ -584,6 +656,49 @@ function assistantContentCopyText(blocks: AssistantBlock[]): string {
     .map((block) => (block.kind === "text" ? block.text : ""))
     .filter(Boolean)
     .join("\n\n");
+}
+
+function UserMessage({ message }: { message: ChatMessage }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (!message.text.trim()) return;
+    await navigator.clipboard.writeText(message.text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_200);
+  };
+  // A quiet foreground-tinted block sized to its content, capped by the same
+  // composer-width column and anchored to its right edge. A copy button reveals
+  // on hover to the left of the bubble, mirroring the assistant's copy action.
+  // A steer message shows dimmed the instant it's sent and brightens once the
+  // runtime echoes it (the model is now seeing it). The transition makes that
+  // hand-off read as "delivered" rather than a sudden pop-in.
+  const pending = message.pending === true;
+  return (
+    <article className="group flex items-start justify-end gap-1">
+      {message.text.trim() && !pending ? (
+        <div className="mt-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <AssistantActionButton
+            label={copied ? "Copied" : "Copy message"}
+            onClick={() => void copy()}
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </AssistantActionButton>
+        </div>
+      ) : null}
+      <div
+        className={`min-w-0 max-w-full rounded-2xl bg-(--fg)/5 px-4 py-2.5 text-[length:var(--codex-chat-font-size)] leading-[1.625] text-(--fg)/90 transition-opacity duration-500 ${pending ? "opacity-45" : "opacity-100"}`}
+      >
+        <div className="whitespace-pre-wrap break-words">{message.text}</div>
+        {message.attachments?.length ? (
+          <div className="mt-2 grid gap-2">
+            {message.attachments.map((attachment) => (
+              <UserAttachmentPreview key={attachment.id} attachment={attachment} />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
 }
 
 function AssistantMessageActions({

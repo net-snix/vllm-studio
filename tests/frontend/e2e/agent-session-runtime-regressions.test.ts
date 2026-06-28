@@ -26,18 +26,24 @@ import {
   normalizeOpenAIModels,
 } from "@/features/agent/models";
 import { applyAssistantPiEventToBlocks } from "@/features/agent/messages/block-event";
-import { runtimeStatusLooksActive } from "@/features/agent/messages/helpers";
+import { runtimeStatusLooksActive, visibleUserTextFromPi } from "@/features/agent/messages/helpers";
+import {
+  reduceSessionEvent,
+  type SessionStreamContext,
+} from "@/features/agent/runtime/pi-event-applier";
+import type { Session } from "@/features/agent/runtime/types";
 import { blocksFromTurnSnapshots } from "@/features/agent/messages/message-content";
 import { replaySessionEvents } from "@/features/agent/messages/replay";
 import { drainQueueAfterAgentEnd } from "@/features/agent/messages/helpers";
 import {
-  createTextDeltaCoalescer,
+  createEffectTextDeltaCoalescer as createTextDeltaCoalescer,
   textDeltaFromPiEvent,
-} from "@/features/agent/runtime/text-delta-coalescer";
-import { isEmptyStarterSession } from "@/features/agent/runtime/store";
+} from "@/features/agent/runtime/effect-coalescer";
+import { isEmptyStarterSession, pruneSessions } from "@/features/agent/runtime/store";
 import {
   beginSessionSubmit,
   endSessionSubmit,
+  referencedSessionIds,
 } from "@/features/agent/runtime/selectors";
 import {
   acceptRuntimeSeq,
@@ -173,7 +179,11 @@ test("new chat url navigation replaces the focused chat with a fresh runtime", (
   const pane = next.panesById.get("p-main");
   assert.equal(pane?.sessionId, "s-fresh");
   assert.equal(next.sessions.get("s-fresh")?.runtimeSessionId, "rt-fresh");
-  assert.equal(next.sessions.has("s-old"), false);
+  // The previous chat was mid-turn (status: running). Starting a new chat must
+  // NOT destroy it — it keeps streaming in the background and stays reachable
+  // from the sidebar. (It is pruned later, once it settles.)
+  assert.equal(next.sessions.has("s-old"), true);
+  assert.equal(next.sessions.get("s-old")?.status, "running");
   const active = next.sessions.get("s-fresh");
   assert.equal(active?.title, "New session");
   assert.equal(active?.piSessionId, null);
@@ -284,6 +294,43 @@ test("explicit new-session navigation blocks persisted active-session hydration"
   assert.equal(next.hydrated, true);
 });
 
+test("pruning keeps still-working sessions that lost their pane but drops settled ones", () => {
+  const running = makeSession("s-running", { status: "running" });
+  const starting = makeSession("s-starting", { status: "starting" });
+  const settled = makeSession("s-settled", { status: "done" });
+  const inPane = makeSession("s-inpane", { status: "idle" });
+  const sessions = new Map([
+    [running.id, running],
+    [starting.id, starting],
+    [settled.id, settled],
+    [inPane.id, inPane],
+  ]);
+
+  // Only the pane session is referenced — the others were navigated away from.
+  const pruned = pruneSessions(sessions, new Set([inPane.id]));
+
+  assert.equal(pruned.has("s-inpane"), true);
+  // Background turns survive the prune so they keep streaming and stay
+  // re-openable from the sidebar.
+  assert.equal(pruned.has("s-running"), true);
+  assert.equal(pruned.has("s-starting"), true);
+  // A settled orphan is still collected.
+  assert.equal(pruned.has("s-settled"), false);
+
+  // Once a kept background session settles, a later pass removes it.
+  const afterSettle = pruneSessions(
+    new Map([...pruned, ["s-running", { ...running, status: "done" as const }]]),
+    new Set([inPane.id]),
+  );
+  assert.equal(afterSettle.has("s-running"), false);
+  assert.equal(afterSettle.has("s-starting"), true);
+});
+
+test("referenced session ids reflect only sessions mounted in panes", () => {
+  const state = makeState(makeSession("s-main"));
+  assert.deepEqual([...referencedSessionIds(state)], ["s-main"]);
+});
+
 test("empty starter detection rejects cleared live sessions", () => {
   const clearedLive = makeSession("s-cleared-live", {
     status: "running",
@@ -355,7 +402,7 @@ test("unprojected active sessions hydrate with their cwd", () => {
     snapshots: [
       {
         projectId: "",
-        cwd: "/Users/sero/.vllm-studio",
+        cwd: "/Users/sero/.local-studio",
         paneId: "p-main",
         tabId: "tab-default",
         runtimeSessionId: "rt-default",
@@ -373,7 +420,7 @@ test("unprojected active sessions hydrate with their cwd", () => {
     next.panesById.get("p-main")?.sessionId ?? "",
   );
   assert.equal(active?.piSessionId, "pi-default");
-  assert.equal(active?.cwd, "/Users/sero/.vllm-studio");
+  assert.equal(active?.cwd, "/Users/sero/.local-studio");
   assert.equal(active?.modelId, "nemotron-3-ultra");
 });
 
@@ -386,7 +433,7 @@ test("session replay into a starter adopts cwd and model metadata", () => {
     paneId: "p-replay",
     tab: makeSession("tab-replay", {
       runtimeSessionId: "rt-replay",
-      cwd: "/Users/sero/.vllm-studio",
+      cwd: "/Users/sero/.local-studio",
       modelId: "nemotron-3-ultra",
       title: "Persisted replay",
       startedAt: "2026-06-08T04:00:00.000Z",
@@ -397,7 +444,7 @@ test("session replay into a starter adopts cwd and model metadata", () => {
     next.panesById.get("p-main")?.sessionId ?? "",
   );
   assert.equal(active?.piSessionId, "pi-replay");
-  assert.equal(active?.cwd, "/Users/sero/.vllm-studio");
+  assert.equal(active?.cwd, "/Users/sero/.local-studio");
   assert.equal(active?.modelId, "nemotron-3-ultra");
   assert.equal(active?.startedAt, "2026-06-08T04:00:00.000Z");
 });
@@ -924,6 +971,107 @@ test("explicit reasoning deltas render under reasoning", () => {
   });
 });
 
+test("incremental text deltas keep markdown table separators (no prefix-drop)", () => {
+  // Reproduces the table-mangling bug: when the model streams a markdown table
+  // as per-token deltas, row-leading "| " and repeated "| --- |" pieces are
+  // prefixes of the already-accumulated text. The old prefix-drop heuristic in
+  // appendToTextLikeBlock silently swallowed them, collapsing the table so
+  // remark-gfm no longer parsed it. Every delta must now survive verbatim.
+  const table = "| Name | Age |\n| --- | --- |\n| Al | 30 |\n";
+  const deltas = [
+    "| Name ",
+    "| Age ",
+    "|\n",
+    "| ", // prefix of accumulated "| Name ..." — old code dropped this
+    "--- ",
+    "| ",
+    "--- ",
+    "|\n",
+    "| Al ",
+    "| 30 ",
+    "|\n",
+  ];
+  assert.equal(deltas.join(""), table, "test deltas must reconstruct the table");
+
+  let blocks = applyAssistantPiEventToBlocks([], {
+    type: "message_update",
+    assistantMessageEvent: { type: "text_delta", delta: deltas[0] },
+  });
+  for (const delta of deltas.slice(1)) {
+    blocks = applyAssistantPiEventToBlocks(blocks ?? [], {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta },
+    });
+  }
+  assert.equal(blocks?.[0]?.kind, "text");
+  assert.equal(blocks?.[0]?.text, table);
+});
+
+test("incremental text deltas never drop a repeated leading word (no mid-line loss)", () => {
+  // "Total" recurs as the first token of a later line while still a prefix of
+  // the whole accumulated block; the old dedup dropped it, turning
+  // "Total sales\nTotal = 9" into "Total sales\n = 9".
+  const deltas = ["Total", " sales\n", "Total", " = 9"];
+  let blocks: ReturnType<typeof applyAssistantPiEventToBlocks> = [];
+  for (const delta of deltas) {
+    blocks = applyAssistantPiEventToBlocks(blocks ?? [], {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta },
+    });
+  }
+  assert.equal(blocks?.[0]?.text, "Total sales\nTotal = 9");
+});
+
+test("replaySessionEvents reattaching a streaming table preserves every pipe and newline", () => {
+  // Replay (reload/navigate onto a still-streaming turn) routes runtime-log
+  // message_update events through appendDelta, the only path that reaches the
+  // formerly-buggy code. The reattached table must be byte-identical.
+  const table = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+  const deltas = ["| A ", "| B ", "|\n", "| ", "--- ", "| ", "--- ", "|\n", "| 1 ", "| 2 ", "|\n"];
+  assert.equal(deltas.join(""), table);
+  const events = deltas.map((delta) => ({
+    type: "message_update" as const,
+    assistantMessageEvent: { type: "text_delta", delta },
+  }));
+
+  const { messages } = replaySessionEvents(events);
+  const assistant = messages.find((message) => message.role === "assistant");
+  const textBlock = assistant?.blocks?.find((block) => block.kind === "text");
+  assert.equal(textBlock?.text, table);
+});
+
+test("replay rebuilds a streaming table from message snapshots, matching its settled form", () => {
+  // The realistic pi shape: every message_update carries the FULL accumulated
+  // assistant message in event.message.content. Replay must rebuild the bubble
+  // from that snapshot (lossless) and produce the SAME result as the settled
+  // `message` event — proving the reattach path and the settled path converge.
+  const table = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+  const growing = [
+    "| A | B |\n",
+    "| A | B |\n| --- | --- |\n",
+    "| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+  ];
+  const streamingEvents = growing.map((accumulated) => ({
+    type: "message_update" as const,
+    assistantMessageEvent: { type: "text_delta", delta: "…" },
+    message: { role: "assistant", content: [{ type: "text", text: accumulated }] },
+  }));
+
+  const reattached = replaySessionEvents(streamingEvents);
+  const reattachedText = reattached.messages
+    .find((message) => message.role === "assistant")
+    ?.blocks?.find((block) => block.kind === "text")?.text;
+  assert.equal(reattachedText, table, "reattached streaming table must be lossless");
+
+  const settled = replaySessionEvents([
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: table }] } },
+  ]);
+  const settledText = settled.messages
+    .find((message) => message.role === "assistant")
+    ?.blocks?.find((block) => block.kind === "text")?.text;
+  assert.equal(reattachedText, settledText, "reattach path must equal the settled path");
+});
+
 test("text delta coalescer preserves alternating text and reasoning order", () => {
   const applied: Record<string, unknown>[] = [];
   const coalescer = createTextDeltaCoalescer({
@@ -1119,12 +1267,123 @@ test("tool call deltas use pi-provided partial arguments", () => {
   assert.equal(tool?.kind === "tool" ? tool.args?.content : undefined, "hello");
 });
 
+test("live assistant snapshots keep streaming file tool previews from partial tool calls", () => {
+  const harness = makePiEventApplierHarness(
+    makeSession("s-main", {
+      messages: [
+        { id: "u1", role: "user", text: "create a file" },
+        { id: "a-main", role: "assistant", text: "", blocks: [] },
+      ],
+      activeAssistantId: "a-main",
+    }),
+  );
+
+  harness.apply("s-main", "a-main", {
+    type: "message_update",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "I'll create it." }],
+    },
+    assistantMessageEvent: {
+      type: "toolcall_delta",
+      toolCallId: "call-create",
+      toolName: "createfile",
+      delta: '{"path":"/tmp/demo.txt","content":"hel',
+      partial: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll create it." },
+          {
+            type: "toolCall",
+            id: "call-create",
+            name: "createfile",
+            arguments: { path: "/tmp/demo.txt", content: "hel" },
+          },
+        ],
+      },
+    },
+  });
+
+  harness.apply("s-main", "a-main", {
+    type: "message_update",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "I'll create it." }],
+    },
+    assistantMessageEvent: {
+      type: "toolcall_delta",
+      toolCallId: "call-create",
+      toolName: "createfile",
+      delta: 'lo"}',
+      partial: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll create it." },
+          {
+            type: "toolCall",
+            id: "call-create",
+            name: "createfile",
+            arguments: { path: "/tmp/demo.txt", content: "hello" },
+          },
+        ],
+      },
+    },
+  });
+
+  const assistant = harness
+    .session()
+    .messages.find((message) => message.id === "a-main");
+  const tool = assistant?.blocks?.find((block) => block.kind === "tool");
+  assert.equal(tool?.kind, "tool");
+  assert.equal(tool?.kind === "tool" ? tool.name : undefined, "createfile");
+  assert.equal(tool?.kind === "tool" ? tool.args?.path : undefined, "/tmp/demo.txt");
+  assert.equal(tool?.kind === "tool" ? tool.args?.content : undefined, "hello");
+});
+
+test("live assistant snapshots preserve legacy tool-call argument deltas", () => {
+  const harness = makePiEventApplierHarness(
+    makeSession("s-main", {
+      messages: [
+        { id: "u1", role: "user", text: "create a file" },
+        { id: "a-main", role: "assistant", text: "", blocks: [] },
+      ],
+      activeAssistantId: "a-main",
+    }),
+  );
+
+  for (const delta of ['{"path":"/tmp/demo.txt","content":"hel', 'lo"}']) {
+    harness.apply("s-main", "a-main", {
+      type: "message_update",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "I'll create it." }],
+      },
+      assistantMessageEvent: {
+        type: "toolcall_delta",
+        toolCallId: "call-create",
+        toolName: "createfile",
+        delta,
+      },
+    });
+  }
+
+  const assistant = harness
+    .session()
+    .messages.find((message) => message.id === "a-main");
+  const tool = assistant?.blocks?.find((block) => block.kind === "tool");
+  assert.equal(tool?.kind, "tool");
+  assert.equal(
+    tool?.kind === "tool" ? tool.argsText : undefined,
+    '{"path":"/tmp/demo.txt","content":"hello"}',
+  );
+});
+
 test("vllm pi model config uses pi openai-compatible parsing without reasoning controls", () => {
   const [model] = modelsToPiModels([
     {
       id: "step-3.7-flash",
       name: "Step 3.7 Flash",
-      provider: "vllm-studio",
+      provider: "local-studio",
       contextWindow: 262_144,
       maxTokens: 65_536,
       reasoning: true,
@@ -1181,7 +1440,7 @@ test("vllm pi openai serialization keeps tool calls out of assistant content", (
     {
       id: "nex-n2-pro",
       name: "Nex N2 Pro",
-      provider: "vllm-studio",
+      provider: "local-studio",
       contextWindow: 262_144,
       maxTokens: 65_536,
       reasoning: true,
@@ -1225,7 +1484,7 @@ test("vllm pi openai serialization keeps tool calls out of assistant content", (
             },
           ],
           api: "openai-completions",
-          provider: "vllm-studio",
+          provider: "local-studio",
           model: "nex-n2-pro",
           stopReason: "toolUse",
           timestamp: Date.now(),
@@ -1275,7 +1534,7 @@ test("vllm pi openai serialization preserves assistant text part boundaries", ()
     {
       id: "nex-n2-pro",
       name: "Nex N2 Pro",
-      provider: "vllm-studio",
+      provider: "local-studio",
       contextWindow: 262_144,
       maxTokens: 65_536,
       reasoning: false,
@@ -1321,7 +1580,7 @@ test("vllm pi openai serialization preserves assistant text part boundaries", ()
             },
           ],
           api: "openai-completions",
-          provider: "vllm-studio",
+          provider: "local-studio",
           model: "nex-n2-pro",
           stopReason: "stop",
           timestamp: Date.now(),
@@ -1771,6 +2030,42 @@ test("settled assistant error messages hydrate visible error blocks", () => {
   assert.equal(assistant?.blocks?.[0]?.text, "provider overloaded");
 });
 
+test("aborted turns settle cleanly without an error block or session error", () => {
+  const harness = makePiEventApplierHarness(
+    makeSession("s-main", {
+      messages: [
+        { id: "u1", role: "user", text: "write an essay" },
+        { id: "a-main", role: "assistant", text: "", blocks: [] },
+      ],
+      activeAssistantId: "a-main",
+    }),
+  );
+
+  // User pressed Stop mid-answer: the call ends with stopReason "aborted" and
+  // whatever partial content had streamed. This is a deliberate stop, NOT a
+  // failure — no error block, no session error, partial content preserved.
+  harness.apply("s-main", "a-main", {
+    type: "message_end",
+    message: {
+      role: "assistant",
+      stopReason: "aborted",
+      content: [{ type: "text", text: "Partial answer so far" }],
+    },
+  });
+
+  const assistant = harness.session().messages.find((message) => message.id === "a-main");
+  assert.equal(harness.session().error ?? "", "");
+  assert.equal(
+    (assistant?.blocks ?? []).some((block) => block.kind === "event"),
+    false,
+    "aborted turn must not append an error/event block",
+  );
+  assert.equal(
+    (assistant?.blocks ?? []).find((block) => block.kind === "text")?.text,
+    "Partial answer so far",
+  );
+});
+
 test("activity group ids stay stable as streaming blocks append", () => {
   const first = groupAssistantBlocks([
     { kind: "thinking", id: "0:0:thinking", text: "Thinking" },
@@ -1804,8 +2099,8 @@ test("activity group ids stay stable as streaming blocks append", () => {
     },
   ]);
 
-  const firstActivity = first[0];
-  const secondActivity = second[0];
+  const firstActivity = first.find((item) => item.kind === "activity-group");
+  const secondActivity = second.find((item) => item.kind === "activity-group");
   if (
     firstActivity?.kind !== "activity-group" ||
     secondActivity?.kind !== "activity-group"
@@ -1813,6 +2108,13 @@ test("activity group ids stay stable as streaming blocks append", () => {
     throw new Error("expected activity groups");
   }
   assert.equal(firstActivity.id, secondActivity.id);
+  // Reasoning and tools between two content blocks fold into ONE activity-group
+  // (a single collapsible), reasoning as the first segment — not a separate
+  // top-level row.
+  assert.equal(first.length, 1);
+  assert.equal(first[0]?.kind, "activity-group");
+  assert.equal(firstActivity.segments[0]?.kind, "reasoning");
+  assert.equal(firstActivity.segments[1]?.kind, "tools");
 });
 
 test("skill mentions and selected skill context survive composer prompt construction", () => {
@@ -1843,5 +2145,238 @@ test("skill mentions and selected skill context survive composer prompt construc
   assert.match(
     selectedContextInstructions([], skills),
     /Preserve this selected composer context/,
+  );
+});
+
+// Regression: with the Browser panel open the prompt is prefixed with a
+// <browser_context>…</browser_context> block. When a turn reaches the
+// transcript via Pi's echo (steer/follow-up) or replay, that block must be
+// stripped — otherwise the user bubble renders the raw machine context and the
+// echoed text no longer matches the optimistic bubble (spawning a duplicate
+// bubble + a stale liveAssistantIds redirect).
+test("visibleUserTextFromPi strips a leading browser_context block", () => {
+  const browserBlock = [
+    "<browser_context>",
+    "The in-app Browser is open for this turn.",
+    "Active URL: http://localhost:8765/neon-drift.html.",
+    "</browser_context>",
+  ].join("\n");
+
+  assert.equal(visibleUserTextFromPi(`${browserBlock}\n\ngo on`), "go on");
+  // Also when the prompt is wrapped with Pi's "User prompt:" marker.
+  assert.equal(
+    visibleUserTextFromPi(`some env context\n\nUser prompt:\n${browserBlock}\n\ngo on`),
+    "go on",
+  );
+  // Untouched when there is no browser_context block.
+  assert.equal(visibleUserTextFromPi("just a normal prompt"), "just a normal prompt");
+  // A stray "<browser_context>" mid-text is NOT stripped (anchored to start).
+  assert.equal(
+    visibleUserTextFromPi("explain <browser_context> as a concept"),
+    "explain <browser_context> as a concept",
+  );
+});
+
+// Regression: a tool-heavy turn ends with the model's closing summary arriving
+// as its own tool-free settled `message`. The bubble already holds tool blocks,
+// so the old reconcile rejected the summary wholesale (to avoid clobbering the
+// tools) — the turn rendered a trailing tool call and NO final words. Confirmed
+// against a real session log (cerebras/kimi): the 435-char final message was
+// persisted but never shown. The summary must now be appended, tools intact.
+test("a tool-free final settled message appends its summary instead of being dropped", () => {
+  const ctx: SessionStreamContext = { liveAssistantIds: new Map() };
+  let session: Session = {
+    id: "s-1",
+    runtimeSessionId: "rt-1",
+    piSessionId: "pi-1",
+    title: "t",
+    messages: [
+      { id: "u1", role: "user", text: "build it", timestamp: "" },
+      { id: "a1", role: "assistant", text: "", blocks: [], timestamp: "" },
+    ],
+    status: "running",
+    error: "",
+    input: "",
+    activeAssistantId: "a1",
+  };
+  const ev = (event: Record<string, unknown>) => {
+    session = reduceSessionEvent(session, ctx, "a1", event);
+  };
+
+  // A tool call settles into the bubble, then its result.
+  ev({
+    type: "message",
+    message: {
+      role: "assistant",
+      stopReason: "toolUse",
+      content: [
+        { type: "thinking", thinking: "editing" },
+        { type: "toolCall", id: "tc1", name: "edit_file", arguments: {} },
+      ],
+    },
+  });
+  ev({
+    type: "message",
+    message: { role: "toolResult", toolCallId: "tc1", toolName: "edit_file", content: [{ type: "text", text: "ok" }] },
+  });
+  // The closing summary arrives as its own tool-free settled message.
+  ev({
+    type: "message",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [
+        { type: "thinking", thinking: "wrapping up" },
+        { type: "text", text: "All set — the canvas renders cleanly." },
+      ],
+    },
+  });
+
+  const bubble = session.messages.find((m) => m.id === "a1");
+  const blocks = bubble?.blocks ?? [];
+  assert.ok(
+    blocks.some((b) => b.kind === "tool" && b.id === "tc1"),
+    "tool block preserved",
+  );
+  assert.ok(
+    blocks.some((b) => b.kind === "text" && b.text.includes("canvas renders cleanly")),
+    "final summary text rendered",
+  );
+
+  // Idempotent: re-delivering the same settled message (reconnect/replay) does
+  // not duplicate the summary.
+  const before = bubble?.blocks?.length ?? 0;
+  ev({
+    type: "message",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [
+        { type: "thinking", thinking: "wrapping up" },
+        { type: "text", text: "All set — the canvas renders cleanly." },
+      ],
+    },
+  });
+  assert.equal(session.messages.find((m) => m.id === "a1")?.blocks?.length ?? 0, before);
+});
+
+// Steer UX: the message is dropped into the transcript dimmed (pending) the
+// instant it's sent; when Pi echoes it (the model is now seeing it) the dim
+// clears and the steered reply opens its own bubble — without duplicating the
+// user message.
+test("a steer echo clears the optimistic pending bubble and opens the reply bubble", () => {
+  const ctx: SessionStreamContext = { liveAssistantIds: new Map() };
+  let session: Session = {
+    id: "s-1",
+    runtimeSessionId: "rt-1",
+    piSessionId: "pi-1",
+    title: "t",
+    messages: [
+      { id: "u1", role: "user", text: "do a thing", timestamp: "" },
+      { id: "a1", role: "assistant", text: "", blocks: [], timestamp: "" },
+      { id: "steer1", role: "user", text: "actually, do it differently", pending: true, timestamp: "" },
+    ],
+    status: "running",
+    error: "",
+    input: "",
+    activeAssistantId: "a1",
+  };
+
+  session = reduceSessionEvent(session, ctx, "a1", {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "actually, do it differently" }] },
+  });
+
+  assert.equal(
+    session.messages.find((m) => m.id === "steer1")?.pending,
+    false,
+    "pending dim cleared",
+  );
+  // No duplicate user bubble for the steered text.
+  assert.equal(
+    session.messages.filter((m) => m.role === "user" && m.text === "actually, do it differently")
+      .length,
+    1,
+  );
+  // A fresh assistant bubble opened for the reply and became the live target.
+  const lastAssistant = [...session.messages].reverse().find((m) => m.role === "assistant");
+  assert.ok(lastAssistant && lastAssistant.id !== "a1", "new reply bubble opened");
+  assert.equal(session.activeAssistantId, lastAssistant!.id);
+  assert.equal(ctx.liveAssistantIds.get("s-1"), lastAssistant!.id);
+});
+
+test("agent_end un-dims a steer that was never echoed", () => {
+  const ctx: SessionStreamContext = { liveAssistantIds: new Map() };
+  let session: Session = {
+    id: "s-1",
+    runtimeSessionId: "rt-1",
+    piSessionId: "pi-1",
+    title: "t",
+    messages: [
+      { id: "a1", role: "assistant", text: "", blocks: [], timestamp: "" },
+      { id: "steer1", role: "user", text: "late steer", pending: true, timestamp: "" },
+    ],
+    status: "running",
+    error: "",
+    input: "",
+    activeAssistantId: "a1",
+  };
+
+  session = reduceSessionEvent(session, ctx, "a1", { type: "agent_end" });
+  assert.equal(session.messages.find((m) => m.id === "steer1")?.pending, false);
+});
+
+// Regression for finding [4]: a tool block created live from tool_execution_*
+// events (so it lives only in the bubble's blocks, never in a content snapshot)
+// must survive the model's closing text-only message_update. The snapshot rebuild
+// drops tools absent from the latest content; preservation was previously gated
+// to toolcall_* updates only, so a pure text summary made completed tools vanish.
+test("a text-only live message_update after a tool-heavy turn keeps the tool blocks", () => {
+  const ctx: SessionStreamContext = { liveAssistantIds: new Map() };
+  let session: Session = {
+    id: "s-1",
+    runtimeSessionId: "rt-1",
+    piSessionId: "pi-1",
+    title: "t",
+    messages: [
+      { id: "u1", role: "user", text: "build it", timestamp: "" },
+      { id: "a1", role: "assistant", text: "", blocks: [], timestamp: "" },
+    ],
+    status: "running",
+    error: "",
+    input: "",
+    activeAssistantId: "a1",
+  };
+  const ev = (event: Record<string, unknown>) => {
+    session = reduceSessionEvent(session, ctx, "a1", event);
+  };
+
+  // Tool runs live, created from a tool_execution_start event (never enters streamCalls).
+  ev({ type: "tool_execution_start", toolCallId: "call-bash", toolName: "bash" });
+  const created = session.messages.find((m) => m.id === "a1")?.blocks ?? [];
+  assert.ok(
+    created.some((b) => b.kind === "tool" && b.id === "call-bash"),
+    "tool block created from tool_execution_start",
+  );
+
+  // Closing summary arrives as a pure text message_update — its content snapshot
+  // has NO tool part, so the snapshot rebuild would drop the tool without the fix.
+  ev({
+    type: "message_update",
+    message: {
+      role: "assistant",
+      stopReason: "",
+      content: [{ type: "text", text: "Done — the build succeeded." }],
+    },
+  });
+
+  const blocks = session.messages.find((m) => m.id === "a1")?.blocks ?? [];
+  assert.ok(
+    blocks.some((b) => b.kind === "tool" && b.id === "call-bash"),
+    "tool block must survive a text-only message_update",
+  );
+  assert.ok(
+    blocks.some((b) => b.kind === "text" && b.text.includes("build succeeded")),
+    "closing summary text rendered",
   );
 });

@@ -39,7 +39,7 @@ export type ChatMessageAttachment = {
   path?: string;
   mode: "text" | "data-url" | "metadata";
   content: string;
-  previewKind?: "image" | "video" | "pdf" | "file";
+  previewKind?: "image" | "video" | "audio" | "pdf" | "file";
   previewUrl?: string;
 };
 
@@ -54,6 +54,11 @@ export type ChatMessage = {
   // of the in-flight turn. `blocks` are rebuilt from this each frame. Cleared
   // when the turn ends; not meant for persistence.
   streamCalls?: Array<Array<Record<string, unknown>>>;
+  // A steer message optimistically shown in the transcript before Pi has
+  // injected it into the running turn. Rendered dimmed until the runtime echoes
+  // it back (the model is now seeing it), at which point this clears. Transient
+  // UI state, never persisted.
+  pending?: boolean;
   timestamp?: string;
 };
 
@@ -91,12 +96,7 @@ export type SessionTab = {
   startedAt?: string;
   input: string;
   tokenStats?: TokenStats;
-  contextUsage?: {
-    tokens: number | null;
-    contextWindow: number;
-    percent: number | null;
-    shouldCompact: boolean;
-  } | null;
+  contextUsage?: import("@/features/agent/runtime/runtime-schema").RuntimeContextUsage | null;
   activeAssistantId?: string;
   lastEventSeq?: number;
   plugins?: ComposerPluginRef[];

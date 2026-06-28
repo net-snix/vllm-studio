@@ -11,10 +11,11 @@ const targetFiles = [
   ),
 ];
 
-const helperMarker = "function vllmStudioJoinTextParts";
+const helperMarker = "function localStudioJoinTextParts";
+const legacyHelperMarker = "function vllmStudioJoinTextParts";
 const helper =
   [
-    "function vllmStudioTextPartBoundary(left, right) {",
+    "function localStudioTextPartBoundary(left, right) {",
     '    if (!left || !right || /\\s$/.test(left) || /^\\s/.test(right))',
     '        return "";',
     '    if (/^[-*+]$/.test(right) && /[.:;!?]["\')\\]]?$/.test(left))',
@@ -27,21 +28,21 @@ const helper =
     '        return "\\n";',
     '    return "";',
     "}",
-    "function vllmStudioLineEndsWithBareListMarker(text) {",
+    "function localStudioLineEndsWithBareListMarker(text) {",
     "    return /(?:^|\\n)[ \\t]*[-*+]$/.test(text);",
     "}",
-    "function vllmStudioJoinTextPart(left, right) {",
-    "    const boundary = vllmStudioTextPartBoundary(left, right);",
+    "function localStudioJoinTextPart(left, right) {",
+    "    const boundary = localStudioTextPartBoundary(left, right);",
     '    const nextRight = boundary.includes("\\n") && /^[-*+](?=\\S)/.test(right)',
     '        ? `${right.slice(0, 1)} ${right.slice(1)}`',
     "        : right;",
-    '    const prefix = vllmStudioLineEndsWithBareListMarker(left) && /^\\S/.test(nextRight) ? " " : "";',
+    '    const prefix = localStudioLineEndsWithBareListMarker(left) && /^\\S/.test(nextRight) ? " " : "";',
     "    return left + boundary + prefix + nextRight;",
     "}",
-    "function vllmStudioJoinTextParts(parts) {",
+    "function localStudioJoinTextParts(parts) {",
     "    return parts",
     "        .map((part) => part.text)",
-    '        .reduce((text, partText) => vllmStudioJoinTextPart(text, partText), "");',
+    '        .reduce((text, partText) => localStudioJoinTextPart(text, partText), "");',
     "}",
   ].join("\n") + "\n";
 
@@ -49,10 +50,12 @@ const injectionPoint = `function isTextContentBlock(block) {
     return block.type === "text";
 }
 `;
-const helperStartMarker = "function vllmStudioTextPartBoundary";
+const helperStartMarker = "function localStudioTextPartBoundary";
+const legacyHelperStartMarker = "function vllmStudioTextPartBoundary";
 const helperEndMarker = "function isThinkingContentBlock";
 const originalJoin = `const assistantText = assistantTextParts.map((part) => part.text).join("");`;
-const patchedJoin = `const assistantText = vllmStudioJoinTextParts(assistantTextParts);`;
+const patchedJoin = `const assistantText = localStudioJoinTextParts(assistantTextParts);`;
+const legacyPatchedJoin = `const assistantText = vllmStudioJoinTextParts(assistantTextParts);`;
 
 let found = 0;
 let patched = 0;
@@ -61,13 +64,15 @@ for (const file of targetFiles) {
   found += 1;
   let source = readFileSync(file, "utf8");
   let next = source;
-  if (!next.includes(helperMarker)) {
+  if (!next.includes(helperMarker) && !next.includes(legacyHelperMarker)) {
     if (!next.includes(injectionPoint)) {
       throw new Error(`Could not find pi-ai text block helper injection point in ${file}`);
     }
     next = next.replace(injectionPoint, `${injectionPoint}${helper}`);
   } else {
-    const helperStart = next.indexOf(helperStartMarker);
+    const helperStart = next.includes(helperStartMarker)
+      ? next.indexOf(helperStartMarker)
+      : next.indexOf(legacyHelperStartMarker);
     const helperEnd = next.indexOf(helperEndMarker, helperStart);
     if (helperStart === -1 || helperEnd === -1) {
       throw new Error(`Could not find existing pi-ai text boundary helper block in ${file}`);
@@ -76,6 +81,8 @@ for (const file of targetFiles) {
   }
   if (next.includes(originalJoin)) {
     next = next.replace(originalJoin, patchedJoin);
+  } else if (next.includes(legacyPatchedJoin)) {
+    next = next.replace(legacyPatchedJoin, patchedJoin);
   } else if (!next.includes(patchedJoin)) {
     throw new Error(`Could not find pi-ai assistant text join in ${file}`);
   }

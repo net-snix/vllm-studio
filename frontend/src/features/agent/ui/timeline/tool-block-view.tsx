@@ -7,9 +7,11 @@ import {
   compactToolText,
   detectLang,
   extractFromArgs,
+  extractPartialField,
   fileBasename,
   humanizeToolName,
   toolArg,
+  toolKindNodeColor,
   toolVerb,
 } from "@/features/agent/ui/timeline/tool-metadata";
 
@@ -78,7 +80,7 @@ function browserToolLabel(block: ToolBlock): string {
   const normalized = block.name
     .toLowerCase()
     .replace(/^browser_/, "")
-    .replace(/^parchi_/, "");
+    .replace(/^sitegeist_/, "");
   if (normalized.includes("navigate")) return running ? "Navigating" : "Navigated";
   if (normalized.includes("get_text")) return running ? "Reading page" : "Read page";
   if (normalized.includes("get_html")) return running ? "Reading page" : "Read page";
@@ -109,14 +111,23 @@ function ToolSummary({
   children?: ReactNode;
   open?: boolean;
 }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const expanded = userOpen ?? open;
   const meta = toolMeta(block, filePath);
   const running = block.status === "running";
+  const idleColor = toolKindNodeColor(classifyTool(block));
   return (
-    <details className="group min-w-0" open={open}>
-      <summary className="flex min-h-6 min-w-0 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden">
+    <details className="group min-w-0" open={expanded}>
+      <summary
+        className="flex min-h-6 min-w-0 cursor-pointer list-none items-center gap-2 rounded-md px-1.5 py-0.5 transition-colors hover:bg-(--hover) [&::-webkit-details-marker]:hidden"
+        onClick={(event) => {
+          event.preventDefault();
+          setUserOpen(!expanded);
+        }}
+      >
         <span
           className={`shrink-0 text-[13px] font-medium leading-5 ${
-            running ? "codex-shimmer-text" : "text-(--fg)/55"
+            running ? "codex-shimmer-text" : idleColor
           }`}
         >
           {meta.verb}
@@ -132,7 +143,7 @@ function ToolSummary({
           <span className="shrink-0 text-[length:var(--fs-sm)] text-(--err)">failed</span>
         ) : null}
       </summary>
-      {children ? <div className="mb-1.5 ml-1.5 mt-1 min-w-0">{children}</div> : null}
+      {expanded && children ? <div className="mb-1.5 ml-1.5 mt-1 min-w-0">{children}</div> : null}
     </details>
   );
 }
@@ -212,20 +223,79 @@ type FileWritePreviewData = {
   patchContent: string | null;
 };
 
+type EditEntry = {
+  oldText?: unknown;
+  newText?: unknown;
+};
+
+function editsToDiff(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const hunks = value.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const edit = entry as EditEntry;
+    const oldText = typeof edit.oldText === "string" ? edit.oldText : "";
+    const newText = typeof edit.newText === "string" ? edit.newText : "";
+    if (!oldText && !newText) return [];
+    const removed = oldText.split("\n").map((line) => `-${line}`);
+    const added = newText.split("\n").map((line) => `+${line}`);
+    return [`@@ edit ${index + 1} @@`, ...removed, ...added].join("\n");
+  });
+  return hunks.length ? hunks.join("\n") : null;
+}
+
+// Stream a diff preview out of partially-streamed args JSON. Some edit tools
+// (str_replace_editor, apply_patch) emit `"old_str": "...`, `"new_str": "..."`
+// fields before the surrounding object closes — find every such pair and
+// render an incremental diff so the user sees the edit as it streams.
+function partialEditsDiffFromArgsText(argsText: string | undefined): string | null {
+  if (!argsText) return null;
+  const oldKey = extractPartialField(argsText, ["old_str", "old_text", "oldText"]);
+  const newKey = extractPartialField(argsText, ["new_str", "new_text", "newText", "replacement"]);
+  if (oldKey === null && newKey === null) return null;
+  const oldText = oldKey ?? "";
+  const newText = newKey ?? "";
+  if (!oldText && !newText) return null;
+  const removed = oldText.split("\n").map((line: string) => `-${line}`);
+  const added = newText.split("\n").map((line: string) => `+${line}`);
+  return ["@@ edit @@", ...removed, ...added].join("\n");
+}
+
+function patchPreviewFromArgs(block: ToolBlock): string | null {
+  const direct = extractFromArgs(block.args, block.argsText, ["patch", "diff"]);
+  if (direct) return direct;
+  const editsDiff = editsToDiff(block.args?.edits);
+  if (editsDiff) return editsDiff;
+  return (
+    partialEditsDiffFromArgsText(block.argsText) ??
+    (block.argsText ? extractFromArgs(undefined, block.argsText, ["edits"]) : null)
+  );
+}
+
 function fileWritePreviewData(block: ToolBlock): FileWritePreviewData | null {
   const filePath = extractFromArgs(block.args, block.argsText, [
     "path",
     "file_path",
     "filePath",
     "file",
+    "target_file",
   ]);
-  const fileContent = extractFromArgs(block.args, block.argsText, [
-    "content",
-    "text",
-    "newText",
-    "new_content",
-  ]);
-  const patchContent = extractFromArgs(block.args, block.argsText, ["patch", "diff", "edits"]);
+  const patchContent = patchPreviewFromArgs(block);
+  const fileContent = patchContent
+    ? null
+    : extractFromArgs(block.args, block.argsText, [
+        "content",
+        "contents",
+        "text",
+        "body",
+        "source",
+        "payload",
+        "newText",
+        "new_text",
+        "new_content",
+        "new_str",
+        "replacement",
+        "insert",
+      ]);
 
   if (fileContent === null && patchContent === null) return null;
   return { filePath, fileContent, patchContent };
@@ -244,8 +314,10 @@ function FileWritePreview({
 }) {
   const lang = detectLang(filePath);
   const isHtml = lang === "html";
-  const [showPreview, setShowPreview] = useState(false);
   const body = fileContent ?? patchContent ?? "";
+  const isSvg = /\.svg$/i.test(filePath ?? "") || /^\s*<svg[\s>]/i.test(body);
+  const canPreview = isHtml || isSvg;
+  const [showPreview, setShowPreview] = useState(isSvg);
   const sourceLang = fileContent === null && patchContent !== null ? "diff" : lang;
 
   return (
@@ -255,7 +327,7 @@ function FileWritePreview({
           <span className="truncate font-mono">
             {fileBasename(filePath) ?? sourceLang ?? "source"}
           </span>
-          {isHtml ? (
+          {canPreview ? (
             <button
               type="button"
               onClick={() => setShowPreview((value) => !value)}
@@ -265,7 +337,15 @@ function FileWritePreview({
             </button>
           ) : null}
         </div>
-        {isHtml && showPreview ? (
+        {isSvg && showPreview ? (
+          <div className="flex max-h-80 min-h-40 items-center justify-center overflow-auto bg-white p-4">
+            <img
+              src={`data:image/svg+xml;utf8,${encodeURIComponent(body)}`}
+              alt={fileBasename(filePath) ?? "svg preview"}
+              className="max-h-72 max-w-full object-contain"
+            />
+          </div>
+        ) : isHtml && showPreview ? (
           <iframe
             sandbox="allow-scripts"
             referrerPolicy="no-referrer"

@@ -11,11 +11,11 @@ import React, {
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink } from "@/ui/icon-registry";
 import { highlightFenced } from "@/features/agent/highlight-cache";
 import { normalizeBrowserInput } from "@/features/agent/tools/browser-url";
 import { useTools } from "@/features/agent/tools/context";
-import { CopyablePathChip } from "@/features/agent/ui/copyable-path-chip";
+import { CopyablePathChip } from "@/ui/copyable-path-chip";
 
 const FILE_REF_PATTERN =
   /^(?:file:\/\/|~\/|\.{1,2}\/|\/|[\w.-]+\/)[^\s`'")]+(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)(?::\d+(?::\d+)?)?$/;
@@ -207,10 +207,21 @@ const components: Components = {
 // `ReactMarkdown` reconciler sees the same array identity each commit.
 const REMARK_PLUGINS = [remarkGfm];
 
+// Repair a single emphasis run whose closing delimiter has a stray leading
+// space (`**text **`), which CommonMark won't parse as bold. Two guards keep us
+// from collapsing the space *between* two adjacent runs:
+//   1. the content must START with a non-space, non-delimiter char, so we anchor
+//      on a real opener rather than a previous run's closing `**` — blocks
+//      `**a** and **b**` (gap starts with a space);
+//   2. the trailing `**` must NOT be immediately followed by a word or `*` char,
+//      otherwise it's the OPENER of the next run, not a closer — blocks
+//      `**a**, **b**` (gap starts with punctuation).
+// Only spaces/tabs are stripped (not newlines), since the symptom is a lost
+// inline space.
 function normalizeLooseMarkdownEmphasis(text: string): string {
   return text
-    .replace(/\*\*([^\n*]*?\S)\s+\*\*/g, "**$1**")
-    .replace(/__([^\n_]*?\S)\s+__/g, "__$1__");
+    .replace(/\*\*([^\s*][^\n*]*?)[ \t]+\*\*(?![*\w])/g, "**$1**")
+    .replace(/__([^\s_][^\n_]*?)[ \t]+__(?![_\w])/g, "__$1__");
 }
 
 type ToolHandlers = {

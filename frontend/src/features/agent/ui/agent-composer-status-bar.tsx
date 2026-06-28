@@ -1,22 +1,14 @@
 "use client";
 
-import type { ReactNode } from "react";
 import { formatTokenCount } from "@/features/agent/messages";
+import type { GitSummary } from "@/features/agent/projects/types";
 import { GitBranchIcon } from "@/ui/icons";
-
-type GitSummary = {
-  isRepo: boolean;
-  additions: number;
-  deletions: number;
-  statusCount: number;
-};
 
 export function AgentComposerStatusBar({
   cwd,
   gitBranch,
   gitSummary,
   onInitGit,
-  modelSelector,
   currentContextTokens,
   contextWindow,
   onOpenStatus,
@@ -25,7 +17,6 @@ export function AgentComposerStatusBar({
   gitBranch?: string | null;
   gitSummary?: GitSummary | null;
   onInitGit?: () => void;
-  modelSelector?: ReactNode;
   currentContextTokens: number;
   contextWindow: number;
   onOpenStatus: () => void;
@@ -45,7 +36,6 @@ export function AgentComposerStatusBar({
         <GitBranchState gitBranch={gitBranch} gitSummary={gitSummary} onInitGit={onInitGit} />
         <GitSummaryState gitSummary={gitSummary} />
       </div>
-      {modelSelector}
       <ContextReadout
         current={currentContextTokens}
         contextWindow={contextWindow}
@@ -95,8 +85,8 @@ function GitSummaryState({ gitSummary }: { gitSummary?: GitSummary | null }) {
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1">
-      <span className="text-emerald-400">+{gitSummary.additions}</span>
-      <span className="text-red-400">-{gitSummary.deletions}</span>
+      <span className="text-(--ok)">+{gitSummary.additions}</span>
+      <span className="text-(--err)">-{gitSummary.deletions}</span>
       {gitSummary.statusCount > 0 ? (
         <span className="text-(--dim)">· {gitSummary.statusCount} files</span>
       ) : null}

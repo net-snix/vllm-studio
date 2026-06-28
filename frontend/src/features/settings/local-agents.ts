@@ -1,5 +1,5 @@
 /**
- * Server-only support for attaching a vLLM Studio model to locally installed
+ * Server-only support for attaching a Local Studio model to locally installed
  * coding-agent CLIs (pi, opencode, droid, hermes). Detection inspects well-known
  * config directories under a given home dir; attachment merges a provider /
  * model entry into each agent's own config file, preserving everything else
@@ -53,7 +53,7 @@ export interface AttachResult {
 
 type JsonRecord = Record<string, unknown>;
 
-const DEFAULT_PROVIDER_KEY = "vllm-studio";
+const DEFAULT_PROVIDER_KEY = "local-studio";
 
 const isRecord = (value: unknown): value is JsonRecord =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -270,7 +270,7 @@ function mergeOpencodeConfig(config: JsonRecord, model: LocalAgentModel): Attach
   const key = providerKeyFor((candidate) => candidate in providers);
   providers[key] = {
     npm: "@ai-sdk/openai-compatible",
-    name: "vLLM Studio",
+    name: "Local Studio",
     options: { baseURL: model.baseUrl, apiKey: model.apiKey },
     models: { [model.modelId]: modelEntry },
   };
@@ -375,7 +375,7 @@ function backupTimestamp(now: Date): string {
 }
 
 async function backupExistingFile(file: string): Promise<string> {
-  const base = `${file}.bak-vllm-studio-${backupTimestamp(new Date())}`;
+  const base = `${file}.bak-local-studio-${backupTimestamp(new Date())}`;
   let backupPath = base;
   let suffix = 2;
   while (await pathExists(backupPath)) {

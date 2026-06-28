@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "@/ui/icon-registry";
 import { Alert, AppPage, Button, Card } from "@/ui";
 import type { ManagedRuntimeInstallBackend } from "@/features/settings/runtime-targets";
 import type {
@@ -121,7 +121,7 @@ export function SetupView({
         <div className="flex items-center justify-between mb-6">
           <div>
             <div className="text-sm text-(--dim) uppercase tracking-wider">Setup Wizard</div>
-            <h1 className="text-2xl font-semibold">vLLM Studio Desktop</h1>
+            <h1 className="text-2xl font-semibold">Local Studio Desktop</h1>
           </div>
           <Button variant="secondary" size="sm" onClick={skipSetup}>
             Skip for now

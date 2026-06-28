@@ -1,41 +1,22 @@
 import { spawnSync } from "node:child_process";
 import type { Recipe } from "../../models/types";
 import type { Backend } from "../../shared/recipe-types";
+import {
+  extractFlag as extractFlagUtility,
+  hasCliServeInvocation,
+  hasModuleInvocation,
+} from "../argument-utilities";
+
+export { extractFlagUtility as extractFlag };
+
+const executableName = (value: string | undefined): string => {
+  if (!value) return "";
+  return value.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+};
 
 const splitCommand = (command: string): string[] => {
   const matches = command.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
   return matches.map((token) => token.replace(/^"|"$/g, ""));
-};
-
-export const extractFlag = (args: string[], flag: string): string | undefined => {
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === flag && index + 1 < args.length) {
-      return args[index + 1];
-    }
-  }
-  return undefined;
-};
-
-const executableName = (value: string | undefined): string => {
-  if (!value) return "";
-  return value.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? value.toLowerCase();
-};
-
-const hasModuleInvocation = (args: string[], moduleName: string): boolean => {
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "-m" && args[index + 1] === moduleName) {
-      return true;
-    }
-    if (args[index] === moduleName) {
-      return true;
-    }
-  }
-  return false;
-};
-
-const hasVllmServeInvocation = (args: string[]): boolean => {
-  const executableIndex = args.findIndex((argument) => executableName(argument) === "vllm");
-  return executableIndex >= 0 && args[executableIndex + 1] === "serve";
 };
 
 export const detectBackend = (args: string[]): Backend | null => {
@@ -53,7 +34,7 @@ export const detectBackend = (args: string[]): Backend | null => {
   if (hasModuleInvocation(args, "vllm.entrypoints.openai.api_server")) {
     return "vllm";
   }
-  if (hasVllmServeInvocation(args)) {
+  if (hasCliServeInvocation(args, "vllm")) {
     return "vllm";
   }
   if (hasModuleInvocation(args, "sglang.launch_server")) {
@@ -158,7 +139,7 @@ export const buildEnvironment = (recipe: Recipe): Record<string, string> => {
   const rocrVisibleDevices =
     readExtraArgument("rocr_visible_devices") ?? readExtraArgument("ROCR_VISIBLE_DEVICES");
 
-  const forcedTool = (process.env["VLLM_STUDIO_GPU_SMI_TOOL"] ?? "").trim().toLowerCase();
+  const forcedTool = (process.env["LOCAL_STUDIO_GPU_SMI_TOOL"] ?? "").trim().toLowerCase();
   const platform =
     forcedTool === "nvidia-smi"
       ? "cuda"

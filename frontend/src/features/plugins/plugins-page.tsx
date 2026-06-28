@@ -1,49 +1,22 @@
 "use client";
 
+import { effectInterval } from "@/lib/effect-timers";
+
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { Globe, Plug, ShieldCheck, type LucideIcon } from "lucide-react";
-import { SettingsLayout, SettingsNotice, type SettingsSectionDef } from "@/ui/settings";
-import { CuratedQuickAddPanel } from "./plugins-curated-quick-add";
+import { AppPage, PageHeader, RefreshIconButton, SettingsNotice } from "@/ui";
+import { ConnectionsPanel } from "./plugins-connections";
+import { CuratedMcpSearchPanel } from "./plugins-curated-mcp-search";
 import { InstalledMcpServersPanel } from "./plugins-installed-servers";
 import { ManualMcpServerPanel } from "./plugins-manual-server";
-import { ConfigureEntryPanel } from "./plugins-page-parts";
-import { RegistrySearchPanel } from "./plugins-registry-search";
-import { RegistrySourcesPanel } from "./plugins-registry-sources";
+import { ConfigureEntryPanel, McpJsonConfigPanel } from "./plugins-page-parts";
+import { type CatalogueEntry, type McpServer, type ServersPayload } from "./plugins-types";
 import {
-  type CatalogueEntry,
-  type McpServer,
-  type RegistryPayload,
-  type RegistrySource,
-  type ServersPayload,
-} from "./plugins-types";
-import { parseArgsText, parseEnvLines, parseTagsText, quoteArgsText } from "./plugins-utils";
-
-type PluginsSectionId = "custom" | "registry" | "curated";
-
-const sectionIcon = (Icon: LucideIcon) => <Icon className="h-3.5 w-3.5" />;
-const SECTIONS: SettingsSectionDef<PluginsSectionId>[] = [
-  {
-    id: "custom",
-    label: "Custom",
-    description: "Installed MCP servers, manual servers, and registry sources.",
-    icon: sectionIcon(Plug),
-  },
-  {
-    id: "registry",
-    label: "Registry",
-    description: "Search official and enabled compatible MCP registries.",
-    icon: sectionIcon(Globe),
-  },
-  {
-    id: "curated",
-    label: "Curated",
-    description: "High-confidence stdio MCP quick-add entries.",
-    icon: sectionIcon(ShieldCheck),
-  },
-];
-
-const isSectionId = (value: string): value is PluginsSectionId =>
-  SECTIONS.some((section) => section.id === value);
+  oauthProviderIdForEntry,
+  parseArgsText,
+  parseEnvLines,
+  parseTagsText,
+  quoteArgsText,
+} from "./plugins-utils";
 
 export function PluginsPage() {
   return <PluginsManager mode="page" />;
@@ -54,21 +27,14 @@ export function PluginsSettingsSection() {
 }
 
 function PluginsManager({ mode }: { mode: "page" | "settings" }) {
-  const [activeSection, setActiveSection] = useState<PluginsSectionId>(() => {
-    if (typeof window === "undefined") return "custom";
-    const hash = window.location.hash.replace("#", "");
-    return isSectionId(hash) ? hash : "custom";
-  });
   const [servers, setServers] = useState<McpServer[]>([]);
   const [catalogue, setCatalogue] = useState<CatalogueEntry[]>([]);
-  const [registry, setRegistry] = useState<CatalogueEntry[]>([]);
-  const [registrySources, setRegistrySources] = useState<RegistrySource[]>([]);
   const [search, setSearch] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [registryLoading, setRegistryLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
+  const [configText, setConfigText] = useState("");
   const [configureEntry, setConfigureEntry] = useState<CatalogueEntry | null>(null);
   const [configureCommand, setConfigureCommand] = useState("");
   const [configureArgs, setConfigureArgs] = useState("");
@@ -80,13 +46,11 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
   const [manualArgs, setManualArgs] = useState("");
   const [manualEnv, setManualEnv] = useState("");
   const [manualTags, setManualTags] = useState("custom");
-  const [registryOpen, setRegistryOpen] = useState(false);
-  const [registryName, setRegistryName] = useState("");
-  const [registryUrl, setRegistryUrl] = useState("");
 
   const applyServersPayload = useCallback((payload: ServersPayload) => {
-    setServers(payload.servers ?? payload.plugins ?? []);
+    setServers(payload.servers ?? []);
     setCatalogue(payload.catalogue ?? []);
+    if (typeof payload.configText === "string") setConfigText(payload.configText);
     if (payload.error) setError(payload.error);
   }, []);
 
@@ -105,25 +69,6 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
     }
   }, [applyServersPayload]);
 
-  const loadRegistry = useCallback(async () => {
-    setRegistryLoading(true);
-    try {
-      const response = await fetch(`/api/mcp/registry?q=${encodeURIComponent(search)}&limit=28`, {
-        cache: "no-store",
-      });
-      const payload = (await response.json()) as RegistryPayload;
-      if (!response.ok) throw new Error(payload.error || "Failed to search MCP registry.");
-      setRegistry(payload.entries ?? []);
-      setRegistrySources(payload.registries ?? []);
-      setError(payload.warnings?.length ? payload.warnings.join("; ") : null);
-    } catch (loadError) {
-      setRegistry([]);
-      setError(loadError instanceof Error ? loadError.message : "Failed to search MCP registry.");
-    } finally {
-      setRegistryLoading(false);
-    }
-  }, [search]);
-
   const subscribeServers = useCallback(
     (_notify: () => void) => {
       void loadServers();
@@ -132,27 +77,7 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
     [loadServers],
   );
 
-  const subscribeRegistry = useCallback(
-    (_notify: () => void) => {
-      const timeout = setTimeout(() => void loadRegistry(), 250);
-      return () => clearTimeout(timeout);
-    },
-    [loadRegistry],
-  );
-
-  const subscribeHashSection = useCallback((_notify: () => void) => {
-    if (typeof window === "undefined") return () => {};
-    const onHashChange = () => {
-      const hash = window.location.hash.replace("#", "");
-      if (isSectionId(hash)) setActiveSection(hash);
-    };
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
-
   useSyncExternalStore(subscribeServers, getPluginsSnapshot, getPluginsSnapshot);
-  useSyncExternalStore(subscribeRegistry, getPluginsSnapshot, getPluginsSnapshot);
-  useSyncExternalStore(subscribeHashSection, getPluginsSnapshot, getPluginsSnapshot);
 
   const post = useCallback(
     async (body: unknown, busyKey: string) => {
@@ -176,55 +101,48 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
     [applyServersPayload],
   );
 
-  const postRegistry = useCallback(
-    async (body: unknown, busyKey: string) => {
-      setBusyId(busyKey);
-      setError(null);
-      try {
-        const response = await fetch("/api/mcp/registry", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const payload = (await response.json()) as RegistryPayload;
-        if (!response.ok || payload.error) {
-          throw new Error(payload.error || "Registry update failed.");
-        }
-        setRegistrySources(payload.registries ?? []);
-        await loadRegistry();
-        return true;
-      } catch (postError) {
-        setError(postError instanceof Error ? postError.message : "Registry update failed.");
-        return false;
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [loadRegistry],
-  );
-
   const enabledCount = servers.filter((server) => server.enabled).length;
   const installedNames = useMemo(
     () => new Set(servers.map((server) => server.name.toLowerCase())),
     [servers],
   );
-  const curated = catalogue.filter((entry) => entry.registry === "curated");
+  const browseEntries = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return catalogue.filter((entry) => matchesEntrySearch(entry, query));
+  }, [catalogue, search]);
 
   const beginConfigureEntry = (entry: CatalogueEntry) => {
+    const providerId = oauthProviderIdForEntry(entry);
+    if (providerId) {
+      setBusyId(entry.id);
+      setError(null);
+      window.open(
+        `/api/oauth/${providerId}/start?catalogueId=${encodeURIComponent(entry.id)}`,
+        "_blank",
+        "noopener,noreferrer",
+      );
+      let elapsed = 0;
+      const poll = effectInterval(() => {
+        elapsed += 1;
+        void loadServers().then(() => {
+          if (elapsed >= 40) {
+            poll.cancel();
+            setBusyId(null);
+          }
+        });
+      }, 1500);
+      return;
+    }
     setConfigureEntry(entry);
     setConfigureCommand(entry.command || "");
     setConfigureArgs(quoteArgsText(entry.args ?? []));
-    setConfigureTags((entry.tags ?? [defaultRegistryTag(entry)]).join(", "));
+    setConfigureTags((entry.tags ?? [defaultCuratedTag(entry)]).join(", "));
     setConfigureEnv({ ...(entry.env ?? {}) });
   };
 
   const submitConfiguredEntry = () => {
     if (!configureEntry) return;
-    if (
-      configureEntry.registry === "curated" &&
-      configureEntry.command &&
-      configureCommand === configureEntry.command
-    ) {
+    if (configureEntry.command && configureCommand === configureEntry.command) {
       void post(
         {
           action: "add_from_catalogue",
@@ -249,18 +167,6 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
       },
       configureEntry.id,
     ).then(() => setConfigureEntry(null));
-  };
-
-  const submitRegistry = () => {
-    void postRegistry(
-      { action: "add_registry", name: registryName.trim(), url: registryUrl.trim() },
-      "registry:add",
-    ).then((ok) => {
-      if (!ok) return;
-      setRegistryOpen(false);
-      setRegistryName("");
-      setRegistryUrl("");
-    });
   };
 
   const submitManual = () => {
@@ -294,25 +200,20 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
 
   const refreshAll = useCallback(() => {
     void loadServers();
-    void loadRegistry();
-  }, [loadRegistry, loadServers]);
+  }, [loadServers]);
 
-  const selectSection = (section: PluginsSectionId) => {
-    setActiveSection(section);
-    if (typeof window !== "undefined") window.history.replaceState(null, "", `#${section}`);
-  };
+  const saveMcpConfig = useCallback(() => {
+    void post({ action: "save_config", configText }, "mcp-config");
+  }, [configText, post]);
 
-  const layoutStatus = loading
-    ? "syncing servers"
-    : registryLoading
-      ? "searching registry"
-      : `${enabledCount} enabled`;
+  const layoutStatus = loading ? "syncing servers" : `${enabledCount} enabled`;
 
   const errorNotice = error ? (
     <SettingsNotice tone="danger" className="mb-4">
       {error}
     </SettingsNotice>
   ) : null;
+  const connectionsPanel = <ConnectionsPanel />;
   const customPanel = (
     <div className="space-y-5">
       <InstalledMcpServersPanel
@@ -346,51 +247,22 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
         onCancel={() => setManualOpen(false)}
         onSubmit={submitManual}
       />
-      <RegistrySourcesPanel
-        sources={registrySources}
-        loading={registryLoading}
-        open={registryOpen}
-        name={registryName}
-        url={registryUrl}
-        busyId={busyId}
-        onToggleOpen={() => setRegistryOpen((open) => !open)}
-        onNameChange={setRegistryName}
-        onUrlChange={setRegistryUrl}
-        onCancel={() => setRegistryOpen(false)}
-        onSubmit={submitRegistry}
-        onToggleSource={(source) =>
-          void postRegistry(
-            {
-              action: "set_registry_enabled",
-              id: source.id,
-              enabled: !source.enabled,
-            },
-            `${source.id}:enabled`,
-          )
-        }
-        onRemoveSource={(source) =>
-          void postRegistry({ action: "remove_registry", id: source.id }, `${source.id}:remove`)
-        }
+      <McpJsonConfigPanel
+        configText={configText}
+        busy={busyId === "mcp-config"}
+        onChange={setConfigText}
+        onSave={saveMcpConfig}
       />
     </div>
   );
-  const registryPanel = (
-    <RegistrySearchPanel
-      entries={registry}
-      loading={registryLoading}
+  const curatedPanel = (
+    <CuratedMcpSearchPanel
+      entries={browseEntries}
+      loading={loading}
       search={search}
       installedNames={installedNames}
       busyId={busyId}
       onSearchChange={setSearch}
-      onConfigure={beginConfigureEntry}
-    />
-  );
-  const curatedPanel = (
-    <CuratedQuickAddPanel
-      entries={curated}
-      installedNames={installedNames}
-      busyId={busyId}
-      loading={loading}
       onConfigure={beginConfigureEntry}
     />
   );
@@ -416,9 +288,9 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
       <>
         {errorNotice}
         <div className="space-y-5">
-          {customPanel}
-          {registryPanel}
+          {connectionsPanel}
           {curatedPanel}
+          {customPanel}
         </div>
         {configurePanel}
       </>
@@ -426,32 +298,45 @@ function PluginsManager({ mode }: { mode: "page" | "settings" }) {
   }
 
   return (
-    <>
-      <SettingsLayout
-        sections={SECTIONS}
-        activeSection={activeSection}
-        title="Plugins"
-        status={layoutStatus}
-        loading={loading || registryLoading}
-        onReload={refreshAll}
-        onSelectSection={selectSection}
-        eyebrow="Tooling"
-      >
+    <AppPage>
+      <div className="mx-auto max-w-5xl px-5 py-6">
+        <PageHeader
+          eyebrow="Tooling"
+          title="Plugins"
+          status={layoutStatus}
+          actions={
+            <RefreshIconButton onClick={refreshAll} loading={loading} label="Refresh plugins" />
+          }
+        />
         {errorNotice}
-        {activeSection === "custom" ? customPanel : null}
-        {activeSection === "registry" ? registryPanel : null}
-        {activeSection === "curated" ? curatedPanel : null}
-      </SettingsLayout>
+        <div className="space-y-5">
+          {connectionsPanel}
+          {curatedPanel}
+          {customPanel}
+        </div>
+      </div>
 
       {configurePanel}
-    </>
+    </AppPage>
   );
 }
 
-function defaultRegistryTag(entry: CatalogueEntry): string {
-  if (entry.registry === "official") return "official-registry";
-  if (entry.registry === "custom") return "custom-registry";
-  return "curated";
+function defaultCuratedTag(entry: CatalogueEntry): string {
+  return entry.tags?.[0] ?? "curated";
+}
+
+function matchesEntrySearch(entry: CatalogueEntry, query: string): boolean {
+  if (!query) return true;
+  return [
+    entry.name,
+    entry.displayName,
+    entry.description,
+    entry.shortDescription,
+    entry.category,
+    ...(entry.tags ?? []),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value.toLowerCase().includes(query));
 }
 
 const getPluginsSnapshot = (): number => 0;
