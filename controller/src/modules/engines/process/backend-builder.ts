@@ -94,6 +94,10 @@ export const appendExtraArguments = (
     "docker_container",
     "docker_image",
     "docker-container",
+    "docker_vllm_bin",
+    "docker-vllm-bin",
+    "docker_entrypoint",
+    "docker-entrypoint",
   ]);
   const jsonStringKeys = new Set(["speculative_config", "default_chat_template_kwargs"]);
   for (const [key, value] of Object.entries(extraArguments)) {
@@ -289,6 +293,34 @@ export const getDockerImage = (recipe: Recipe): string | null => {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 };
 
+/**
+ * In-container path to the vLLM CLI. Defaults to `CONTAINER_VLLM_BIN`
+ * (`/opt/venv/bin/vllm`) used by forked images; official images
+ * (e.g. `vllm/vllm-openai`) install it at `/usr/local/bin/vllm`, so a recipe
+ * may override the path via `extra_args.docker_vllm_bin`.
+ */
+export const getDockerVllmBin = (recipe: Recipe): string => {
+  const value =
+    getExtraArgument(recipe.extra_args, "docker_vllm_bin") ??
+    getExtraArgument(recipe.extra_args, "docker-vllm-bin");
+  return typeof value === "string" && value.trim() ? value.trim() : CONTAINER_VLLM_BIN;
+};
+
+/**
+ * Optional Docker `--entrypoint` override. When set (incl. empty string), the
+ * image's baked ENTRYPOINT is replaced. Official `vllm/vllm-openai` images bake
+ * `["vllm","serve"]`; without this override the launch would duplicate the
+ * serve invocation (`vllm serve <bin> serve <model>`). When set, the launch
+ * command omits the binary and passes `serve <model> ...` so the entrypoint
+ * supplies the executable.
+ */
+export const getDockerEntrypoint = (recipe: Recipe): string | undefined => {
+  const value =
+    getExtraArgument(recipe.extra_args, "docker_entrypoint") ??
+    getExtraArgument(recipe.extra_args, "docker-entrypoint");
+  return typeof value === "string" ? value : undefined;
+};
+
 const sanitizeDockerName = (value: string): string => {
   const cleaned = value.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^[^a-zA-Z0-9]+/, "");
   return cleaned.length > 0 ? cleaned : "recipe";
@@ -347,6 +379,10 @@ export const wrapVllmInDocker = (recipe: Recipe, image: string, inner: string[])
     "--ulimit",
     "stack=67108864",
   ];
+  const entrypoint = getDockerEntrypoint(recipe);
+  if (entrypoint !== undefined) {
+    flags.push("--entrypoint", entrypoint);
+  }
   flags.push(...buildDockerEnvFlags(recipe));
   flags.push(
     "-e",
@@ -371,7 +407,10 @@ export const buildVllmCommand = (recipe: Recipe): string[] => {
   let command: string[];
   let usesServe = false;
   if (dockerImage) {
-    command = [CONTAINER_VLLM_BIN, "serve"];
+    command =
+      getDockerEntrypoint(recipe) !== undefined
+        ? ["serve"]
+        : [getDockerVllmBin(recipe), "serve"];
     usesServe = true;
   } else if (pythonPath) {
     const vllmBin = join(dirname(pythonPath), "vllm");
