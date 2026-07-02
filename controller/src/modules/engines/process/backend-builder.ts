@@ -321,6 +321,28 @@ export const getDockerEntrypoint = (recipe: Recipe): string | undefined => {
   return typeof value === "string" ? value : undefined;
 };
 
+/**
+ * Absolute host path of the speculative-decoding draft model, if the recipe's
+ * `extra_args.speculative_config` names one. Docker launches mount only the
+ * target model path, so the drafter needs its own read-only mount.
+ */
+export const getSpeculativeDraftModelPath = (recipe: Recipe): string | null => {
+  const raw =
+    getExtraArgument(recipe.extra_args, "speculative_config") ??
+    getExtraArgument(recipe.extra_args, "speculative-config");
+  let config: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      config = JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+  const model = (config as Record<string, unknown>)["model"];
+  return typeof model === "string" && model.startsWith("/") ? model : null;
+};
+
 const sanitizeDockerName = (value: string): string => {
   const cleaned = value.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^[^a-zA-Z0-9]+/, "");
   return cleaned.length > 0 ? cleaned : "recipe";
@@ -395,6 +417,10 @@ export const wrapVllmInDocker = (recipe: Recipe, image: string, inner: string[])
     `TRITON_CACHE_DIR=${DOCKER_JIT_MOUNT}/triton`,
   );
   flags.push("-v", `${model}:${model}:ro`);
+  const draftModel = getSpeculativeDraftModelPath(recipe);
+  if (draftModel && draftModel !== model) {
+    flags.push("-v", `${draftModel}:${draftModel}:ro`);
+  }
   flags.push("-v", `${jitVolume}:${DOCKER_JIT_MOUNT}`);
   flags.push(image);
   flags.push(...inner);
