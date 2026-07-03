@@ -1,54 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import {
   redactLogLine,
   redactLogContent,
 } from "../../../controller/src/core/log-redaction";
 import { primaryLogPathFor } from "../../../controller/src/core/log-files";
+import { createTestApp, registerControllerTestLifecycle, tempDir } from "./fixtures";
 
-const ENV_KEYS = [
-  "LOCAL_STUDIO_DATA_DIR",
-  "LOCAL_STUDIO_DB_PATH",
-  "LOCAL_STUDIO_MODELS_DIR",
-  "LOCAL_STUDIO_HOST",
-  "LOCAL_STUDIO_PORT",
-  "LOCAL_STUDIO_INFERENCE_PORT",
-  "LOCAL_STUDIO_MOCK_INFERENCE",
-  "LOCAL_STUDIO_MOCK_MODEL_ID",
-  "LOCAL_STUDIO_API_KEY",
-  "PI_CODING_AGENT_DIR",
-] as const;
-
-let envSnapshot: Record<string, string | undefined>;
-let tempDir: string;
-
-beforeEach(() => {
-  envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
-  tempDir = mkdtempSync(join(tmpdir(), "local-studio-log-redaction-"));
-  Object.assign(process.env, {
-    LOCAL_STUDIO_DATA_DIR: tempDir,
-    LOCAL_STUDIO_DB_PATH: join(tempDir, "controller.db"),
-    LOCAL_STUDIO_MODELS_DIR: join(tempDir, "models"),
-    LOCAL_STUDIO_HOST: "127.0.0.1",
-    LOCAL_STUDIO_PORT: "18080",
-    LOCAL_STUDIO_INFERENCE_PORT: "65534",
-    LOCAL_STUDIO_MOCK_INFERENCE: "true",
-    LOCAL_STUDIO_MOCK_MODEL_ID: "mock-model",
-    PI_CODING_AGENT_DIR: join(tempDir, "pi-agent"),
-  });
-  delete process.env.LOCAL_STUDIO_API_KEY;
-});
-
-afterEach(() => {
-  for (const key of ENV_KEYS) {
-    const value = envSnapshot[key];
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  rmSync(tempDir, { recursive: true, force: true });
-});
+registerControllerTestLifecycle();
 
 describe("redactLogLine", () => {
   test("redacts Authorization Bearer tokens", () => {
@@ -171,12 +130,7 @@ describe("GET /logs/:sessionId redaction", () => {
       "utf8",
     );
 
-    const [{ createAppContext }, { createApp }] = await Promise.all([
-      import("../../../controller/src/app-context"),
-      import("../../../controller/src/http/app"),
-    ]);
-    const context = createAppContext();
-    const app = createApp(context);
+    const app = await createTestApp();
 
     const response = await app.request(`/logs/${recipeId}`);
     expect(response.status).toBe(200);

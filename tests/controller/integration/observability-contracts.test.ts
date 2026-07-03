@@ -60,8 +60,10 @@ describe("controller route contracts", () => {
       tokens_total: 0,
       requests_total: 0,
       energy_wh: 0,
-      current_power_watts: 0,
     });
+    // Live GPU power sampling makes this host-dependent (0 on CI, real watts on
+    // a GPU box), so only assert the shape.
+    expect(lifetimeBody.current_power_watts).toBeGreaterThanOrEqual(0);
 
     const benchmarkResponse = await app.request(
       "/benchmark?prompt_tokens=20&max_tokens=4",

@@ -27,6 +27,11 @@ export interface Config {
 }
 
 export const loadDotEnvironment = (): string | undefined => {
+  // Tests must stay hermetic: a developer .env at the repo root (e.g. with
+  // LOCAL_STUDIO_API_KEY) would otherwise flip auth on inside the suite.
+  if (parseBooleanFlag(process.env["LOCAL_STUDIO_SKIP_DOTENV"])) {
+    return undefined;
+  }
   const candidates = [
     resolve(process.cwd(), ".env"),
     resolve(process.cwd(), "..", ".env"),
