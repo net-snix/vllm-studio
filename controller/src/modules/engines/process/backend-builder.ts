@@ -10,6 +10,7 @@ import {
 import type { Logger } from "../../../core/logger";
 import { resolveBinary } from "../../../core/command";
 import { resolveVllmRecipePythonPath } from "../runtimes/vllm-python-path";
+import { assertDockerMountsCoverSymlinks } from "./docker-mount-preflight";
 import {
   getDefaultReasoningParser,
   getDefaultToolCallParser,
@@ -416,10 +417,11 @@ export const wrapVllmInDocker = (recipe: Recipe, image: string, inner: string[])
     "-e",
     `TRITON_CACHE_DIR=${DOCKER_JIT_MOUNT}/triton`,
   );
-  flags.push("-v", `${model}:${model}:ro`);
   const draftModel = getSpeculativeDraftModelPath(recipe);
-  if (draftModel && draftModel !== model) {
-    flags.push("-v", `${draftModel}:${draftModel}:ro`);
+  const mountRoots = draftModel && draftModel !== model ? [model, draftModel] : [model];
+  assertDockerMountsCoverSymlinks(mountRoots);
+  for (const root of mountRoots) {
+    flags.push("-v", `${root}:${root}:ro`);
   }
   flags.push("-v", `${jitVolume}:${DOCKER_JIT_MOUNT}`);
   flags.push(image);
