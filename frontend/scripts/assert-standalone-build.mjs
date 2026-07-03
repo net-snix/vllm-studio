@@ -10,8 +10,9 @@
 // fails here, loudly and early, instead of producing a broken artifact.
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(import.meta.dirname, "..");
+const projectRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const standaloneBase = resolve(projectRoot, ".next", "standalone");
 
 // Mirror the runtime resolution in desktop/configs.ts + app-server.ts

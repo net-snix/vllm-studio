@@ -6,8 +6,9 @@
 // directory or flatten the directory.
 import { readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(import.meta.dirname, "..");
+const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 // Exceptions to the sibling rule. This list starts (and should stay) empty:
 // adding an entry requires written justification in the same commit explaining
 // why the file and the same-named directory must coexist.

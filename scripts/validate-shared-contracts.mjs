@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(import.meta.dirname, "..");
+const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const contractNames = [
   "Backend",
   "RecipeBase",

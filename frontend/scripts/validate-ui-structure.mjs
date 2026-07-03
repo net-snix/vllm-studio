@@ -9,8 +9,9 @@
 //   src/components — retired; must stay empty
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(import.meta.dirname, "..");
+const projectRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const srcRoot = join(projectRoot, "src");
 // src/ui holds zero feature-coupled files; primitive purity has no exceptions.
 const legacyPrimitivePurityFiles = new Set([]);
