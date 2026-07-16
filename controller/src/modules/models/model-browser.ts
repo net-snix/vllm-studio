@@ -1,11 +1,19 @@
 import { statSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ModelInfo } from "./types";
-import {
-  MODEL_BROWSER_CONFIG_FILENAMES,
-  MODEL_BROWSER_WEIGHT_EXTENSIONS,
-  MODEL_QUANTIZATION_SIGNATURES,
-} from "./configs";
+const MODEL_BROWSER_WEIGHT_EXTENSIONS = [".safetensors", ".bin", ".gguf"] as const;
+const MODEL_BROWSER_CONFIG_FILENAMES = ["config.json"] as const;
+const MODEL_QUANTIZATION_SIGNATURES = [
+  "awq",
+  "gptq",
+  "gguf",
+  "fp16",
+  "bf16",
+  "int8",
+  "int4",
+  "w4a16",
+  "w8a16",
+];
 
 export const looksLikeModelDirectory = (path: string): boolean => {
   if (!existsSync(path)) {
@@ -21,7 +29,9 @@ export const looksLikeModelDirectory = (path: string): boolean => {
     return entries.some(
       (entry) =>
         entry.isFile() &&
-        MODEL_BROWSER_WEIGHT_EXTENSIONS.some((extension) => entry.name.toLowerCase().endsWith(extension)),
+        MODEL_BROWSER_WEIGHT_EXTENSIONS.some((extension) =>
+          entry.name.toLowerCase().endsWith(extension),
+        ),
     );
   } catch {
     return false;
@@ -34,7 +44,9 @@ export const inferQuantization = (name: string): string | undefined => {
   return candidates.find((value) => lower.includes(value));
 };
 
-export const readConfigMetadata = (modelDirectory: string): { architecture: string | null; context_length: number | null } => {
+export const readConfigMetadata = (
+  modelDirectory: string,
+): { architecture: string | null; context_length: number | null } => {
   const configPath = join(modelDirectory, "config.json");
   if (!existsSync(configPath)) {
     return { architecture: null, context_length: null };
@@ -43,26 +55,40 @@ export const readConfigMetadata = (modelDirectory: string): { architecture: stri
     const content = readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const architectures = parsed["architectures"];
-    const architecture = Array.isArray(architectures) && architectures.length > 0
-      ? String(architectures[0])
-      : null;
+    const architecture =
+      Array.isArray(architectures) && architectures.length > 0 ? String(architectures[0]) : null;
     const contextLengthRaw =
       parsed["max_position_embeddings"] ||
       parsed["max_seq_len"] ||
       parsed["seq_length"] ||
       parsed["n_ctx"];
-    const contextLength = typeof contextLengthRaw === "number"
-      ? contextLengthRaw
-      : typeof contextLengthRaw === "string" && /^\d+$/.test(contextLengthRaw)
-        ? Number(contextLengthRaw)
-        : null;
+    const contextLength =
+      typeof contextLengthRaw === "number"
+        ? contextLengthRaw
+        : typeof contextLengthRaw === "string" && /^\d+$/.test(contextLengthRaw)
+          ? Number(contextLengthRaw)
+          : null;
     return { architecture, context_length: contextLength };
   } catch {
     return { architecture: null, context_length: null };
   }
 };
 
-export const estimateWeightsSizeBytes = (modelDirectory: string, recursive: boolean): number | null => {
+export const estimateWeightsSizeBytes = (
+  modelDirectory: string,
+  recursive: boolean,
+): number | null => {
+  try {
+    const stats = statSync(modelDirectory);
+    if (stats.isFile()) {
+      const isWeightFile = MODEL_BROWSER_WEIGHT_EXTENSIONS.some((extension) =>
+        modelDirectory.toLowerCase().endsWith(extension),
+      );
+      return isWeightFile && stats.size > 0 ? stats.size : null;
+    }
+  } catch {
+    return null;
+  }
   let total = 0;
   try {
     const entries = readdirSync(modelDirectory, { withFileTypes: true });
@@ -77,7 +103,7 @@ export const estimateWeightsSizeBytes = (modelDirectory: string, recursive: bool
       }
       if (
         !MODEL_BROWSER_WEIGHT_EXTENSIONS.some((extension) =>
-          entry.name.toLowerCase().endsWith(extension)
+          entry.name.toLowerCase().endsWith(extension),
         )
       ) {
         continue;
@@ -142,7 +168,10 @@ export const discoverModelDirectories = (
   return discovered;
 };
 
-export const buildModelInfo = async (modelDirectory: string, recipeIds: string[] = []): Promise<ModelInfo> => {
+export const buildModelInfo = async (
+  modelDirectory: string,
+  recipeIds: string[] = [],
+): Promise<ModelInfo> => {
   const metadata = await readConfigMetadata(modelDirectory);
   let modifiedAt: number | undefined;
   try {

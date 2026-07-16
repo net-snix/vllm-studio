@@ -127,10 +127,14 @@ export function createProjectsStore(options: ProjectsStoreOptions): ProjectsStor
   }
 
   function listProjects(): ProjectEntry[] {
+    const chats = chatsProject();
+    const chatsPath = path.resolve(chats.path);
     const projects = readDocument(projectsFilePath())
-      .projects.filter((project) => project.id !== chatsProjectId)
+      .projects.filter(
+        (project) => project.id !== chatsProjectId && path.resolve(project.path) !== chatsPath,
+      )
       .map(withMeta);
-    return [chatsProject(), ...projects];
+    return [chats, ...projects];
   }
 
   function addProject(rawPath: string): ProjectEntry {
@@ -139,6 +143,8 @@ export function createProjectsStore(options: ProjectsStoreOptions): ProjectsStor
     if (!isExistingDirectory(trimmed)) {
       throw new Error(`Path is not a directory: ${trimmed}`);
     }
+    const chats = chatsProject();
+    if (path.resolve(trimmed) === path.resolve(chats.path)) return chats;
     const filePath = projectsFilePath();
     const document = readDocument(filePath);
     const existing = document.projects.find((entry) => entry.path === trimmed);

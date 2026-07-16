@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { HuggingFaceModel } from "@/lib/types";
 import {
   DownloadStatusSection,
@@ -9,8 +9,9 @@ import {
 } from "./explore-tab-sections";
 import { useExplore } from "./use-explore";
 import { useDownloads } from "@/hooks/use-downloads";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import api from "@/lib/api/client";
-import { HuggingFaceModelCardPanel } from "@/ui";
+import { LazyHuggingFaceModelCardPanel } from "@/ui/lazy-huggingface-model-card";
 import type { ModelFit } from "./hardware-profile";
 
 export function ExploreTab() {
@@ -24,12 +25,10 @@ export function ExploreTab() {
     loading,
     error,
     search,
-    task,
     library,
     sort,
     hasMore,
     setSearch,
-    setTask,
     setLibrary,
     setSort,
     loadMore,
@@ -67,33 +66,21 @@ export function ExploreTab() {
     } catch {}
   }, []);
 
-  const subscribeLocalModels = useCallback(
-    (_notify: () => void) => {
+  useMountSubscription(() => {
+    void loadLocalModels();
+  }, [loadLocalModels]);
+  useMountSubscription(() => {
+    let shouldRefresh = false;
+    for (const d of downloads) {
+      if (d.status === "completed" && !completedSet.current.has(d.id)) {
+        completedSet.current.add(d.id);
+        shouldRefresh = true;
+      }
+    }
+    if (shouldRefresh) {
       void loadLocalModels();
-      return () => {};
-    },
-    [loadLocalModels],
-  );
-
-  const subscribeCompletedDownloads = useCallback(
-    (_notify: () => void) => {
-      let shouldRefresh = false;
-      for (const d of downloads) {
-        if (d.status === "completed" && !completedSet.current.has(d.id)) {
-          completedSet.current.add(d.id);
-          shouldRefresh = true;
-        }
-      }
-      if (shouldRefresh) {
-        void loadLocalModels();
-      }
-      return () => {};
-    },
-    [downloads, loadLocalModels],
-  );
-
-  useSyncExternalStore(subscribeLocalModels, getExploreTabSnapshot, getExploreTabSnapshot);
-  useSyncExternalStore(subscribeCompletedDownloads, getExploreTabSnapshot, getExploreTabSnapshot);
+    }
+  }, [downloads, loadLocalModels]);
 
   const isLocal = useCallback(
     (modelId: string) => {
@@ -133,6 +120,13 @@ export function ExploreTab() {
     [resumeDownload],
   );
 
+  const openModelCard = useCallback(
+    (model: HuggingFaceModel, variants: HuggingFaceModel[], fit?: ModelFit) => {
+      setSelectedModelCard({ model, variants, fit });
+    },
+    [],
+  );
+
   return (
     <div className="space-y-5">
       <ExploreControls
@@ -142,11 +136,8 @@ export function ExploreTab() {
         poolOverrideGb={poolOverrideGb}
         hardwareProfile={hardwareProfile}
         loading={loading}
-        error={error}
         search={search}
         setSearch={setSearch}
-        task={task}
-        setTask={setTask}
         library={library}
         setLibrary={setLibrary}
         sort={sort}
@@ -171,9 +162,9 @@ export function ExploreTab() {
         pauseDownload={handlePause}
         resumeDownload={handleResume}
         loadMore={loadMore}
-        openModelCard={(model, variants, fit) => setSelectedModelCard({ model, variants, fit })}
+        openModelCard={openModelCard}
       />
-      <HuggingFaceModelCardPanel
+      <LazyHuggingFaceModelCardPanel
         open={Boolean(selectedModelCard)}
         model={selectedModelCard?.model ?? null}
         variants={selectedModelCard?.variants ?? []}
@@ -183,5 +174,3 @@ export function ExploreTab() {
     </div>
   );
 }
-
-const getExploreTabSnapshot = (): number => 0;

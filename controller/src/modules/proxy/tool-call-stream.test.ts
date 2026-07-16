@@ -6,7 +6,7 @@ const decoder = new TextDecoder();
 
 const streamText = async (preserveReasoningTagsInContent: boolean): Promise<string> => {
   const upstream = new ReadableStream<Uint8Array>({
-    start(controller) {
+    start(controller): void {
       controller.enqueue(
         encoder.encode(
           `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "<think>reason" } }] })}\n\n`
@@ -41,7 +41,7 @@ const streamText = async (preserveReasoningTagsInContent: boolean): Promise<stri
 
 const streamReasoningField = async (suppressReasoningContent: boolean): Promise<string> => {
   const upstream = new ReadableStream<Uint8Array>({
-    start(controller) {
+    start(controller): void {
       controller.enqueue(
         encoder.encode(
           `data: ${JSON.stringify({ choices: [{ index: 0, delta: { reasoning_content: "hidden" } }] })}\n\n`

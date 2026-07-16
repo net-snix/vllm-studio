@@ -1,92 +1,55 @@
 "use client";
+import dynamic from "next/dynamic";
 import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import { AgentChatPaneHeader } from "@/features/agent/ui/agent-chat-pane-header";
 import { AgentComposerFrame } from "@/features/agent/ui/agent-composer-frame";
 import { type FileMentionRow } from "@/features/agent/ui/agent-composer-context";
 import {
-  useComposerAttachments,
   useComposerLoadedContext,
   useComposerMentionRows,
-  useComposerMentionSelection,
   useComposerTextareaBehavior,
   useComposerTextareaHeightSync,
   type UpdateTab,
 } from "@/features/agent/ui/chat-pane-composer";
-import { browserContextPrompt } from "@/features/agent/browser/context";
-import {
-  activeComposerPlugins,
-  selectedContextPrompt,
-  type ComposerMention,
-  type ComposerPluginRef,
-} from "@/features/agent/composer-context";
+import { useComposerAttachments } from "@/features/agent/ui/chat-pane-composer-attachments";
+import { useComposerMentionSelection } from "@/features/agent/ui/chat-pane-composer-mention-selection";
+import { type ComposerMention } from "@/features/agent/composer-context";
 import {
   useChatPaneContextAttachEffect,
   useChatPaneDerivedState,
   useChatPaneMentionEffects,
   useChatPaneRuntimeHandle,
-  useChatPaneSendFlow,
-  useChatPaneSessionTitle,
   useChatPaneStickToBottomEffect,
 } from "@/features/agent/ui/chat-pane-hooks";
-import { useProjectsNavSessionPrefs } from "@/features/agent/ui/projects-nav/use-projects-nav-effects";
-import {
-  AssistantBlock,
-  asRecord,
-  ChatMessage,
-  ChatPaneHandle,
-  cleanSessionTitle,
-  EventBlock,
-  isPlaceholderSessionTitle,
-  newId,
-  nowLabel,
-  QueuedMessage,
-  runtimeStatusLooksActive,
-  SessionTab,
-  TextBlock,
-  ThinkingBlock,
-  TokenStats,
-  ToolBlock,
-  visibleQueuedMessages,
-} from "@/features/agent/messages";
-import { copySessionPref, patchSessionPref } from "@/features/agent/messages/prefs";
-import { useSessionEngine, type SessionEngine } from "@/features/agent/runtime/engine";
-import {
-  beginSessionSubmit,
-  endSessionSubmit,
-  type SessionSubmitGuard,
-} from "@/features/agent/runtime/selectors";
-import { useTools, type ToolsContextValue } from "@/features/agent/tools/context";
+import { useChatPaneSessionTitle } from "@/features/agent/ui/chat-pane-session-title";
+import { useChatPaneSendFlow } from "@/features/agent/ui/chat-pane-send-flow";
+import { ChatPaneHandle, SessionTab } from "@/features/agent/messages";
+import { useSessionEngine } from "@/features/agent/runtime/engine";
+import { useTools } from "@/features/agent/tools/context";
 import type { GitSummary } from "@/features/agent/projects/types";
-import type { BrowserBackend, ContextAttachRequest } from "@/features/agent/tools/types";
-import {
-  attachmentDedupKey,
-  attachmentPrompt,
-  imageInputFromAttachment,
-  type ChatAttachment,
-} from "@/features/agent/ui/chat-attachments";
-import { Timeline } from "@/features/agent/ui/timeline/timeline";
-import { CloseIcon, ReloadIcon } from "@/ui/icons";
+import type { BrowserBackend } from "@/features/agent/tools/types";
 import {
   exportFilenameFromTitle,
   sessionToMarkdown,
 } from "@/features/agent/messages/export-markdown";
-export type {
-  AssistantBlock,
-  ChatMessage,
-  ChatPaneHandle,
-  EventBlock,
-  QueuedMessage,
-  SessionTab,
-  TextBlock,
-  ThinkingBlock,
-  TokenStats,
-  ToolBlock,
-};
-export { visibleQueuedMessages };
+import {
+  OPEN_TERMINAL_EVENT,
+  type OpenTerminalEventDetail,
+  type TerminalOwner,
+} from "@/features/agent/terminal-owners";
+import {
+  rememberPersistentTerminalOwner,
+  selectPersistentTerminalOwner,
+  usePersistentTerminalOwners,
+} from "@/features/agent/ui/use-persistent-terminal-owners";
+import { PersistentTerminals } from "@/features/agent/ui/persistent-terminals";
+export type { ChatPaneHandle, SessionTab };
 
-const FINALIZATION_RETRY_ERROR_RE =
-  /Model did not produce a valid final response\.?\s+Retrying finalization/i;
-const BENIGN_TRANSPORT_ERROR_RE = /^(?:terminated|abort(?:ed)?|network error|load failed)$/i;
+const Timeline = dynamic(
+  () => import("@/features/agent/ui/timeline/timeline").then((mod) => mod.Timeline),
+  { ssr: false, loading: () => <TimelineFallback /> },
+);
 
 function downloadTextFile(filename: string, content: string): void {
   if (typeof document === "undefined") return;
@@ -101,23 +64,27 @@ function downloadTextFile(filename: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
-function visibleSessionError(error?: string): string {
-  const value = error?.trim() ?? "";
-  return FINALIZATION_RETRY_ERROR_RE.test(value) || BENIGN_TRANSPORT_ERROR_RE.test(value)
-    ? ""
-    : value;
+function EmptyPromptTimeline() {
+  return (
+    <div className="flex min-h-0 flex-1 overflow-y-auto bg-(--agent-bg) px-6 pb-10 pt-2">
+      <div className="agent-thread-shell mx-auto flex flex-1">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+          <p className="max-w-[24ch] text-[clamp(1.45rem,2.6vw,2.1rem)] font-semibold leading-[1.22] tracking-[-0.02em] text-(--fg)/90">
+            A dream is something you build for yourself.
+          </p>
+          <p className="text-[length:var(--fs-xl)] text-(--dim)">Just talk to it.</p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-/** A failed turn can be retried when a model is set, nothing is running, and
- * there's a prior user message (or restored draft) to resend. */
-function canRetrySession(tab: SessionTab | null, hasModel: boolean, running: boolean): boolean {
-  if (!tab || !hasModel || running) return false;
-  return tab.messages.some((message) => message.role === "user") || Boolean(tab.input.trim());
+function TimelineFallback() {
+  return <div className="flex min-h-0 flex-1 bg-(--agent-bg)" />;
 }
 
 type Props = {
   paneId: string;
-  runtimeSessionId: string;
   modelId: string;
   modelName: string | null;
   modelSupportsVision: boolean;
@@ -144,6 +111,8 @@ type Props = {
   onRenameSession: (tabId: string, title: string) => void;
   onClose?: () => void;
   onForkSession?: () => void;
+  onOpenTerminal?: () => void;
+  terminalOwner?: TerminalOwner | null;
   rightPanelOpen: boolean;
   onToggleRightPanel: () => void;
   onRegisterHandle?: (handle: ChatPaneHandle | null) => void;
@@ -151,7 +120,6 @@ type Props = {
 };
 export function ChatPane({
   paneId,
-  runtimeSessionId,
   modelId,
   modelName,
   modelSupportsVision,
@@ -178,6 +146,8 @@ export function ChatPane({
   onRenameSession,
   onClose,
   onForkSession,
+  onOpenTerminal,
+  terminalOwner = null,
   rightPanelOpen,
   onToggleRightPanel,
   onRegisterHandle,
@@ -201,6 +171,32 @@ export function ChatPane({
     showEmptyPrompt,
     visibleQueueItems,
   } = useChatPaneDerivedState({ activeTabId, contextWindow, tabs });
+  // In-pane terminal: replaces the transcript+composer with a persistent PTY
+  // for this session/project. Terminals stay mounted (hidden) after toggling
+  // back so the shell keeps running; the header button flips the view.
+  const [terminalView, setTerminalView] = useState(false);
+  const terminalSnapshot = usePersistentTerminalOwners(
+    terminalView,
+    terminalView ? terminalOwner : null,
+  );
+  const toggleTerminalView = useCallback(() => {
+    setTerminalView((open) => {
+      const next = !open;
+      if (next && terminalOwner) rememberPersistentTerminalOwner(terminalOwner, { select: true });
+      return next;
+    });
+  }, [terminalOwner]);
+  useMountSubscription(() => {
+    if (!isFocused) return;
+    const onOpenTerminalEvent = (event: Event) => {
+      const detail = (event as CustomEvent<OpenTerminalEventDetail>).detail;
+      if (!detail?.mountKey) return;
+      selectPersistentTerminalOwner(detail.mountKey);
+      setTerminalView(true);
+    };
+    window.addEventListener(OPEN_TERMINAL_EVENT, onOpenTerminalEvent);
+    return () => window.removeEventListener(OPEN_TERMINAL_EVENT, onOpenTerminalEvent);
+  }, [isFocused]);
   const updateTab = useCallback(
     (tabId: string, patch: (tab: SessionTab) => SessionTab) => {
       onTabsChange((currentTabs) =>
@@ -238,7 +234,6 @@ export function ChatPane({
   const mentionRows = useComposerMentionRows({
     fileMentionRows,
     mention,
-    pluginRows: tools.pluginCatalogue,
     promptTemplateRows: tools.promptTemplateCatalogue,
     skillRows: tools.skillCatalogue,
   });
@@ -283,13 +278,13 @@ export function ChatPane({
     lastAppliedComposerHeightRef,
     lastComposerValueLengthRef,
   });
-  const { selectedPlugins, selectedSkills, selectedPromptTemplates, removeLoadedContext } =
-    useComposerLoadedContext({ activeTab, tools });
+  const { selectedSkills, selectedPromptTemplates, removeLoadedContext } = useComposerLoadedContext(
+    { activeTab, tools },
+  );
 
   const engine = useSessionEngine({
     tabs,
     activeTabId,
-    runtimeSessionId,
     modelId,
     cwd,
     browserToolEnabled,
@@ -299,7 +294,7 @@ export function ChatPane({
     updateSession: updateTab,
     selectionFor: tools.selectionFor,
   });
-  const { sendMessage, queueMessage, removeQueued, editQueued, steerQueued, abortTurn, retryLast } =
+  const { sendMessage, queueMessage, removeQueued, editQueued, steerQueued, abortTurn } =
     useChatPaneSendFlow({
       activeTab,
       attachments,
@@ -312,7 +307,6 @@ export function ChatPane({
       readingAttachments,
       resetComposerHeight,
       running: Boolean(running),
-      runtimeSessionId,
       setMention,
       setStickToBottom,
       tools,
@@ -349,12 +343,6 @@ export function ChatPane({
     onRegisterHandle,
     running: Boolean(running),
   });
-  const visibleError = visibleSessionError(activeTab?.error);
-  const canRetry = canRetrySession(activeTab, Boolean(modelId), Boolean(running));
-  const dismissVisibleError = useCallback(() => {
-    if (!activeTab) return;
-    updateTab(activeTab.id, (tab) => ({ ...tab, error: "" }));
-  }, [activeTab, updateTab]);
   const exportSession = useCallback(() => {
     if (!activeTab) return;
     const markdown = sessionToMarkdown(activeTab.messages, displayedSessionTitle);
@@ -362,6 +350,10 @@ export function ChatPane({
   }, [activeTab, displayedSessionTitle]);
   const canExport = Boolean(
     activeTab?.messages.some((message) => message.role !== "system" && message.text.trim()),
+  );
+  const loadEarlierHistory = useCallback(
+    () => (activeTabId ? engine.loadEarlier(activeTabId) : Promise.resolve()),
+    [activeTabId, engine],
   );
   return (
     <section
@@ -380,100 +372,86 @@ export function ChatPane({
           onTogglePinned={togglePinnedSession}
           onRename={renameActiveSession}
           onFork={onForkSession}
+          onOpenTerminal={terminalOwner ? toggleTerminalView : onOpenTerminal}
+          terminalOpen={terminalView}
           onExport={exportSession}
           onClose={onClose}
           onToggleRightPanel={onToggleRightPanel}
         />
       ) : null}
-      {visibleError ? (
-        <div
-          className="flex shrink-0 items-start gap-3 border-b border-(--border) bg-(--err)/10 px-4 py-2 text-xs text-(--err)"
-          role="alert"
-        >
-          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{visibleError}</span>
-          {canRetry ? (
-            <button
-              type="button"
-              onClick={() => void retryLast()}
-              className="-my-0.5 inline-flex shrink-0 items-center gap-1 rounded-md border border-(--err)/30 px-1.5 py-0.5 text-(--err)/90 hover:bg-(--err)/10 hover:text-(--err)"
-              aria-label="Retry"
-              title="Resend the last message"
-            >
-              <ReloadIcon className="h-3 w-3 pointer-events-none" />
-              Retry
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={dismissVisibleError}
-            className="-my-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-(--err)/75 hover:bg-(--err)/10 hover:text-(--err)"
-            aria-label="Dismiss error"
-            title="Dismiss error"
-          >
-            <CloseIcon className="h-3 w-3 pointer-events-none" />
-          </button>
-        </div>
-      ) : null}
-      <div className="flex min-h-0 min-w-0 flex-1">
-        <Timeline
-          key={activeTab?.id ?? "empty"}
-          stickToBottom={stickToBottom}
-          onStickToBottomChange={setStickToBottom}
-          messages={activeTab?.messages ?? []}
-          running={Boolean(running)}
-          onForkSession={onForkSession}
-          emptyPrompt={Boolean(showEmptyPrompt)}
+      <div className={terminalView ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"}>
+        <PersistentTerminals
+          active={terminalView}
+          activeOwnerKey={terminalSnapshot.activeOwnerKey}
+          terminals={terminalSnapshot.owners}
         />
       </div>
-      <AgentComposerFrame
-        attachments={attachments}
-        browserToolEnabled={browserToolEnabled}
-        browserBackend={browserBackend}
-        canvasEnabled={canvasEnabled}
-        composerDragActive={composerDragActive}
-        contextWindow={effectiveContextWindow}
-        currentContextTokens={currentContextTokens}
-        cwd={cwd}
-        fileInputRef={fileInputRef}
-        gitBranch={gitBranch}
-        gitSummary={gitSummary}
-        input={activeTab?.input ?? ""}
-        mention={mention}
-        mentionIndex={mentionIndex}
-        mentionRows={mentionRows}
-        modelSelector={modelSelector}
-        onAbortTurn={() => void abortTurn()}
-        onAttachFiles={(files) => void attachFiles(files)}
-        onComposerChange={handleComposerChange}
-        onComposerDragLeave={handleComposerDragLeave}
-        onComposerDragOver={handleComposerDragOver}
-        onComposerDrop={handleComposerDrop}
-        onComposerKeyDown={handleComposerKeyDown}
-        onComposerPaste={handleComposerPaste}
-        onEditQueued={editQueued}
-        onInitGit={onInitGit}
-        onOpenStatus={openComputerStatus}
-        onQueueExpandedChange={setQueueExpanded}
-        onQueueMessage={() => void queueMessage()}
-        onRemoveAttachment={removeAttachment}
-        onRemoveLoadedContext={removeLoadedContext}
-        onRemoveQueued={removeQueued}
-        onSelectMention={(entry) => void selectMentionRow(entry)}
-        onSteerQueued={(queueId) => void steerQueued(queueId)}
-        onSubmit={sendMessage}
-        onToggleBrowserBackend={onToggleBrowserBackend}
-        onToggleBrowserTool={onToggleBrowserTool}
-        onToggleCanvas={onToggleCanvas}
-        promptTemplates={selectedPromptTemplates}
-        queueExpanded={queueExpanded}
-        queueItems={visibleQueueItems}
-        readingAttachments={readingAttachments}
-        running={Boolean(running)}
-        selectedPlugins={selectedPlugins}
-        selectedSkills={selectedSkills}
-        status={activeTab?.status}
-        textareaRef={textareaRef}
-      />
+      <div className={terminalView ? "hidden" : "flex min-h-0 min-w-0 flex-1"}>
+        {showEmptyPrompt ? (
+          <EmptyPromptTimeline />
+        ) : (
+          <Timeline
+            key={activeTab?.id ?? "empty"}
+            stickToBottom={stickToBottom}
+            onStickToBottomChange={setStickToBottom}
+            messages={activeTab?.messages ?? []}
+            running={Boolean(running)}
+            onForkSession={onForkSession}
+            hasEarlier={activeTab?.historyCursor != null}
+            onLoadEarlier={loadEarlierHistory}
+          />
+        )}
+      </div>
+      <div className={terminalView ? "hidden" : "contents"}>
+        <AgentComposerFrame
+          attachments={attachments}
+          browserToolEnabled={browserToolEnabled}
+          browserBackend={browserBackend}
+          canvasEnabled={canvasEnabled}
+          composerDragActive={composerDragActive}
+          contextWindow={effectiveContextWindow}
+          currentContextTokens={currentContextTokens}
+          cwd={cwd}
+          fileInputRef={fileInputRef}
+          gitBranch={gitBranch}
+          gitSummary={gitSummary}
+          input={activeTab?.input ?? ""}
+          mention={mention}
+          mentionIndex={mentionIndex}
+          mentionRows={mentionRows}
+          modelSupportsVision={modelSupportsVision}
+          modelSelector={modelSelector}
+          onAbortTurn={() => void abortTurn()}
+          onAttachFiles={(files) => void attachFiles(files)}
+          onComposerChange={handleComposerChange}
+          onComposerDragLeave={handleComposerDragLeave}
+          onComposerDragOver={handleComposerDragOver}
+          onComposerDrop={handleComposerDrop}
+          onComposerKeyDown={handleComposerKeyDown}
+          onComposerPaste={handleComposerPaste}
+          onEditQueued={editQueued}
+          onInitGit={onInitGit}
+          onOpenStatus={openComputerStatus}
+          onQueueExpandedChange={setQueueExpanded}
+          onRemoveAttachment={removeAttachment}
+          onRemoveLoadedContext={removeLoadedContext}
+          onRemoveQueued={removeQueued}
+          onSelectMention={(entry) => void selectMentionRow(entry)}
+          onSteerQueued={(queueId) => void steerQueued(queueId)}
+          onSubmit={sendMessage}
+          onToggleBrowserBackend={onToggleBrowserBackend}
+          onToggleBrowserTool={onToggleBrowserTool}
+          onToggleCanvas={onToggleCanvas}
+          promptTemplates={selectedPromptTemplates}
+          queueExpanded={queueExpanded}
+          queueItems={visibleQueueItems}
+          readingAttachments={readingAttachments}
+          running={Boolean(running)}
+          selectedSkills={selectedSkills}
+          status={activeTab?.status}
+          textareaRef={textareaRef}
+        />
+      </div>
     </section>
   );
 }

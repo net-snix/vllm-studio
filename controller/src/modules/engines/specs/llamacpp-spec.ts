@@ -1,22 +1,78 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Config } from "../../../config/env";
-import { resolveBinary } from "../../../core/command";
+import { resolveBinary, runCommandAsync } from "../../../core/command";
+import { LLAMACPP_HELP_TIMEOUT_MS } from "../configs";
 import type { ProcessInfo, Recipe } from "../../models/types";
-import type { RuntimeBackendInfo } from "../../shared/system-types";
+import type {
+  RuntimeBackendInfo,
+  RuntimeUpgradeResult,
+} from "@local-studio/contracts/system";
 import { getLlamacppRuntimeInfo } from "../runtimes/runtime-info";
 import {
-  appendLlamacppArguments,
+  appendSerializedArguments,
   getExtraArgument,
-  resolveLlamaBinary,
+  type ExtraArgumentSerializer,
 } from "../process/backend-builder";
-import { stripForeignFlagKeys } from "../../../../../shared/contracts/engine-args";
+import { stripForeignFlagKeys } from "@local-studio/contracts/engine-args";
 import { extractFlag } from "../argument-utilities";
-import type {
-  ConfigHelpResult,
-  EngineSpec,
-} from "../engine-spec";
+import type { ConfigHelpResult, EngineSpec, InstallOptions } from "../engine-spec";
+import {
+  getUpgradeCommandFromEnvironment,
+  LLAMACPP_UPGRADE_ENV,
+  runEnvironmentUpgradeCommand,
+} from "../runtimes/upgrade-config";
+import { installManagedLlamacpp, managedLlamaServerPath } from "../runtimes/managed-llamacpp";
 
-const buildLlamacppCommand = (recipe: Recipe, config: Config): string[] => {
-  const command: string[] = [resolveLlamaBinary(recipe, config)];
+const executableBaseName = (value: string): string => {
+  return value.split(/[\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? value.toLowerCase();
+};
+const isAllowedLlamaServerBinary = (value: string): boolean => {
+  const name = executableBaseName(value);
+  return name === "llama-server" || name === "llama-server.exe";
+};
+const rejectPathTraversal = (value: string, label: string): void => {
+  if (value.split(/[\\/]+/).includes("..")) {
+    throw new Error(`Invalid ${label}: path traversal is not allowed`);
+  }
+};
+
+export const resolveLlamaBinary = (recipe: Recipe, config: Config): string => {
+  const override = getExtraArgument(recipe.extra_args, "llama_bin") ?? config.llama_bin;
+  if (typeof override === "string" && override.trim()) {
+    rejectPathTraversal(override, "llama_bin");
+    if (!isAllowedLlamaServerBinary(override)) {
+      throw new Error("Invalid llama_bin: only llama-server executables are allowed");
+    }
+    const resolved = resolveBinary(override);
+    if (resolved) {
+      return resolved;
+    }
+    throw new Error(`Invalid llama_bin: executable "${override}" was not found`);
+  }
+  const managed = managedLlamaServerPath(config);
+  return resolveBinary("llama-server") ?? (existsSync(managed) ? managed : "llama-server");
+};
+
+const serializeLlamacppArgument: ExtraArgumentSerializer = (flag, _key, value) => {
+  if (value === true) return [flag];
+  if (value === false || value === undefined || value === null || value === "") return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) =>
+      entry === undefined || entry === null || entry === "" ? [] : [flag, String(entry)],
+    );
+  }
+  if (typeof value === "object") return [flag, JSON.stringify(value)];
+  return [flag, String(value)];
+};
+
+export const appendLlamacppArguments = (
+  command: string[],
+  extraArguments: Record<string, unknown>,
+): string[] => appendSerializedArguments(command, extraArguments, serializeLlamacppArgument);
+
+export const buildLlamacppRecipeArguments = (recipe: Recipe): string[] => {
+  const command: string[] = [];
   command.push("--model", recipe.model_path, "--host", recipe.host, "--port", String(recipe.port));
   if (recipe.served_model_name) {
     command.push("--alias", recipe.served_model_name);
@@ -27,6 +83,11 @@ const buildLlamacppCommand = (recipe: Recipe, config: Config): string[] => {
   }
   return appendLlamacppArguments(command, stripForeignFlagKeys("llamacpp", recipe.extra_args));
 };
+
+const buildLlamacppCommand = (recipe: Recipe, config: Config): string[] => [
+  resolveLlamaBinary(recipe, config),
+  ...buildLlamacppRecipeArguments(recipe),
+];
 
 const managedPackageSpec = (_version?: string | null): string => {
   // llama.cpp is built from source or installed as a binary; no pip package.
@@ -62,13 +123,27 @@ const getRuntimeInfoAsync = async (
 
 const getConfigHelp = async (config: Config): Promise<ConfigHelpResult> => {
   const configured = config.llama_bin || "llama-server";
-  const resolved = resolveBinary(configured) ?? configured;
-  const { runCommandAsync } = await import("../../../core/command");
-  const result = await runCommandAsync(resolved, ["--help"], { timeoutMs: 15_000 });
+  const resolved =
+    resolveBinary(configured) ?? (existsSync(configured) ? resolve(configured) : null);
+  const binary = resolved ?? configured;
+  const result = await runCommandAsync(binary, ["--help"], {
+    timeoutMs: LLAMACPP_HELP_TIMEOUT_MS,
+  });
   if (result.status !== 0) {
-    return { config: result.stdout || null, error: result.stderr || "Failed to fetch llama.cpp config" };
+    return {
+      config: result.stdout || null,
+      error: result.stderr || "Failed to fetch llama.cpp config",
+    };
   }
   return { config: result.stdout || null, error: null };
+};
+
+const installLlamacpp = async (options: InstallOptions): Promise<RuntimeUpgradeResult> => {
+  const command = getUpgradeCommandFromEnvironment(LLAMACPP_UPGRADE_ENV);
+  if (command) {
+    return runEnvironmentUpgradeCommand(command, options.onSpawn);
+  }
+  return installManagedLlamacpp(options);
 };
 
 export const llamacppSpec: EngineSpec = {
@@ -77,6 +152,7 @@ export const llamacppSpec: EngineSpec = {
   cliBinary: "llama-server",
   buildCommand: buildLlamacppCommand,
   managedPackageSpec,
+  install: installLlamacpp,
   detectInvocation,
   extractModelPath,
   extractServedModelName,

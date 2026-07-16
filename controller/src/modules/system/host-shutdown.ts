@@ -74,6 +74,3 @@ export const scheduleHostShutdown = (options?: HostPowerOptions): HostPowerResul
 
 export const scheduleHostRestart = (options?: HostPowerOptions): HostPowerResult =>
   scheduleHostPowerCommand(restartCommand, options);
-
-export type ShutdownHostResult = HostPowerResult;
-export type ShutdownHostOptions = HostPowerOptions;

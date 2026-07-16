@@ -10,37 +10,21 @@ import { registerModelsRoutes } from "../modules/models/routes";
 import { registerAllProxyRoutes } from "../modules/proxy/routes";
 import { registerStudioRoutes } from "../modules/studio/routes";
 import { registerAudioRoutes } from "../modules/audio/routes";
+import { registerSpeechRoutes } from "../modules/speech/routes";
 import { createOpenApiSpec } from "./openapi-spec";
 import {
   createMutatingAuthMiddleware,
   createMutatingRateLimitMiddleware,
   createReadRateLimitMiddleware,
 } from "./security-middleware";
-import { createControllerRequestObservabilityMiddleware } from "./observability-middleware";
-
-// Parse a comma-separated list of controller URLs into a set of origins. Used to
-// allowlist cross-controller passthrough targets so the route cannot be turned
-// into an SSRF/credential-reflection primitive against arbitrary hosts.
-const parseOriginAllowlist = (raw: string | undefined): Set<string> => {
-  const origins = new Set<string>();
-  for (const entry of (raw ?? "").split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    try {
-      origins.add(new URL(trimmed).origin);
-    } catch {
-      // Ignore malformed entries.
-    }
-  }
-  return origins;
-};
+import {
+  createControllerRequestObservabilityMiddleware,
+  TELEMETRY_SKIP_PATHS,
+} from "./observability-middleware";
 
 export const createApp = (context: AppContext): Hono => {
   const app = new Hono();
   const allowedCorsOrigins = context.config.cors_origins ?? [];
-  const allowedControllerOrigins = parseOriginAllowlist(
-    process.env["LOCAL_STUDIO_CONTROLLER_ROUTE_ALLOWLIST"]
-  );
 
   app.use(
     "*",
@@ -55,12 +39,11 @@ export const createApp = (context: AppContext): Hono => {
         "Retry-After",
       ],
       maxAge: 600,
-    })
+    }),
   );
 
   app.use("*", async (ctx, next) => {
-    const skip = new Set(["/health", "/metrics", "/events", "/status", "/api/docs", "/api/spec"]);
-    if (!skip.has(ctx.req.path)) {
+    if (!TELEMETRY_SKIP_PATHS.has(ctx.req.path)) {
       context.logger.debug(`${ctx.req.method} ${ctx.req.path}`);
     }
     await next();
@@ -77,64 +60,11 @@ export const createApp = (context: AppContext): Hono => {
   registerEngineRoutes(app, context);
   registerModelsRoutes(app, context);
   registerStudioRoutes(app, context);
+  registerSpeechRoutes(app, context);
   registerAudioRoutes(app, context);
   registerAllProxyRoutes(app, context);
 
   app.get("/health", (ctx) => ctx.json({ status: "ok" }));
-
-  app.all("/controllers/route/*", async (ctx) => {
-    const target = ctx.req.query("target") || ctx.req.header("x-vllm-target-controller") || "";
-    if (!target) return ctx.json({ detail: "target controller is required" }, { status: 400 });
-    let targetUrl: URL;
-    try {
-      targetUrl = new URL(target);
-      if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
-        throw new Error("unsupported protocol");
-      }
-    } catch {
-      return ctx.json({ detail: "target must be an http(s) controller URL" }, { status: 400 });
-    }
-    // SSRF guard: only forward to controller origins the operator has explicitly
-    // allowlisted. Without this, `target` could point at internal services
-    // (cloud metadata, RFC1918 hosts) and the forwarded Authorization header
-    // would leak the controller key to an attacker-chosen host. The feature is
-    // off by default (empty allowlist => all targets rejected).
-    if (!allowedControllerOrigins.has(targetUrl.origin)) {
-      return ctx.json(
-        {
-          detail:
-            "target controller origin is not allowlisted; set LOCAL_STUDIO_CONTROLLER_ROUTE_ALLOWLIST",
-        },
-        { status: 403 }
-      );
-    }
-    const suffix = ctx.req.path.replace(/^\/controllers\/route\/?/, "");
-    const upstream = new URL(suffix, `${targetUrl.toString().replace(/\/+$/, "")}/`);
-    for (const [key, value] of new URL(ctx.req.url).searchParams.entries()) {
-      if (key !== "target") upstream.searchParams.append(key, value);
-    }
-    const init: RequestInit = {
-      method: ctx.req.method,
-      headers: {
-        "content-type": ctx.req.header("content-type") ?? "application/json",
-        authorization: ctx.req.header("authorization") ?? "",
-      },
-    };
-    if (ctx.req.method !== "GET" && ctx.req.method !== "HEAD") {
-      init.body = await ctx.req.raw.clone().arrayBuffer();
-    }
-    // Do not auto-follow redirects: an allowlisted-but-compromised target must
-    // not be able to bounce this request (with the forwarded key) elsewhere.
-    init.redirect = "manual";
-    const response = await fetch(upstream, init);
-    return new Response(response.body, {
-      status: response.status,
-      headers: {
-        "content-type": response.headers.get("content-type") ?? "application/json",
-        "x-vllm-routed-controller": targetUrl.origin,
-      },
-    });
-  });
 
   // OpenAPI documentation endpoints
   app.get("/api/spec", (ctx) => ctx.json(createOpenApiSpec(context)));

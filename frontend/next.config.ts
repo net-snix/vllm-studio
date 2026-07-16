@@ -1,15 +1,14 @@
 import type { NextConfig } from "next";
-import bundleAnalyzer from "@next/bundle-analyzer";
 import path from "path";
 
-const withBundleAnalyzer = bundleAnalyzer({
-  enabled: process.env.ANALYZE === "true",
-});
-
 const nextConfig: NextConfig = {
+  // Workaround for Next.js 16 bug: when unset, config.generateBuildId becomes
+  // undefined, but generateBuildId() calls it as a function without a guard.
+  generateBuildId: () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
   output: "standalone",
-  outputFileTracingRoot: __dirname,
+  outputFileTracingRoot: path.join(__dirname, ".."),
   images: { unoptimized: true },
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   // Keep the Pi SDK out of the webpack/turbopack bundle so it loads from
   // node_modules at runtime (Node-only deps, dynamic jiti loader, etc.).
   //
@@ -41,11 +40,43 @@ const nextConfig: NextConfig = {
       "./node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/**/*.js",
     ],
   },
+  // Ships raw .ts sources (no build step) — Next must transpile it.
+  //
+  // @local-studio/agent-runtime also ships raw .ts (services/agent-runtime), so
+  // it cannot be externalized (Node can't execute TypeScript at runtime in the
+  // standalone server) — it is transpiled and bundled with the app. Long-lived
+  // runtime state survives dev HMR through the package's single globalThis
+  // registry (services/agent-runtime/src/instances.ts).
+  transpilePackages: ["@local-studio/contracts", "@local-studio/agent-runtime"],
+  // The package and shared/agent live outside frontend/, so their real paths
+  // don't have frontend/node_modules on the walk-up resolution path. Teach
+  // webpack to also look here for their external deps (effect, the pi SDK).
+  webpack: (config, { nextRuntime }) => {
+    config.resolve.modules = [
+      ...(config.resolve.modules ?? ["node_modules"]),
+      path.join(__dirname, "node_modules"),
+    ];
+    // instrumentation.ts is compiled for the edge runtime too. Its node-only
+    // half (instrumentation-node.ts, node:net) is behind a NEXT_RUNTIME gate,
+    // but dev builds don't dead-code-eliminate the gated dynamic import, so
+    // the edge compile still tries to read the node: scheme and fails
+    // (UnhandledSchemeError). Stub it out for edge — the gate keeps it from
+    // ever executing there.
+    if (nextRuntime === "edge") {
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        "node:net": false,
+      };
+    }
+    return config;
+  },
+  // No resolveAlias here: turbopack rejects absolute alias targets ("server
+  // relative imports are not implemented yet"), and none is needed — the
+  // services/node_modules → frontend/node_modules symlink (postinstall
+  // link-services-node-modules.mjs) puts effect/the pi SDK on the walk-up
+  // path for the out-of-root agent-runtime sources.
   turbopack: {
     root: path.join(__dirname, ".."),
-    resolveAlias: {
-      tailwindcss: path.join(__dirname, "node_modules/tailwindcss"),
-    },
   },
   async redirects() {
     return [
@@ -103,4 +134,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default withBundleAnalyzer(nextConfig);
+export default nextConfig;

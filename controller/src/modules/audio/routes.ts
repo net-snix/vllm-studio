@@ -1,226 +1,42 @@
-import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { extname, join, resolve } from "node:path";
+import { extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Hono } from "hono";
+import { Schema } from "effect";
+import { CHATTERBOX_BACKEND } from "@local-studio/contracts/speech";
 import type { AppContext } from "../../app-context";
-import { resolveBinary } from "../../core/command";
-import { runCliCommand } from "../../services/cli-runner";
-import { SttIntegrationError, transcribeAudio } from "../../services/stt";
-import type { SttMode } from "../../services/stt";
-import { synthesizeSpeech, TtsIntegrationError } from "../../services/tts";
-import type { TtsMode } from "../../services/tts";
-import type { AudioRouteDependencies } from "./interfaces";
 import {
-  AUDIO_DEFAULT_MODE,
-  AUDIO_REPLACE_TRUE_VALUES,
-  AUDIO_TEMP_PATH_SEGMENTS,
-  AUDIO_TRANSCODE_TIMEOUT_MS,
-} from "./configs";
-
-const parseField = (value: FormDataEntryValue | null): string | undefined => {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-};
-
-const parseMode = (value: FormDataEntryValue | null): SttMode => {
-  const modeValue = (parseField(value) ?? AUDIO_DEFAULT_MODE).toLowerCase();
-  if (modeValue === "strict" || modeValue === "best_effort") {
-    return modeValue;
-  }
-  throw new SttIntegrationError(400, "invalid_mode", "mode must be strict or best_effort");
-};
-
-const parseReplace = (value: FormDataEntryValue | null): boolean => {
-  const replaceValue = parseField(value);
-  if (!replaceValue) return false;
-  return AUDIO_REPLACE_TRUE_VALUES.includes(replaceValue.toLowerCase());
-};
-
-const parseJsonMode = (value: unknown): TtsMode => {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return AUDIO_DEFAULT_MODE;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "strict" || normalized === "best_effort") {
-    return normalized;
-  }
-  throw new TtsIntegrationError(400, "invalid_mode", "mode must be strict or best_effort");
-};
-
-const parseJsonReplace = (value: unknown): boolean => {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "number") {
-    return value === 1;
-  }
-  if (typeof value === "string") {
-    return AUDIO_REPLACE_TRUE_VALUES.includes(value.trim().toLowerCase());
-  }
-  return false;
-};
-
-const looksLikeWav = (bytes: Uint8Array, mimeType?: string): boolean => {
-  if (mimeType?.toLowerCase().includes("wav")) {
-    return true;
-  }
-  if (bytes.length < 12) return false;
-  const riff = String.fromCharCode(...bytes.slice(0, 4));
-  const wave = String.fromCharCode(...bytes.slice(8, 12));
-  return riff === "RIFF" && wave === "WAVE";
-};
-
-const resolveSttModelPath = (
-  context: AppContext,
-  modelField: FormDataEntryValue | null
-): { requestedModel: string; modelPath: string } => {
-  const requestedModel = parseField(modelField) ?? process.env["LOCAL_STUDIO_STT_MODEL"]?.trim();
-  if (!requestedModel) {
-    throw new SttIntegrationError(
-      400,
-      "model_missing",
-      "No STT model provided. Set model field or LOCAL_STUDIO_STT_MODEL."
-    );
-  }
-
-  const modelPath = requestedModel.includes("/")
-    ? resolve(requestedModel)
-    : resolve(context.config.models_dir, "stt", requestedModel);
-
-  if (!existsSync(modelPath)) {
-    throw new SttIntegrationError(400, "model_not_found", "STT model path does not exist", {
-      requested_model: requestedModel,
-      resolved_model_path: modelPath,
-    });
-  }
-
-  return { requestedModel, modelPath };
-};
-
-const resolveTtsModelPath = (
-  context: AppContext,
-  modelValue: unknown
-): { requestedModel: string; modelPath: string } => {
-  const explicitModel = typeof modelValue === "string" ? modelValue.trim() : "";
-  const requestedModel = explicitModel || process.env["LOCAL_STUDIO_TTS_MODEL"]?.trim();
-  if (!requestedModel) {
-    throw new TtsIntegrationError(
-      400,
-      "model_missing",
-      "No TTS model provided. Set model field or LOCAL_STUDIO_TTS_MODEL."
-    );
-  }
-
-  const modelPath = requestedModel.includes("/")
-    ? resolve(requestedModel)
-    : resolve(context.config.models_dir, "tts", requestedModel);
-
-  if (!existsSync(modelPath)) {
-    throw new TtsIntegrationError(400, "model_not_found", "TTS model path does not exist", {
-      requested_model: requestedModel,
-      resolved_model_path: modelPath,
-    });
-  }
-
-  return { requestedModel, modelPath };
-};
-
-const ensureServiceLease = async (
-  context: AppContext,
-  mode: SttMode | TtsMode,
-  replace: boolean,
-  serviceId: "stt" | "tts"
-): Promise<Record<string, unknown> | null> => {
-  const holder = await context.processManager.findInferenceProcess(context.config.inference_port);
-  if (!holder) {
-    return null;
-  }
-
-  if (replace) {
-    const result = await context.engineService.setActiveRecipe(null);
-    if (!result.ok) {
-      return {
-        code: "gpu_lease_evict_failed",
-        requested_service: { id: serviceId },
-        holder_service: { id: "llm" },
-        error: result.error,
-      };
-    }
-    return null;
-  }
-
-  if (mode === "best_effort") {
-    return null;
-  }
-
-  return {
-    code: "gpu_lease_conflict",
-    requested_service: { id: serviceId },
-    holder_service: { id: "llm" },
-    actions: ["replace", "best_effort"],
-  };
-};
-
-const defaultTranscodeToWav = async (options: {
-  sourcePath: string;
-  outputPath: string;
-}): Promise<string> => {
-  const ffmpegPath = resolveBinary(process.env["LOCAL_STUDIO_FFMPEG_CLI"] ?? "ffmpeg");
-  if (!ffmpegPath) {
-    throw new SttIntegrationError(
-      503,
-      "ffmpeg_missing",
-      "ffmpeg is required for non-WAV uploads. Install ffmpeg or upload WAV input."
-    );
-  }
-
-  const result = await runCliCommand({
-    command: ffmpegPath,
-    args: [
-      "-y",
-      "-i",
-      options.sourcePath,
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-f",
-      "wav",
-      options.outputPath,
-    ],
-    timeoutMs: AUDIO_TRANSCODE_TIMEOUT_MS,
-  });
-
-  if (result.timedOut) {
-    throw new SttIntegrationError(504, "audio_transcode_timeout", "Audio transcode timed out", {
-      stderr: result.stderr,
-      stdout: result.stdout,
-    });
-  }
-
-  if (result.exitCode !== 0) {
-    throw new SttIntegrationError(
-      400,
-      "audio_transcode_failed",
-      "Failed to transcode audio to WAV",
-      {
-        exit_code: result.exitCode,
-        signal: result.signal,
-        stderr: result.stderr,
-        stdout: result.stdout,
-      }
-    );
-  }
-
-  return options.outputPath;
-};
+  boundedFormData,
+  readBoundedRequestBody,
+  RequestBodyTooLargeError,
+} from "../../http/bounded-body";
+import { SttIntegrationError, transcribeAudio } from "../../services/stt";
+import { synthesizeSpeech, TtsIntegrationError } from "../../services/tts";
+import type { AudioRouteDependencies } from "./interfaces";
+import { SpeechServiceError } from "../speech/service";
+import { VoiceProfileError } from "../speech/voice-store";
+const AUDIO_TEMP_PATH_SEGMENTS = ["tmp", "audio"];
+// Cap the STT upload so a single large POST can't buffer unbounded bytes into
+// memory and OOM the controller. Generous for any real speech clip.
+const MAX_STT_UPLOAD_BYTES = 100 * 1024 * 1024;
+const MAX_STT_REQUEST_BYTES = MAX_STT_UPLOAD_BYTES + 1024 * 1024;
+const MAX_TTS_REQUEST_BYTES = 64 * 1024;
+const JsonObjectSchema = Schema.Record(Schema.String, Schema.Unknown);
+import {
+  defaultTranscodeToWav,
+  ensureServiceLease,
+  looksLikeWav,
+  parseField,
+  parseJsonMode,
+  parseMode,
+  resolveSttModelPath,
+  resolveTtsModelPath,
+} from "./helpers";
 
 export const registerAudioRoutes = (
   app: Hono,
   context: AppContext,
-  dependencies: AudioRouteDependencies = {}
+  dependencies: AudioRouteDependencies = {},
 ): void => {
   const transcribe = dependencies.transcribe ?? transcribeAudio;
   const transcodeToWav = dependencies.transcodeToWav ?? defaultTranscodeToWav;
@@ -230,18 +46,33 @@ export const registerAudioRoutes = (
     const cleanupPaths = new Set<string>();
 
     try {
-      const formData = await ctx.req.formData();
+      const formData = await boundedFormData(ctx.req.raw, MAX_STT_REQUEST_BYTES).catch(
+        (error) => {
+          if (error instanceof RequestBodyTooLargeError) throw error;
+          throw new SttIntegrationError(
+            400,
+            "invalid_multipart",
+            "Request body must be multipart/form-data",
+          );
+        },
+      );
       const file = formData.get("file");
       if (!(file instanceof File)) {
         throw new SttIntegrationError(400, "file_missing", "Multipart field 'file' is required");
       }
+      if (file.size > MAX_STT_UPLOAD_BYTES) {
+        throw new SttIntegrationError(
+          413,
+          "file_too_large",
+          `Audio upload exceeds the ${Math.round(MAX_STT_UPLOAD_BYTES / (1024 * 1024))} MB limit`,
+        );
+      }
 
       const mode = parseMode(formData.get("mode"));
-      const replace = parseReplace(formData.get("replace"));
       const language = parseField(formData.get("language"));
       const { modelPath } = resolveSttModelPath(context, formData.get("model"));
 
-      const conflict = await ensureServiceLease(context, mode, replace, "stt");
+      const conflict = await ensureServiceLease(context, mode, "stt");
       if (conflict) {
         return ctx.json(conflict, { status: 409 });
       }
@@ -256,7 +87,7 @@ export const registerAudioRoutes = (
       await writeFile(uploadPath, uploadBuffer);
 
       let audioPath = uploadPath;
-      if (!looksLikeWav(uploadBuffer, file.type)) {
+      if (!looksLikeWav(uploadBuffer)) {
         const wavPath = join(temporaryDirectory, `${randomUUID()}.wav`);
         cleanupPaths.add(wavPath);
         audioPath = await transcodeToWav({
@@ -275,12 +106,21 @@ export const registerAudioRoutes = (
         throw new SttIntegrationError(
           502,
           "stt_empty_result",
-          "STT completed but returned an empty transcript"
+          "STT completed but returned an empty transcript",
         );
       }
 
       return ctx.json({ text: transcription.text });
     } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return ctx.json(
+          {
+            code: "file_too_large",
+            error: `Audio upload exceeds the ${Math.round(MAX_STT_UPLOAD_BYTES / (1024 * 1024))} MB limit`,
+          },
+          { status: 413 },
+        );
+      }
       if (error instanceof SttIntegrationError) {
         return ctx.json(
           {
@@ -288,7 +128,7 @@ export const registerAudioRoutes = (
             error: error.message,
             ...error.details,
           },
-          { status: error.status }
+          { status: error.status },
         );
       }
 
@@ -302,7 +142,7 @@ export const registerAudioRoutes = (
           error: "Internal STT error",
           details: String(error),
         },
-        { status: 500 }
+        { status: 500 },
       );
     } finally {
       await Promise.all(
@@ -312,7 +152,7 @@ export const registerAudioRoutes = (
           } catch {
             // Ignore cleanup failures.
           }
-        })
+        }),
       );
     }
   });
@@ -323,8 +163,11 @@ export const registerAudioRoutes = (
     try {
       let body: Record<string, unknown> = {};
       try {
-        body = (await ctx.req.json()) as Record<string, unknown>;
-      } catch {
+        const bytes = await readBoundedRequestBody(ctx.req.raw, MAX_TTS_REQUEST_BYTES);
+        const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+        body = Schema.decodeUnknownSync(JsonObjectSchema)(parsed);
+      } catch (error) {
+        if (error instanceof RequestBodyTooLargeError) throw error;
         body = {};
       }
 
@@ -333,7 +176,7 @@ export const registerAudioRoutes = (
         throw new TtsIntegrationError(
           400,
           "input_missing",
-          "input is required and cannot be empty"
+          "input is required and cannot be empty",
         );
       }
 
@@ -345,20 +188,38 @@ export const registerAudioRoutes = (
         throw new TtsIntegrationError(
           400,
           "unsupported_response_format",
-          "Only response_format='wav' is supported"
+          "Only response_format='wav' is supported",
         );
       }
 
+      const requestedModel = typeof body["model"] === "string" ? body["model"].trim() : "";
+      if (requestedModel === CHATTERBOX_BACKEND) {
+        const voiceId = typeof body["voice"] === "string" ? body["voice"].trim() : "";
+        if (!voiceId) {
+          throw new SpeechServiceError(
+            400,
+            "voice_required",
+            "voice is required for Chatterbox speech",
+          );
+        }
+        const output = await context.speechService.synthesize({ text: input, voiceId });
+        const audio = new ArrayBuffer(output.audio.byteLength);
+        new Uint8Array(audio).set(output.audio);
+        return new Response(audio, {
+          status: 200,
+          headers: { "Content-Type": output.contentType },
+        });
+      }
+
       const mode = parseJsonMode(body["mode"]);
-      const replace = parseJsonReplace(body["replace"]);
       const { modelPath } = resolveTtsModelPath(context, body["model"]);
 
-      const conflict = await ensureServiceLease(context, mode, replace, "tts");
+      const conflict = await ensureServiceLease(context, mode, "tts");
       if (conflict) {
         return ctx.json(conflict, { status: 409 });
       }
 
-      const temporaryDirectory = join(context.config.data_dir, "tmp", "audio");
+      const temporaryDirectory = join(context.config.data_dir, ...AUDIO_TEMP_PATH_SEGMENTS);
       await mkdir(temporaryDirectory, { recursive: true });
 
       const outputPath = join(temporaryDirectory, `${randomUUID()}.wav`);
@@ -378,6 +239,15 @@ export const registerAudioRoutes = (
         },
       });
     } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return ctx.json(
+          { code: "request_too_large", error: "Speech request exceeds 64 KB" },
+          { status: 413 },
+        );
+      }
+      if (error instanceof SpeechServiceError || error instanceof VoiceProfileError) {
+        return Response.json({ code: error.code, error: error.message }, { status: error.status });
+      }
       if (error instanceof TtsIntegrationError) {
         return ctx.json(
           {
@@ -385,7 +255,7 @@ export const registerAudioRoutes = (
             error: error.message,
             ...error.details,
           },
-          { status: error.status }
+          { status: error.status },
         );
       }
 
@@ -399,7 +269,7 @@ export const registerAudioRoutes = (
           error: "Internal TTS error",
           details: String(error),
         },
-        { status: 500 }
+        { status: 500 },
       );
     } finally {
       await Promise.all(
@@ -409,7 +279,7 @@ export const registerAudioRoutes = (
           } catch {
             // Ignore cleanup failures.
           }
-        })
+        }),
       );
     }
   });

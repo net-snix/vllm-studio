@@ -13,7 +13,6 @@ function model(id: string, active = false): AgentModel {
     reasoning: false,
     vision: false,
     active,
-    tools: false,
   };
 }
 

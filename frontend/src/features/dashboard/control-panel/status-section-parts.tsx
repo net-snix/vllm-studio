@@ -1,14 +1,14 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Info, Moon, Square, Sun } from "@/ui/icon-registry";
+import { Moon, Square, Sun } from "@/ui/icon-registry";
 import { useShallow } from "zustand/react/shallow";
-import { ModelStopConfirm } from "@/ui/model-stop-confirm";
+import { ModelStopConfirm } from "@/features/dashboard/model-stop-confirm";
 import { useModelLifecycle } from "@/features/dashboard/use-model-lifecycle";
 import type { ProcessInfo, RecipeWithStatus, RuntimePlatformKind } from "@/lib/types";
 import { useAppStore } from "@/store";
 import { ModelsDropdown } from "./status-section-models-dropdown";
-import type { CompactMetricView, MetricColumnView, RuntimeMetricView } from "./status-section-view";
+import type { CompactMetricView, MetricColumnView } from "./status-section-view";
 
 export function StatusHeader({
   backend,
@@ -46,7 +46,9 @@ export function StatusHeader({
   recipes?: RecipeWithStatus[];
 }) {
   return (
-    <div className="flex items-start justify-between gap-3">
+    // Stacks on phone widths: the five header actions would otherwise crush
+    // the status line and model name into overlapping slivers.
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0 flex-1">
         <StatusLine
           backend={backend}
@@ -95,9 +97,9 @@ function StatusLine({
   isStatusLoading: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 text-[length:var(--fs-sm)] tracking-[0.04em]">
+    <div className="flex flex-wrap items-center gap-2 text-[length:var(--fs-sm)]">
       <StatusDot running={isRunning} loading={isStatusLoading} />
-      <span className="inline-block w-[5.75rem] font-medium uppercase tracking-[0.14em] text-(--dim)">
+      <span className="inline-block w-[5.75rem] font-medium text-(--dim)">
         {isRunning ? "Active" : "Standby"}
       </span>
       {!isConnected && !isStatusLoading ? <Tag tone="err">offline</Tag> : null}
@@ -136,7 +138,7 @@ function StatusHeaderActions({
   recipes?: RecipeWithStatus[];
 }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex flex-wrap items-center gap-1.5">
       <HeaderThemeToggle />
       <HeaderStopButton running={isRunning} />
       {recipes && onLaunch ? (
@@ -212,10 +214,8 @@ export function StatusMetricStrip({
   compactMetrics: CompactMetricView[];
   metricColumns: MetricColumnView[];
 }) {
-  // Mirrors the usage page's header strip exactly: six even columns of mono
-  // stats separated by hairline rules, values at a fixed type size.
   return (
-    <dl className="mt-5 grid w-full grid-cols-2 border-b border-(--border)/40 pb-5 sm:grid-cols-3 lg:grid-cols-6">
+    <dl className="mt-5 grid w-full grid-cols-2 gap-x-8 gap-y-4 border-b border-(--separator) pb-5 sm:grid-cols-3 lg:grid-cols-6">
       {metricColumns.map((metric) => (
         <MetricCell
           key={metric.label}
@@ -233,35 +233,6 @@ export function StatusMetricStrip({
   );
 }
 
-export function RuntimeMetricGrid({ metrics }: { metrics: RuntimeMetricView[] }) {
-  return (
-    <dl className="mt-3 grid gap-2 font-mono text-[length:var(--fs-xs)] text-(--dim) sm:grid-cols-4">
-      {metrics.map((metric) => (
-        <RuntimeMetric key={metric.label} {...metric} />
-      ))}
-    </dl>
-  );
-}
-
-function RuntimeMetric({ label, title, value }: RuntimeMetricView) {
-  return (
-    <div
-      className="flex min-w-0 items-baseline justify-between gap-2 border-t border-(--border)/25 pt-1"
-      title={title}
-    >
-      <dt className="truncate uppercase tracking-[0.12em]">{label}</dt>
-      <dd
-        className="truncate text-(--fg)"
-        aria-label={title ? `${label}: ${value}. ${title}` : undefined}
-      >
-        {value}
-      </dd>
-    </div>
-  );
-}
-
-/* One cell shape for all six stats, identical to the usage page's HeaderStat:
-   mono 2xs label, fixed 2xl mono value, optional mono detail line. */
 function MetricCell({
   label,
   value,
@@ -276,11 +247,9 @@ function MetricCell({
   detailTitle?: string;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden border-r border-(--border)/40 pr-2 pl-3 first:pl-0 last:border-r-0 sm:pr-4 sm:pl-5">
-      <dt className="truncate font-mono text-[length:var(--fs-2xs)] font-medium uppercase tracking-[0.18em] text-(--dim)/75">
-        {label}
-      </dt>
-      <dd className="mt-1 flex min-w-0 items-baseline gap-1 font-mono text-[length:var(--fs-2xl)] leading-none tabular-nums text-(--fg)">
+    <div className="min-w-0 overflow-hidden">
+      <dt className="truncate text-[length:var(--fs-xs)] text-(--dim)">{label}</dt>
+      <dd className="mt-1 flex min-w-0 items-baseline gap-1 text-[length:var(--fs-2xl)] font-semibold leading-none tabular-nums text-(--fg)">
         <span className="truncate" title={value}>
           {value}
         </span>
@@ -289,16 +258,11 @@ function MetricCell({
         ) : null}
       </dd>
       {detail ? (
-        <dd className="mt-1 flex min-w-0 items-center gap-1 font-mono text-[length:var(--fs-xs)] tabular-nums text-(--dim)">
-          <span className="truncate">{detail}</span>
-          {detailTitle ? (
-            <Info
-              className="h-3 w-3 shrink-0 text-(--dim)/70 hover:text-(--fg)"
-              aria-label={detailTitle}
-            >
-              <title>{detailTitle}</title>
-            </Info>
-          ) : null}
+        <dd
+          className="mt-1 min-w-0 truncate text-[length:var(--fs-xs)] tabular-nums text-(--dim)/75"
+          title={detailTitle}
+        >
+          {detail}
         </dd>
       ) : null}
     </div>
@@ -314,11 +278,10 @@ function StatusDot({ running, loading }: { running: boolean; loading?: boolean }
 }
 
 function Tag({ tone, children }: { tone?: "err"; children: ReactNode }) {
-  const cls =
-    tone === "err" ? "border-(--err)/60 text-(--err)" : "border-(--border)/70 text-(--dim)";
+  const cls = tone === "err" ? "border-(--err)/60 text-(--err)" : "border-(--border) text-(--dim)";
   return (
     <span
-      className={`border px-1.5 py-[1px] font-mono text-[length:var(--fs-2xs)] uppercase tracking-[0.14em] ${cls}`}
+      className={`rounded-full border px-2 py-[1px] text-[length:var(--fs-2xs)] font-medium ${cls}`}
     >
       {children}
     </span>
@@ -338,7 +301,7 @@ function ActionBtn({
     <button
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
-      className="h-7 rounded-[var(--rad-2xs)] border border-(--border)/70 px-2.5 font-mono text-[length:var(--fs-xs)] uppercase tracking-[0.12em] text-(--dim) transition-colors hover:border-(--border) hover:bg-(--fg)/5 hover:text-(--fg) disabled:cursor-not-allowed disabled:opacity-30"
+      className="h-7 rounded-full bg-(--fg)/5 px-3 text-[length:var(--fs-sm)] text-(--fg)/85 transition-colors hover:bg-(--fg)/10 hover:text-(--fg) disabled:cursor-not-allowed disabled:opacity-30"
     >
       {label}
     </button>

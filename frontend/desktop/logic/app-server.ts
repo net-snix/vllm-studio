@@ -5,8 +5,19 @@ import { fork, type ChildProcess } from "node:child_process";
 import { DESKTOP_CONFIG, resolveStandaloneBaseDir, resolveStaticAssetsSource } from "../configs";
 import type { DesktopServerRuntime } from "../types";
 import { log } from "../helpers/logger";
+import { registerOAuthVault } from "./oauth-vault";
 import { resolveStablePort } from "../helpers/ports";
 import { resolveAugmentedPath } from "../helpers/resolve-path";
+
+// The most recently forked embedded server. A single process-exit hook kills
+// whichever child is current — registering a fresh once("exit") per (re)start
+// leaked listeners on every frontend restart.
+let currentEmbeddedServer: ChildProcess | null = null;
+process.once("exit", () => {
+  if (currentEmbeddedServer && !currentEmbeddedServer.killed) {
+    currentEmbeddedServer.kill("SIGTERM");
+  }
+});
 
 interface ServerHandle {
   runtime: DesktopServerRuntime;
@@ -57,8 +68,13 @@ function persistPort(port: number): void {
 }
 
 function writeEmbeddedServerPid(pid: number | undefined): void {
-  mkdirSync(DESKTOP_CONFIG.userDataDir, { recursive: true });
-  writeFileSync(embeddedServerPidPath(), String(pid ?? ""));
+  try {
+    mkdirSync(DESKTOP_CONFIG.userDataDir, { recursive: true });
+    writeFileSync(embeddedServerPidPath(), String(pid ?? ""));
+  } catch {
+    // Non-fatal: stale-pid cleanup just won't find a file next launch. The
+    // server is already running; failing here would orphan it.
+  }
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -70,12 +86,20 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 async function killStaleEmbeddedServer(): Promise<void> {
   const pidFile = embeddedServerPidPath();
   if (!existsSync(pidFile)) return;
   const pid = Number(readFileSync(pidFile, "utf8"));
   rmSync(pidFile, { force: true });
-  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || !isProcessAlive(pid)) return;
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || !isProcessAlive(pid)) {
+    return;
+  }
   try {
     process.kill(pid, "SIGTERM");
   } catch {
@@ -83,14 +107,12 @@ async function killStaleEmbeddedServer(): Promise<void> {
   }
   const startedAt = Date.now();
   while (Date.now() - startedAt < 1_500 && isProcessAlive(pid)) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await delay(100);
   }
   if (isProcessAlive(pid)) {
     try {
       process.kill(pid, "SIGKILL");
-    } catch {
-      // already gone
-    }
+    } catch {}
   }
 }
 
@@ -119,10 +141,8 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
       if (response.ok || response.status === 307 || response.status === 308) {
         return;
       }
-    } catch {
-      // Keep polling until timeout.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    } catch {}
+    await delay(300);
   }
 
   throw new Error(`Timed out waiting for embedded frontend server: ${url}`);
@@ -186,27 +206,20 @@ export async function startFrontendServer(
     detached: false,
     env: {
       ...process.env,
-      // Restore the user's real login-shell PATH. A Finder/Dock/`open`-launched
-      // app inherits a stripped PATH, so MCP servers spawned by the agent (e.g.
-      // `npx -y <server>`) would otherwise fail with ENOENT and the model would
-      // silently fall back to shell commands instead of the plugin's tools.
       PATH: resolveAugmentedPath(),
       NODE_ENV: "production",
       PORT: String(port),
       HOSTNAME: "127.0.0.1",
       NEXT_TELEMETRY_DISABLED: "1",
+      LOCAL_STUDIO_DESKTOP: "1",
       LOCAL_STUDIO_DATA_DIR: DESKTOP_CONFIG.userDataDir,
       LOCAL_STUDIO_RESOURCES_PATH: process.resourcesPath,
-      // In packaged Electron, process.cwd() is "/" — pi-runtime.resolveDefaultAgentCwd
-      // does the right thing (prefers the most-recently-added project, falls back
-      // to $HOME) when this env is empty, so leave it unset unless the operator
-      // explicitly supplied one.
       LOCAL_STUDIO_AGENT_CWD: process.env.LOCAL_STUDIO_AGENT_CWD || app.getPath("home"),
-      // Expose the embedded server's own URL so the pi browser extension can
-      // call back into /api/agent/browser/*.
       LOCAL_STUDIO_FRONTEND_BASE: url,
     },
   });
+
+  registerOAuthVault(child, DESKTOP_CONFIG.userDataDir);
 
   child.stdout?.on("data", (chunk: Buffer | string) => {
     log.info(`frontend: ${String(chunk).trim()}`);
@@ -230,9 +243,7 @@ export async function startFrontendServer(
     options.onExit?.({ code, signal, pid: child.pid });
   });
 
-  process.once("exit", () => {
-    if (!child.killed) child.kill("SIGTERM");
-  });
+  currentEmbeddedServer = child;
 
   await waitForServer(url, DESKTOP_CONFIG.startupTimeoutMs);
 
@@ -248,7 +259,6 @@ export async function startFrontendServer(
 
 export async function stopFrontendServer(handle?: ServerHandle): Promise<void> {
   if (!handle?.process) return;
-
   const child = handle.process;
   const pid = child.pid;
   try {
@@ -265,9 +275,7 @@ export async function stopFrontendServer(handle?: ServerHandle): Promise<void> {
       if (pid && isProcessAlive(pid)) {
         try {
           process.kill(pid, "SIGKILL");
-        } catch {
-          // already gone
-        }
+        } catch {}
       }
       resolve();
     }, 5_000);

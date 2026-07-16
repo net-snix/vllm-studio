@@ -1,4 +1,4 @@
-import type { EngineBackend, RuntimeTarget } from "../../shared/system-types";
+import type { EngineBackend, RuntimeTarget } from "@local-studio/contracts/system";
 import {
   getVllmUpgradeVersion,
   isUpgradeCommandConfigured,
@@ -6,6 +6,7 @@ import {
   SGLANG_UPGRADE_ENV,
   VLLM_UPGRADE_VERSION_ENV,
 } from "./upgrade-config";
+import { normalizePackageSpec } from "./runtime-target-probes";
 
 type RuntimeTargetSource = RuntimeTarget["source"];
 type RuntimeTargetKind = RuntimeTarget["kind"];
@@ -45,7 +46,7 @@ const createCapabilities = (target: {
 const createHealth = (
   installed: boolean,
   source: RuntimeTargetSource,
-  message?: string
+  message?: string,
 ): RuntimeTarget["health"] => {
   let status: RuntimeHealthStatus = installed ? "ok" : "warning";
   if (source === "running") status = "ok";
@@ -61,10 +62,7 @@ const RELEASE_NOTES: Record<EngineBackend, string> = {
 };
 
 const packageSpecForTarget = (backend: EngineBackend): string => {
-  if (backend === "vllm") {
-    const target = getVllmUpgradeVersion().trim();
-    return target ? `vllm==${target}` : "vllm";
-  }
+  if (backend === "vllm") return normalizePackageSpec("vllm", getVllmUpgradeVersion());
   if (backend === "sglang") return "sglang";
   if (backend === "mlx") return "mlx-lm";
   return "configured llama.cpp upgrade command";

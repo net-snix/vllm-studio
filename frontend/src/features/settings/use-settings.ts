@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useRef, useState } from "react";
 import api from "@/lib/api/client";
 import { createApiClient } from "@/lib/api/create-api-client";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import {
   clearApiKey,
   clearStoredBackendUrl,
@@ -13,6 +14,7 @@ import {
   setStoredBackendUrl,
 } from "@/lib/api/connection";
 import { normalizeControllerUrl } from "@/lib/api/controllers";
+import { readPageCache, writePageCache } from "@/lib/page-data-cache";
 import { scheduleDurableUiPreferencesSave } from "@/lib/desktop-ui-preferences";
 import type { CompatibilityReport, ConfigData } from "@/lib/types";
 import type { ApiConnectionSettings, ConnectionStatus } from "./types";
@@ -28,8 +30,6 @@ const DEFAULT_API_SETTINGS: ApiConnectionSettings = {
   backendUrl: DEFAULT_BACKEND_URL,
   apiKey: "",
   hasApiKey: false,
-  voiceUrl: "",
-  voiceModel: "whisper-large-v3-turbo",
 };
 
 const mergeApiSettings = (server?: Partial<ApiConnectionSettings>): ApiConnectionSettings => {
@@ -40,17 +40,26 @@ const mergeApiSettings = (server?: Partial<ApiConnectionSettings>): ApiConnectio
     backendUrl: localBackendUrl || server?.backendUrl || DEFAULT_API_SETTINGS.backendUrl,
     apiKey: localApiKey || server?.apiKey || "",
     hasApiKey: Boolean(localApiKey) || Boolean(server?.hasApiKey),
-    voiceUrl: server?.voiceUrl || DEFAULT_API_SETTINGS.voiceUrl,
-    voiceModel: server?.voiceModel || DEFAULT_API_SETTINGS.voiceModel,
   };
 };
 
 export function useSettings() {
-  const [data, setData] = useState<ConfigData | null>(null);
-  const [compatibilityReport, setCompatibilityReport] = useState<CompatibilityReport | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Stale-while-revalidate: seed from the last-loaded config so navigating to
+  // Settings paints instantly while the controller fetch refreshes it.
+  const [data, setData] = useState<ConfigData | null>(() =>
+    readPageCache<ConfigData>("settings:config"),
+  );
+  const [compatibilityReport, setCompatibilityReport] = useState<CompatibilityReport | null>(() =>
+    readPageCache<CompatibilityReport>("settings:compat"),
+  );
+  // Config/compat (the heavy /config + /compat controller round-trips) are only
+  // consumed by the System section. They load lazily the first time System is
+  // opened, so the default Connection landing paints from /api/settings alone.
+  // `loading` therefore starts false — nothing is in flight until then.
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const configRequestedRef = useRef(false);
 
   const [apiSettings, setApiSettings] = useState<ApiConnectionSettings>(DEFAULT_API_SETTINGS);
   const [apiSettingsLoading, setApiSettingsLoading] = useState(true);
@@ -127,6 +136,11 @@ export function useSettings() {
     try {
       await api.getStatus(FAST_STATUS_REQUEST);
       setBackendOnline(true);
+      // A reachable controller means first-run setup is effectively done. This
+      // flag used to be set by the config fetch, which now loads lazily.
+      if (typeof window !== "undefined" && !localStorage.getItem("local-studio-setup-complete")) {
+        localStorage.setItem("local-studio-setup-complete", "true");
+      }
       return true;
     } catch {
       setBackendOnline(false);
@@ -150,6 +164,8 @@ export function useSettings() {
       const configData = configResult.value;
       const compatibility =
         compatibilityResult.status === "fulfilled" ? compatibilityResult.value : null;
+      writePageCache("settings:config", configData);
+      if (compatibility) writePageCache("settings:compat", compatibility);
       setData(configData);
       setCompatibilityReport(compatibility);
       setBackendOnline(true);
@@ -178,8 +194,6 @@ export function useSettings() {
         body: JSON.stringify({
           backendUrl,
           apiKey: apiSettings.apiKey,
-          voiceUrl: apiSettings.voiceUrl,
-          voiceModel: apiSettings.voiceModel,
         }),
       });
       if (res.ok) {
@@ -211,16 +225,21 @@ export function useSettings() {
     }
   }, [apiSettings, loadConfig, persistLocalApiSettings]);
 
-  const subscribeConfigLoad = useCallback(
-    (_notify: () => void) => {
-      void loadConfig();
-      void loadApiSettings();
-      return () => {};
-    },
-    [loadApiSettings, loadConfig],
-  );
+  // Lazy trigger: called when the System section becomes active. Fires the
+  // config/compat fetch exactly once (subsequent visits reuse the cached data);
+  // explicit refresh via `loadConfig` still forces a reload.
+  const ensureConfigLoaded = useCallback(() => {
+    if (configRequestedRef.current) return;
+    configRequestedRef.current = true;
+    void loadConfig();
+  }, [loadConfig]);
 
-  useSyncExternalStore(subscribeConfigLoad, getConfigsSnapshot, getConfigsSnapshot);
+  useMountSubscription(() => {
+    void loadApiSettings();
+    // Cheap /status probe (not /config) so the first-run setup wizard gate still
+    // knows whether the controller is reachable without the heavy config fetch.
+    void checkBackendHealth();
+  }, [checkBackendHealth, loadApiSettings]);
 
   return {
     data,
@@ -235,6 +254,7 @@ export function useSettings() {
     statusMessage,
     setApiSettings,
     loadConfig,
+    ensureConfigLoaded,
     saveApiSettings,
     testConnection,
     hasConfigData: Boolean(data),
@@ -242,5 +262,3 @@ export function useSettings() {
     backendOnline,
   };
 }
-
-const getConfigsSnapshot = (): number => 0;

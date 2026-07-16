@@ -1,17 +1,9 @@
 "use client";
 
-import { ArrowUpCircle, DownloadCloud, Loader2 } from "@/ui/icon-registry";
+import { ArrowUpCircle, DownloadCloud } from "@/ui/icon-registry";
 import type { EngineBackend, EngineJob, RuntimeTarget } from "@/lib/types";
-import {
-  RowDetailLine,
-  RowFacts,
-  SettingsButton,
-  SettingsRow,
-  SettingsValue,
-  StatusPill,
-  type RowFact,
-  type UiTone,
-} from "@/ui";
+import { RowDetailLine, RowFacts, StatusPill, type RowFact, type UiTone, Spinner } from "@/ui";
+import { SettingsButton, SettingsRow, SettingsValue } from "./settings-ui";
 
 export const ENGINE_META: Record<string, { label: string; description: string }> = {
   vllm: {
@@ -149,7 +141,7 @@ export function ManagedRuntimeInstallRows({
             disabled={running || !onAction}
           >
             {running ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
+              <Spinner size="xs" />
             ) : installedTarget ? (
               <ArrowUpCircle className="h-3 w-3" />
             ) : (
@@ -252,11 +244,7 @@ function RuntimeTargetAction({
       disabled={disabled}
       title={canUpdate ? undefined : unsupportedReason}
     >
-      {running ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
-      ) : (
-        <ArrowUpCircle className="h-3 w-3" />
-      )}
+      {running ? <Spinner size="xs" /> : <ArrowUpCircle className="h-3 w-3" />}
       {running ? job?.status : canUpdate ? (target.installed ? "Update" : "Install") : "Managed"}
     </SettingsButton>
   );

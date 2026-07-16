@@ -1,54 +1,37 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useState, type DragEvent } from "react";
 import { safeJson } from "@/features/agent/safe-json";
-import { sessionRuntimeController } from "@/features/agent/runtime/session-runtime-controller";
 import { cleanSessionTitle } from "@/features/agent/messages/helpers";
+import {
+  markSessionActivitySeen,
+  sessionRows,
+  type SessionActivity,
+} from "@/features/agent/session-index";
+import { useSessionActivity } from "@/features/agent/ui/use-open-sessions";
 import {
   patchSessionPref,
   type SessionPref,
   type SessionPrefs,
 } from "@/features/agent/messages/prefs";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import { useProjectSessionsReloadEffect } from "@/features/agent/ui/projects-nav/use-projects-nav-effects";
 import { workspaceCommands } from "@/features/agent/workspace/commands";
 import type { Project as ProjectEntry } from "@/features/agent/projects/types";
 import { ChatIcon, Folder, FolderOpen, PlusIcon, TrashIcon } from "@/ui/icons";
 import {
-  activeSessionPref,
+  mergeActiveSessionPref,
   patchActiveSessionPref,
   relativeAge,
   rememberAgentSessionNavTitle,
-  sessionDedupeKey,
   setAgentSessionDragData,
   setSessionArchive,
 } from "./helpers";
 import { SessionNavRow } from "./session-nav-row";
 import type { ActiveAgentSession, SessionSummary } from "./types";
 
-/**
- * The set of session ids the runtime currently reports as actively working —
- * including sessions running in the BACKGROUND (not open in any pane). Lets the
- * sidebar show a working indicator on history rows so a turn started in another
- * chat isn't invisible after you switch away.
- */
-function useActiveRuntimeIds(): ReadonlySet<string> {
-  return useSyncExternalStore(
-    (notify) => sessionRuntimeController().subscribeActiveRuntimeIds(notify),
-    () => sessionRuntimeController().getActiveRuntimeIds(),
-    () => sessionRuntimeController().getActiveRuntimeIds(),
-  );
-}
-
-/** Session ids that finished working while you weren't looking — the dot. */
-function useUnseenFinishedIds(): ReadonlySet<string> {
-  return useSyncExternalStore(
-    (notify) => sessionRuntimeController().subscribeActiveRuntimeIds(notify),
-    () => sessionRuntimeController().getUnseenFinishedIds(),
-    () => sessionRuntimeController().getUnseenFinishedIds(),
-  );
-}
+const SESSIONS_PAGE_SIZE = 5;
 
 export function ProjectRow({
   project,
@@ -60,16 +43,26 @@ export function ProjectRow({
   prefs,
   excludedIds,
   icon = "folder",
+  reorderDraggable = false,
+  onReorderDragStart,
+  onReorderDragEnd,
+  onReorderDragOver,
+  onReorderDrop,
 }: {
   project: ProjectEntry;
   open: boolean;
   onToggle: () => void;
   onRemove?: () => void;
   onNewChatStart?: () => void;
-  activeSessions: ActiveAgentSession[];
+  activeSessions: readonly ActiveAgentSession[];
   prefs: SessionPrefs;
   excludedIds: ReadonlySet<string>;
   icon?: "folder" | "chat";
+  reorderDraggable?: boolean;
+  onReorderDragStart?: () => void;
+  onReorderDragEnd?: () => void;
+  onReorderDragOver?: (event: DragEvent) => void;
+  onReorderDrop?: () => void;
 }) {
   const [missingErrorVisible, setMissingErrorVisible] = useState(false);
   const handleToggle = () => {
@@ -83,7 +76,14 @@ export function ProjectRow({
 
   return (
     <div className="flex flex-col">
-      <div className="group relative flex h-7 items-center rounded-md pl-2 pr-1.5 text-(--dim)/70 transition-colors hover:bg-(--color-surface-hover) hover:text-(--fg)/80">
+      <div
+        className="group relative flex h-8 items-center rounded-lg pl-2 pr-1.5 text-(--fg) transition-colors hover:bg-(--hover)"
+        draggable={reorderDraggable}
+        onDragStart={onReorderDragStart}
+        onDragEnd={onReorderDragEnd}
+        onDragOver={onReorderDragOver}
+        onDrop={onReorderDrop}
+      >
         <button
           type="button"
           onClick={handleToggle}
@@ -91,9 +91,9 @@ export function ProjectRow({
           className="flex min-w-0 flex-1 items-center gap-2 px-0 pr-8 text-left"
         >
           {icon === "chat" ? (
-            <ChatIcon className="h-3.5 w-3.5 shrink-0 opacity-55 transition-opacity group-hover:opacity-75" />
+            <ChatIcon className="h-3.5 w-3.5 shrink-0 opacity-70 transition-opacity group-hover:opacity-90" />
           ) : (
-            <span className="relative h-3.5 w-3.5 shrink-0 opacity-55 transition-opacity group-hover:opacity-75">
+            <span className="relative h-3.5 w-3.5 shrink-0 opacity-70 transition-opacity group-hover:opacity-90">
               <Folder
                 className={`absolute inset-0 h-3.5 w-3.5 transition-all duration-150 ${open ? "scale-90 opacity-0" : "scale-100 opacity-100"}`}
               />
@@ -102,9 +102,7 @@ export function ProjectRow({
               />
             </span>
           )}
-          <span className="truncate text-[length:var(--fs-lg)] font-normal text-(--dim) transition-colors group-hover:text-(--fg)/85">
-            {project.name}
-          </span>
+          <span className="truncate text-[length:var(--fs-md)] font-normal">{project.name}</span>
           {!project.exists ? (
             <span
               className="h-1.5 w-1.5 shrink-0 rounded-full bg-(--warn)"
@@ -113,11 +111,11 @@ export function ProjectRow({
             />
           ) : null}
         </button>
-        <div className="absolute right-1.5 top-1/2 -translate-y-1/2 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="absolute right-1.5 top-1/2 -translate-y-1/2">
           <NewChatPlusButton
             projectId={project.id}
-            label={`New chat in ${project.name}`}
-            className="flex h-5 w-5 items-center justify-center text-(--dim)/55 hover:text-(--fg)/80"
+            label={`New task in ${project.name}`}
+            className="flex h-5 w-5 items-center justify-center text-(--dim)/55 opacity-0 transition-opacity hover:text-(--fg)/80 group-hover:opacity-100"
             onNavigateStart={onNewChatStart}
           />
         </div>
@@ -169,32 +167,23 @@ export function ProjectSessions({
   excludedIds,
 }: {
   project: ProjectEntry;
-  activeSessions: ActiveAgentSession[];
+  activeSessions: readonly ActiveAgentSession[];
   prefs: SessionPrefs;
   excludedIds: ReadonlySet<string>;
 }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const activeRuntimeIds = useActiveRuntimeIds();
-  const unseenFinishedIds = useUnseenFinishedIds();
+  const [visibleLimit, setVisibleLimit] = useState(SESSIONS_PAGE_SIZE);
+  const activity = useSessionActivity();
   const projectActiveSessions = useMemo(
     () => activeSessions.filter((session) => session.projectId === project.id),
     [activeSessions, project.id],
-  );
-  const activePiSessionIds = useMemo(
-    () =>
-      new Set(
-        projectActiveSessions
-          .map((session) => session.piSessionId)
-          .filter((id): id is string => Boolean(id)),
-      ),
-    [projectActiveSessions],
   );
   const reload = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch(
-        `/api/agent/sessions?cwd=${encodeURIComponent(project.path)}&since=7d`,
+        `/api/agent/sessions?cwd=${encodeURIComponent(project.path)}&since=7d&limit=${visibleLimit + 1}`,
         { cache: "no-store" },
       );
       const payload = await safeJson<{ sessions?: SessionSummary[] }>(response);
@@ -204,127 +193,89 @@ export function ProjectSessions({
     } finally {
       setLoading(false);
     }
-  }, [project.path]);
+  }, [project.path, visibleLimit]);
 
   useProjectSessionsReloadEffect(reload);
 
   const visibleActiveSessions = useMemo(
     () =>
       projectActiveSessions.filter((session) => {
-        const pref = activeSessionPref(session, prefs);
+        const pref = mergeActiveSessionPref(session, prefs);
         if (pref?.pinned) return false;
-        if (session.piSessionId && excludedIds.has(session.piSessionId)) return false;
+        if (session.threadId && excludedIds.has(session.threadId)) return false;
         return !pref?.hidden;
       }),
     [projectActiveSessions, prefs, excludedIds],
   );
   const recent = useMemo(() => {
-    const seen = new Set<string>();
-    const recentSessions: SessionSummary[] = [];
-    for (const session of sessions ?? []) {
-      if (activePiSessionIds.has(session.id)) continue;
-      if (excludedIds.has(session.id)) continue;
-      if (prefs[session.id]?.pinned) continue;
-      if (prefs[session.id]?.hidden) continue;
-      const key = sessionDedupeKey(session);
-      if (seen.has(session.id) || seen.has(key)) continue;
-      seen.add(session.id);
-      seen.add(key);
-      recentSessions.push(session);
-    }
-    return recentSessions;
-  }, [sessions, activePiSessionIds, excludedIds, prefs]);
-
-  // Original start time per session id, from the server history list (stable —
-  // it does not change when a session is opened). Used to anchor an open
-  // session to its real position even if its live snapshot's startedAt was
-  // reset on open.
-  const historyStartByPiId = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const session of sessions ?? []) {
-      const at = Date.parse(session.startedAt) || 0;
-      if (at) map.set(session.id, at);
-    }
-    return map;
-  }, [sessions]);
-
-  // ONE list ordered by stable start time. Open sessions are NOT promoted to a
-  // separate top block — that made opening a chat reshuffle the sidebar and lose
-  // the user's place. Each session keeps its position whether or not it's open;
-  // the open one just renders as a live ActiveSessionRow in situ.
-  const orderedRows = useMemo<NavRow[]>(() => {
-    const rows: NavRow[] = [];
-    for (const session of visibleActiveSessions) {
-      const historyStart = session.piSessionId
-        ? historyStartByPiId.get(session.piSessionId)
-        : undefined;
-      rows.push({
-        kind: "active",
-        key: `${session.paneId}:${session.tabId}`,
-        sortAt: historyStart ?? (Date.parse(session.startedAt ?? session.updatedAt) || 0),
-        active: session,
-      });
-    }
-    for (const session of recent) {
-      rows.push({
-        kind: "recent",
-        key: session.id,
-        sortAt: Date.parse(session.startedAt) || 0,
-        recent: session,
-      });
-    }
-    rows.sort((a, b) => b.sortAt - a.sortAt);
-    return rows;
-  }, [visibleActiveSessions, recent, historyStartByPiId]);
+    return (sessions ?? []).filter(
+      (session) =>
+        !excludedIds.has(session.id) && !prefs[session.id]?.pinned && !prefs[session.id]?.hidden,
+    );
+  }, [sessions, excludedIds, prefs]);
+  const orderedRows = useMemo(
+    () => sessionRows(visibleActiveSessions, recent, activity),
+    [visibleActiveSessions, recent, activity],
+  );
+  const visibleRows = orderedRows.slice(0, visibleLimit);
+  const hasMore = orderedRows.length > visibleLimit || (sessions?.length ?? 0) > visibleLimit;
 
   return (
-    <div className="flex flex-col">
+    <div className="ml-[17px] flex flex-col border-l border-(--border) pl-1">
       {loading && !sessions ? (
         <div className="pl-2 pr-2 py-0.5 text-[length:var(--fs-sm)] text-(--dim)">Loading...</div>
       ) : orderedRows.length === 0 ? (
         <div className="pl-2 pr-2 py-0.5 text-[length:var(--fs-sm)] text-(--dim)">No chats</div>
       ) : (
-        orderedRows.map((row) =>
-          row.kind === "active" ? (
+        visibleRows.map((row) =>
+          row.kind === "open" ? (
             <ActiveSessionRow
               key={row.key}
               project={project}
-              session={row.active}
-              pref={activeSessionPref(row.active, prefs)}
+              session={row.session}
+              pref={mergeActiveSessionPref(row.session, prefs)}
+              activity={row.activity}
             />
           ) : (
             <SessionRow
               key={row.key}
               project={project}
-              session={row.recent}
-              pref={prefs[row.recent.id] ?? {}}
-              isRunning={activeRuntimeIds.has(row.recent.id)}
-              unseen={unseenFinishedIds.has(row.recent.id)}
+              session={row.session}
+              pref={prefs[row.session.id] ?? {}}
+              isRunning={row.activity === "running"}
+              unseen={row.activity === "unseen"}
             />
           ),
         )
       )}
+      {hasMore ? (
+        <button
+          type="button"
+          onClick={() => setVisibleLimit((value) => value + SESSIONS_PAGE_SIZE)}
+          className="flex h-7 items-center rounded-lg pl-3 pr-2 text-left text-[length:var(--fs-sm)] text-(--dim) transition-colors hover:bg-(--hover) hover:text-(--fg)"
+        >
+          Show more
+        </button>
+      ) : null}
     </div>
   );
 }
-
-type NavRow =
-  | { kind: "active"; key: string; sortAt: number; active: ActiveAgentSession }
-  | { kind: "recent"; key: string; sortAt: number; recent: SessionSummary };
 
 export function ActiveSessionRow({
   project,
   session,
   pref,
+  activity,
 }: {
   project: ProjectEntry;
   session: ActiveAgentSession;
   pref: SessionPref;
+  activity: SessionActivity;
 }) {
   const label =
     cleanSessionTitle(pref.title) || cleanSessionTitle(session.title) || "Current session";
   const isFocused = session.focused === true;
-  const rowClass = `group relative flex h-6 items-center rounded-md pl-3 pr-0 transition-colors ${isFocused ? "bg-(--color-surface-hover) text-(--fg)" : "text-(--fg)/72 hover:bg-(--color-surface-hover) hover:text-(--fg)/95"}`;
+  const rowClass = `group relative flex h-7 items-center rounded-lg pl-3 pr-0 transition-colors ${isFocused ? "bg-(--active) text-(--fg)" : "text-(--fg)/85 hover:bg-(--hover) hover:text-(--fg)"}`;
 
   return (
     <SessionNavRow
@@ -333,26 +284,41 @@ export function ActiveSessionRow({
       initialDraft={cleanSessionTitle(pref.title) || cleanSessionTitle(session.title)}
       age={relativeAge(session.startedAt ?? session.updatedAt)}
       rowClass={rowClass}
-      href={
-        session.piSessionId
-          ? `/agent?project=${encodeURIComponent(project.id)}&session=${encodeURIComponent(session.piSessionId)}`
-          : undefined
-      }
-      onOpen={() => workspaceCommands().focusSession(session.paneId, session.tabId)}
+      href={`/agent?project=${encodeURIComponent(project.id)}${
+        session.threadId ? `&session=${encodeURIComponent(session.threadId)}&replace=1` : ""
+      }`}
+      onOpen={() => {
+        if (session.paneId) {
+          workspaceCommands().focusSession(session.paneId, session.id, {
+            replaceWorkspace: true,
+          });
+        }
+      }}
       onPatchPref={(patch) => patchActiveSessionPref(session, patch)}
       onRenameCommit={(trimmed) =>
         workspaceCommands().renameSession(
           session.paneId,
-          session.tabId,
+          session.id,
           cleanSessionTitle(trimmed) || cleanSessionTitle(session.title) || label,
         )
       }
-      onRememberTitle={() => rememberAgentSessionNavTitle(session.piSessionId, label)}
-      onDragStart={(event) => setAgentSessionDragData(event, session)}
-      isRunning={session.status !== "idle" && session.status !== "done"}
-      unseen={session.unseen === true && !isFocused}
+      onRememberTitle={() => {
+        rememberAgentSessionNavTitle(session.threadId, label);
+        markSessionActivitySeen(session.id, session.threadId);
+      }}
+      onDragStart={(event) =>
+        setAgentSessionDragData(event, {
+          piSessionId: session.threadId,
+          projectId: session.projectId,
+          cwd: session.cwd,
+          paneId: session.paneId,
+          tabId: session.id,
+          title: session.title,
+        })
+      }
+      isRunning={activity === "running"}
+      unseen={activity === "unseen" && !isFocused}
       canDoubleClickRename
-      menuIconClass="h-3.5 w-3.5"
       renameInputClass="text-[length:var(--fs-xs)]"
     />
   );
@@ -384,9 +350,9 @@ export function SessionRow({
       age={relativeAge(session.startedAt)}
       isRunning={isRunning}
       unseen={unseen}
-      rowClass="group relative flex h-6 items-center rounded-md pl-3 pr-0 text-(--fg)/72 transition-colors hover:bg-(--color-surface-hover) hover:text-(--fg)/95"
-      renameRowClass="flex h-6 items-center rounded-md bg-(--surface)/40 pl-3 pr-1"
-      href={`/agent?project=${encodeURIComponent(project.id)}&session=${encodeURIComponent(session.id)}`}
+      rowClass="group relative flex h-7 items-center rounded-lg pl-3 pr-0 text-(--fg)/85 transition-colors hover:bg-(--hover) hover:text-(--fg)"
+      renameRowClass="flex h-8 items-center rounded-[10px] bg-(--surface)/40 pl-3 pr-1"
+      href={`/agent?project=${encodeURIComponent(project.id)}&session=${encodeURIComponent(session.id)}&replace=1`}
       onPatchPref={(patch) => patchSessionPref(session.id, patch)}
       onArchive={() => {
         void setSessionArchive(session.id, project, label, true)
@@ -397,7 +363,7 @@ export function SessionRow({
       }}
       onRememberTitle={() => {
         rememberAgentSessionNavTitle(session.id, label);
-        sessionRuntimeController().markRuntimeSeen(session.id);
+        markSessionActivitySeen(session.id);
       }}
       onDragStart={(event) => {
         setAgentSessionDragData(event, {
@@ -409,7 +375,6 @@ export function SessionRow({
       }}
       onContextMenu
       showClearAction
-      menuItemsWithIcons
     />
   );
 }
@@ -426,26 +391,26 @@ export function NewChatPlusButton({
   onNavigateStart?: () => void;
 }) {
   const router = useRouter();
-  const href = `/agent?project=${encodeURIComponent(projectId)}&new=1`;
+  const openNewChat = () => {
+    onNavigateStart?.();
+    router.push(
+      `/agent?project=${encodeURIComponent(projectId)}&new=${Date.now().toString(36)}&replace=1`,
+    );
+  };
+
   return (
-    <div className="relative flex items-center justify-center leading-none">
-      <Link
-        href={href}
-        onClick={(event) => {
-          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-          event.preventDefault();
-          event.stopPropagation();
-          onNavigateStart?.();
-          router.push(
-            `/agent?project=${encodeURIComponent(projectId)}&new=${Date.now().toString(36)}`,
-          );
-        }}
-        className={className}
-        aria-label={label}
-        title={label}
-      >
-        <PlusIcon className="block h-3.5 w-3.5" />
-      </Link>
-    </div>
+    <button
+      type="button"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNewChat();
+      }}
+      className={className}
+      aria-label={label}
+      title={label}
+    >
+      <PlusIcon className="block h-3.5 w-3.5" />
+    </button>
   );
 }

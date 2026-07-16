@@ -1,21 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { ChevronDown, Folder, RefreshCw, Search as SearchIcon } from "@/ui/icon-registry";
-import { Table, THead, TBody, TRow, TH, TCell } from "@/ui";
-import { cleanSessionTitle } from "@/features/agent/messages/helpers";
-import { safeJson } from "@/features/agent/safe-json";
-import { ACTIVE_AGENT_SESSIONS_EVENT } from "@/lib/workspace-events";
-
-// Mirrors the API payload from /api/agent/sessions/all. Kept inline so this
-// Re-export shared session contracts for the local module surface.
+import { useCallback, useMemo, useState } from "react";
+import { ChevronDown, Folder, Search as SearchIcon } from "@/ui/icon-registry";
 import {
-  type ActiveSession,
-  type AggregatedSession,
-  type SessionSortField,
-  indexActiveByPiId,
-} from "@/features/agent/session-contracts";
+  AppPage,
+  PageContainer,
+  PageHeader,
+  RefreshButton,
+  Table,
+  THead,
+  TBody,
+  TRow,
+  TH,
+  TCell,
+} from "@/ui";
+import { cleanSessionTitle } from "@/features/agent/messages/helpers";
+import { useOpenSessions } from "@/features/agent/ui/use-open-sessions";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
+import { safeJson } from "@/features/agent/safe-json";
+
+import { type SessionSortField, indexOpenByThreadId } from "@/features/agent/session-contracts";
+import type { AggregatedSession } from "@shared/agent/session-summary";
 
 type StatusFilter = "all" | "running" | "idle";
 
@@ -35,7 +41,7 @@ function formatRelative(iso: string): string {
 
 export default function AgentSessionsPage() {
   const [sessions, setSessions] = useState<AggregatedSession[] | null>(null);
-  const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
+  const activeSessions = useOpenSessions();
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -56,27 +62,11 @@ export default function AgentSessionsPage() {
     }
   }, []);
 
-  const subscribeSessionRows = useCallback(
-    (_notify: () => void) => {
-      void reload();
-      return () => {};
-    },
-    [reload],
-  );
+  useMountSubscription(() => {
+    void reload();
+  }, [reload]);
 
-  const subscribeActiveSessions = useCallback((_notify: () => void) => {
-    const onActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessions?: ActiveSession[] }>).detail;
-      setActiveSessions(Array.isArray(detail?.sessions) ? detail.sessions : []);
-    };
-    window.addEventListener(ACTIVE_AGENT_SESSIONS_EVENT, onActive);
-    return () => window.removeEventListener(ACTIVE_AGENT_SESSIONS_EVENT, onActive);
-  }, []);
-
-  useSyncExternalStore(subscribeSessionRows, getAgentSessionsSnapshot, getAgentSessionsSnapshot);
-  useSyncExternalStore(subscribeActiveSessions, getAgentSessionsSnapshot, getAgentSessionsSnapshot);
-
-  const activeByPiId = useMemo(() => indexActiveByPiId(activeSessions), [activeSessions]);
+  const openByThreadId = useMemo(() => indexOpenByThreadId(activeSessions), [activeSessions]);
 
   const projects = useMemo(() => {
     const seen = new Map<string, string>();
@@ -91,8 +81,8 @@ export default function AgentSessionsPage() {
     const q = query.trim().toLowerCase();
     const filtered = all.filter((session) => {
       if (projectFilter !== "all" && session.projectId !== projectFilter) return false;
-      if (statusFilter === "running" && !activeByPiId.has(session.id)) return false;
-      if (statusFilter === "idle" && activeByPiId.has(session.id)) return false;
+      if (statusFilter === "running" && !openByThreadId.has(session.id)) return false;
+      if (statusFilter === "idle" && openByThreadId.has(session.id)) return false;
       if (!q) return true;
       const haystack =
         `${session.firstUserMessage ?? ""} ${session.projectName} ${session.modelId ?? ""}`.toLowerCase();
@@ -101,15 +91,12 @@ export default function AgentSessionsPage() {
     const sorted = [...filtered].sort((a, b) => {
       let cmp = 0;
       if (sortField === "updatedAt") cmp = a.updatedAt.localeCompare(b.updatedAt);
-      else if (sortField === "turnCount") cmp = a.turnCount - b.turnCount;
       else if (sortField === "projectName") cmp = a.projectName.localeCompare(b.projectName);
       return sortDir === "asc" ? cmp : -cmp;
     });
     return sorted;
-  }, [sessions, query, projectFilter, statusFilter, activeByPiId, sortField, sortDir]);
+  }, [sessions, query, projectFilter, statusFilter, openByThreadId, sortField, sortDir]);
 
-  // Counts surfaced in the header chips so the user can see at a glance what
-  // is happening across every project.
   const summary = useMemo(() => {
     const total = sessions?.length ?? 0;
     const visible = rows.length;
@@ -128,45 +115,32 @@ export default function AgentSessionsPage() {
   }
 
   return (
-    <div className="min-h-full bg-(--bg) text-(--fg)">
-      <div className="mx-auto max-w-[1280px] px-6 py-8">
-        <div className="mb-6 flex items-end justify-between gap-4">
-          <div>
-            <div className="text-[length:var(--fs-xs)] font-medium uppercase tracking-[var(--section-tracking)] text-(--dim)">
-              Agent
-            </div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight">Sessions</h1>
-            <p className="mt-1 text-[length:var(--fs-base)] text-(--dim)">
-              Every conversation with the agent across every project. Search, filter, and jump into
-              any one of them.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <SummaryChip
-              label="Sessions"
-              value={
-                summary.visible === summary.total
-                  ? summary.total
-                  : `${summary.visible}/${summary.total}`
-              }
-            />
-            <SummaryChip
-              label="Running"
-              value={summary.runningCount}
-              accent={summary.runningCount > 0}
-            />
-            <SummaryChip label="Projects" value={summary.projectsCount} />
-            <button
-              type="button"
-              onClick={() => void reload()}
-              className="inline-flex h-8 items-center gap-2 rounded-md bg-(--surface) px-3 text-[length:var(--fs-md)] text-(--dim) hover:bg-(--surface-2) hover:text-(--fg)"
-              title="Refresh"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-              Refresh
-            </button>
-          </div>
-        </div>
+    <AppPage>
+      <PageContainer width="md">
+        <PageHeader
+          eyebrow="Agent"
+          title="Sessions"
+          description="Every conversation with the agent across every project. Search, filter, and jump into any one of them."
+          actions={
+            <>
+              <SummaryChip
+                label="Sessions"
+                value={
+                  summary.visible === summary.total
+                    ? summary.total
+                    : `${summary.visible}/${summary.total}`
+                }
+              />
+              <SummaryChip
+                label="Running"
+                value={summary.runningCount}
+                accent={summary.runningCount > 0}
+              />
+              <SummaryChip label="Projects" value={summary.projectsCount} />
+              <RefreshButton onRefresh={() => void reload()} loading={loading} />
+            </>
+          }
+        />
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex h-9 min-w-[280px] flex-1 items-center gap-2 rounded-md bg-(--surface) px-3">
@@ -217,14 +191,6 @@ export default function AgentSessionsPage() {
               />
               <TH className="px-3 py-2">Model</TH>
               <SortHeader
-                label="Turns"
-                field="turnCount"
-                sortField={sortField}
-                sortDir={sortDir}
-                onClick={toggleSort}
-                align="right"
-              />
-              <SortHeader
                 label="Updated"
                 field="updatedAt"
                 sortField={sortField}
@@ -238,7 +204,7 @@ export default function AgentSessionsPage() {
             {sessions === null ? (
               <TRow>
                 <TCell
-                  colSpan={6}
+                  colSpan={5}
                   className="px-3 py-8 text-center text-[length:var(--fs-md)] text-(--dim)"
                 >
                   Loading…
@@ -247,7 +213,7 @@ export default function AgentSessionsPage() {
             ) : rows.length === 0 ? (
               <TRow>
                 <TCell
-                  colSpan={6}
+                  colSpan={5}
                   className="px-3 py-10 text-center text-[length:var(--fs-md)] text-(--dim)"
                 >
                   No sessions match these filters.
@@ -255,8 +221,8 @@ export default function AgentSessionsPage() {
               </TRow>
             ) : (
               rows.map((session) => {
-                const running = activeByPiId.has(session.id);
-                const status = activeByPiId.get(session.id)?.status ?? "idle";
+                const running = openByThreadId.has(session.id);
+                const status = openByThreadId.get(session.id)?.status ?? "idle";
                 const label =
                   cleanSessionTitle(session.firstUserMessage) ||
                   `Session ${session.id.slice(0, 8)}`;
@@ -276,7 +242,7 @@ export default function AgentSessionsPage() {
                     </TCell>
                     <TCell className="px-3 py-2 text-(--fg)">
                       <Link
-                        href={`/agent?project=${encodeURIComponent(session.projectId)}&session=${encodeURIComponent(session.id)}`}
+                        href={`/agent?project=${encodeURIComponent(session.projectId)}&session=${encodeURIComponent(session.id)}&replace=1`}
                         className="line-clamp-1 hover:underline"
                         title={label}
                       >
@@ -297,9 +263,6 @@ export default function AgentSessionsPage() {
                     <TCell className="px-3 py-2 font-mono text-[length:var(--fs-sm)] text-(--dim)">
                       {session.modelId ?? "—"}
                     </TCell>
-                    <TCell className="px-3 py-2 text-right tabular-nums text-(--dim)">
-                      {session.turnCount}
-                    </TCell>
                     <TCell className="px-3 py-2 text-right text-(--dim)">
                       {formatRelative(session.updatedAt)}
                     </TCell>
@@ -309,12 +272,10 @@ export default function AgentSessionsPage() {
             )}
           </TBody>
         </Table>
-      </div>
-    </div>
+      </PageContainer>
+    </AppPage>
   );
 }
-
-const getAgentSessionsSnapshot = (): number => 0;
 
 function SummaryChip({
   label,

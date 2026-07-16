@@ -8,12 +8,54 @@ import type {
   UsageStats,
   VRAMCalculation,
 } from "../types";
-import type { ApiCore, ChatRunStreamEvent, RequestOptions } from "./core";
+import {
+  encodePathSegments,
+  type ApiCore,
+  type ChatRunStreamEvent,
+  type RequestOptions,
+} from "./core";
+
+const MB = 1024 * 1024;
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function legacyMb(value: unknown): number | null {
+  const bytes = finiteNumber(value);
+  return bytes !== null && bytes > 0 ? bytes / MB : null;
+}
+
+export function normalizeGpuAliases(list: unknown): GPU[] {
+  if (!Array.isArray(list)) return [];
+  const gpus: GPU[] = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const raw = entry as Record<string, unknown>;
+    const gpu: GPU = {
+      index: finiteNumber(raw["index"]) ?? 0,
+      name: typeof raw["name"] === "string" ? raw["name"] : "GPU",
+      memory_total_mb: finiteNumber(raw["memory_total_mb"]) ?? legacyMb(raw["memory_total"]) ?? 0,
+      memory_used_mb: finiteNumber(raw["memory_used_mb"]) ?? legacyMb(raw["memory_used"]) ?? 0,
+      memory_free_mb: finiteNumber(raw["memory_free_mb"]) ?? legacyMb(raw["memory_free"]) ?? 0,
+      utilization_pct:
+        finiteNumber(raw["utilization_pct"]) ?? finiteNumber(raw["utilization"]) ?? 0,
+      temp_c: finiteNumber(raw["temp_c"]) ?? finiteNumber(raw["temperature"]) ?? 0,
+    };
+    if (typeof raw["id"] === "string") gpu.id = raw["id"];
+    const powerDraw = finiteNumber(raw["power_draw"]);
+    if (powerDraw !== null) gpu.power_draw = powerDraw;
+    const powerLimit = finiteNumber(raw["power_limit"]);
+    if (powerLimit !== null) gpu.power_limit = powerLimit;
+    gpus.push(gpu);
+  }
+  return gpus;
+}
 
 export function createSystemApi(core: ApiCore) {
   return {
     launch: (recipeId: string): Promise<{ success: boolean; pid?: number; message: string }> =>
-      core.request(`/launch/${recipeId}`, {
+      core.request(`/launch/${encodePathSegments(recipeId)}`, {
         method: "POST",
         timeout: 30_000,
         retries: 0,
@@ -22,8 +64,15 @@ export function createSystemApi(core: ApiCore) {
     evict: (): Promise<{ success: boolean; evicted_pid?: number }> =>
       core.request("/evict", { method: "POST" }),
 
+    // The controller long-polls up to `timeout` seconds; the client-side fetch
+    // timeout must outlive it or a real model load (>30s) surfaces as a
+    // spurious launch error. No retries: re-entering the long poll after a
+    // timeout would silently double the wait.
     waitReady: (timeout = 300): Promise<{ ready: boolean; elapsed: number; error?: string }> =>
-      core.request(`/wait-ready?timeout=${timeout}`),
+      core.request(`/wait-ready?timeout=${timeout}`, {
+        timeout: (timeout + 15) * 1000,
+        retries: 0,
+      }),
 
     getOpenAIModels: (): Promise<{
       data: Array<{ id: string; root?: string; max_model_len?: number }>;
@@ -42,7 +91,10 @@ export function createSystemApi(core: ApiCore) {
     countTextTokens: (data: { model: string; text: string }): Promise<{ num_tokens?: number }> =>
       core.request("/v1/count-tokens", { method: "POST", body: JSON.stringify(data) }),
 
-    getGPUs: (options?: RequestOptions): Promise<{ gpus: GPU[] }> => core.request("/gpus", options),
+    getGPUs: async (options?: RequestOptions): Promise<{ gpus: GPU[] }> => {
+      const payload = await core.request<{ gpus?: unknown }>("/gpus", options);
+      return { gpus: normalizeGpuAliases(payload.gpus) };
+    },
 
     calculateVRAM: (data: {
       model: string;
@@ -81,9 +133,7 @@ export function createSystemApi(core: ApiCore) {
         method: "POST",
       }),
 
-    getPeakMetrics: (
-      modelId?: string,
-    ): Promise<{
+    getPeakMetrics: (): Promise<{
       metrics?: Array<{
         model_id: string;
         prefill_tps: number;
@@ -97,14 +147,12 @@ export function createSystemApi(core: ApiCore) {
         total_requests: number;
       }>;
       error?: string;
-    }> => {
-      const query = modelId ? `?model_id=${modelId}` : "";
-      return core.request(`/peak-metrics${query}`);
-    },
+    }> => core.request("/peak-metrics", { retries: 0 }),
 
-    getUsageStats: (): Promise<UsageStats> => core.request("/usage"),
+    getUsageStats: (): Promise<UsageStats> => core.request("/usage", { retries: 0 }),
 
-    getPiSessionsUsageStats: (): Promise<UsageStats> => core.request("/usage/pi-sessions"),
+    getPiSessionsUsageStats: (): Promise<UsageStats> =>
+      core.request("/usage/pi-sessions", { retries: 0 }),
 
     getLinuxDashboard: (options?: RequestOptions): Promise<LinuxDashboardSnapshot> =>
       core.request("/linux-dashboard", options),

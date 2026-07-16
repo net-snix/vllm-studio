@@ -1,41 +1,15 @@
+import { isInternalRecipeKey, isJsonStringArgumentKey } from "@local-studio/contracts/engine-args";
 import type { RecipeEditor } from "./recipe-editor";
 import { normalizeExtraArgKey } from "./extra-args";
 import { prepareRecipeForSave } from "./prepare-recipe";
 
 const appendExtraArgsToCommand = (args: string[], extraArgs: Record<string, unknown>): string[] => {
-  const internalKeys = new Set([
-    "venv_path",
-    "env_vars",
-    "visible_devices",
-    "cuda_visible_devices",
-    "hip_visible_devices",
-    "rocr_visible_devices",
-    "description",
-    "tags",
-    "status",
-    "launch_command",
-    "custom_command",
-    "ds4_bin",
-    "ds4-backend",
-    "ds4_backend",
-    "backend-mode",
-    "backend_mode",
-    "max-tokens",
-    "max_tokens",
-    "max-output-tokens",
-    "max_output_tokens",
-    "exllama_command",
-    "exllamav3_command",
-    "exllama-cmd",
-  ]);
-  const jsonStringKeys = new Set(["speculative_config", "default_chat_template_kwargs"]);
   const existingFlags = new Set(
     args.flatMap((line) => line.split(" ").filter((part) => part.startsWith("--"))),
   );
 
   for (const [key, value] of Object.entries(extraArgs)) {
-    const normalizedKey = normalizeExtraArgKey(key);
-    if (internalKeys.has(normalizedKey)) continue;
+    if (isInternalRecipeKey(key)) continue;
 
     const flag = `--${key.replace(/_/g, "-")}`;
     if (existingFlags.has(flag)) continue;
@@ -47,7 +21,7 @@ const appendExtraArgsToCommand = (args: string[], extraArgs: Record<string, unkn
     }
     if (value === undefined || value === null || value === "") continue;
 
-    if (typeof value === "string" && jsonStringKeys.has(normalizedKey)) {
+    if (typeof value === "string" && isJsonStringArgumentKey(key)) {
       const trimmed = value.trim();
       if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
         try {
@@ -85,24 +59,15 @@ const appendLlamacppArgsToCommand = (
   args: string[],
   extraArgs: Record<string, unknown>,
 ): string[] => {
-  const internalKeys = new Set([
-    "venv_path",
-    "env_vars",
-    "visible_devices",
-    "cuda_visible_devices",
-    "hip_visible_devices",
-    "rocr_visible_devices",
-    "description",
-    "tags",
-    "status",
-  ]);
-
   for (const [key, value] of Object.entries(extraArgs)) {
-    const normalizedKey = normalizeExtraArgKey(key);
-    if (internalKeys.has(normalizedKey)) continue;
+    if (isInternalRecipeKey(key)) continue;
 
     const flag = `--${key.replace(/_/g, "-")}`;
-    if (args.some((entry) => entry.startsWith(flag))) continue;
+    // Match the flag as a whole token (bare, or immediately followed by its
+    // value after a space). A plain startsWith let a longer sibling flag
+    // (e.g. an existing "--rope-scaling linear") suppress a distinct shorter
+    // flag ("--rope-scale").
+    if (args.some((entry) => entry === flag || entry.startsWith(`${flag} `))) continue;
 
     if (value === true) {
       args.push(flag);
@@ -162,17 +127,13 @@ export const generateCommand = (
 function appendBackendCommand(args: string[], backend: string) {
   if (backend === "vllm") args.push("vllm serve");
   else if (backend === "llamacpp") args.push("llama-server");
-  else if (backend === "ds4") args.push("ds4-server --cuda");
-  else if (backend === "exllamav3") args.push("exllama-server");
   else if (backend === "mlx") args.push("python -m mlx_lm.server");
   else args.push("python -m sglang.launch_server");
 }
 
 function appendModelArgument(args: string[], backend: string, modelPath?: string) {
   if (!modelPath) return;
-  if (backend === "llamacpp" || backend === "mlx" || backend === "exllamav3")
-    args.push(`--model ${modelPath}`);
-  else if (backend === "ds4") args.push(`-m ${modelPath}`);
+  if (backend === "llamacpp" || backend === "mlx") args.push(`--model ${modelPath}`);
   else if (backend === "sglang") args.push(`--model-path ${modelPath}`);
   else args.push(modelPath);
 }
@@ -180,7 +141,7 @@ function appendModelArgument(args: string[], backend: string, modelPath?: string
 function appendNetworkArguments(args: string[], backend: string, payload: RecipeCommandPayload) {
   if (payload.host && payload.host !== "0.0.0.0") args.push(`--host ${payload.host}`);
   if (payload.port && payload.port !== 8000) args.push(`--port ${payload.port}`);
-  if (payload.served_model_name && backend !== "mlx" && backend !== "ds4") {
+  if (payload.served_model_name && backend !== "mlx") {
     args.push(
       backend === "llamacpp"
         ? `--alias ${payload.served_model_name}`
@@ -190,7 +151,7 @@ function appendNetworkArguments(args: string[], backend: string, payload: Recipe
 }
 
 function appendParallelArguments(args: string[], backend: string, payload: RecipeCommandPayload) {
-  if (backend === "llamacpp" || backend === "mlx" || backend === "exllamav3") return;
+  if (backend === "llamacpp" || backend === "mlx") return;
   if (payload.tensor_parallel_size && payload.tensor_parallel_size > 1) {
     args.push(`--tensor-parallel-size ${payload.tensor_parallel_size}`);
   }
@@ -203,10 +164,6 @@ function appendContextArguments(args: string[], backend: string, payload: Recipe
   const ctxOverride = payload.extra_args?.["ctx-size"] ?? payload.extra_args?.["ctx_size"];
   if (backend === "llamacpp") {
     if (!ctxOverride && payload.max_model_len) args.push(`--ctx-size ${payload.max_model_len}`);
-    return;
-  }
-  if (backend === "ds4") {
-    if (!ctxOverride && payload.max_model_len) args.push(`--ctx ${payload.max_model_len}`);
     return;
   }
   if (backend === "mlx") return;
@@ -241,7 +198,7 @@ function appendBackendSpecificArguments(
   backend: string,
   payload: RecipeCommandPayload,
 ) {
-  if (backend === "llamacpp" || backend === "mlx" || backend === "exllamav3") {
+  if (backend === "llamacpp" || backend === "mlx") {
     appendLlamacppArgsToCommand(args, payload.extra_args ?? {});
     return;
   }

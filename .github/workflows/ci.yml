@@ -6,6 +6,20 @@ on:
     branches: [main]
 
 jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Repo-level gates (pure node stdlib, no install needed). These existed
+      # for months but only ran when someone remembered `npm run check` locally.
+      - name: Shared-contract duplication gate
+        run: node scripts/validate-shared-contracts.mjs
+      - name: Barrel/dir sibling structure gate
+        run: node scripts/validate-barrel-dir-siblings.mjs
+
   controller:
     runs-on: ubuntu-latest
     steps:
@@ -25,29 +39,12 @@ jobs:
       - name: Cleanup checks
         working-directory: ./controller
         run: bun run check
+      - name: Unit tests
+        working-directory: ./controller
+        run: bun run test:unit
       - name: Integration tests
         working-directory: ./controller
         run: bun run test:integration
-
-  cli:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install dependencies
-        working-directory: ./cli
-        run: bun install
-      - name: Type check
-        working-directory: ./cli
-        run: bun run typecheck
-      - name: Lint
-        working-directory: ./cli
-        run: bun run lint
-      - name: Cleanup checks
-        working-directory: ./cli
-        run: bun run check
 
   frontend:
     runs-on: ubuntu-latest
@@ -56,6 +53,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # Tests run under bun (installs stay npm — see frontend/package.json).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - name: Install dependencies
         working-directory: ./frontend
         run: npm ci --legacy-peer-deps
@@ -65,6 +66,9 @@ jobs:
       - name: Cleanup checks
         working-directory: ./frontend
         run: npm run check:cleanup
-      - name: E2E tests
+      - name: Unit tests
         working-directory: ./frontend
-        run: npm run test:e2e
+        run: npm run test
+      - name: Regression tests
+        working-directory: ./frontend
+        run: npm run test:regression

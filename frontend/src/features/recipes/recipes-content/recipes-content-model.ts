@@ -1,23 +1,33 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import api from "@/lib/api/client";
-import type { ModelInfo, RecipeWithStatus } from "@/lib/types";
+import type { ModelDownload, ModelInfo, RecipeWithStatus, RuntimeTarget } from "@/lib/types";
 import type { RecipeEditor } from "@/features/recipes/recipe-editor";
-import { useRealtimeStatus } from "@/hooks/use-realtime-status";
-import { delay } from "@/lib/async";
+import { useRealtimeStatusStore } from "@/hooks/realtime-status-store";
+import { readPageCache, writePageCache } from "@/lib/page-data-cache";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import { normalizeRecipeForEditor } from "@/features/recipes/normalize-recipe";
 import { prepareRecipeForSave } from "@/features/recipes/prepare-recipe";
 import { DEFAULT_RECIPE } from "./default-recipe";
+import type { RecipesTableProps } from "./types";
 import { useRecipesDerived } from "./use-recipes-derived";
 
-export type RecipesContentTab = "recipes" | "explore" | "downloads";
+export type RecipesContentTab = "get" | "serves" | "downloads";
+
+const requestedTab = (value: string | null): RecipesContentTab =>
+  value === "serves" || value === "downloads" ? value : "get";
 
 export function useRecipesContentModel() {
-  const [tab, setTab] = useState<RecipesContentTab>("recipes");
-  const [loading, setLoading] = useState(true);
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<RecipesContentTab>(() => requestedTab(searchParams.get("tab")));
+  // Stale-while-revalidate: paint the last-loaded recipe list instantly on
+  // navigation while the fresh fetch runs in the background.
+  const cachedRecipes = readPageCache<RecipeWithStatus[]>("recipes:list");
+  const [loading, setLoading] = useState(cachedRecipes === null);
   const [refreshing, setRefreshing] = useState(false);
-  const [recipes, setRecipes] = useState<RecipeWithStatus[]>([]);
+  const [recipes, setRecipes] = useState<RecipeWithStatus[]>(() => cachedRecipes ?? []);
   const [filter, setFilter] = useState("");
   const [pinnedRecipes, setPinnedRecipes] = useState<Set<string>>(new Set());
   const [recipeMenuOpen, setRecipeMenuOpen] = useState<string | null>(null);
@@ -29,23 +39,19 @@ export function useRecipesContentModel() {
   const [modalRecipe, setModalRecipe] = useState<RecipeEditor | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>(
+    () => readPageCache<ModelInfo[]>("recipes:models") ?? [],
+  );
+  const [runtimeTargets, setRuntimeTargets] = useState<RuntimeTarget[]>([]);
 
-  const { launchProgress } = useRealtimeStatus();
+  const { launchProgress } = useRealtimeStatusStore();
 
-  const subscribePinnedRecipes = useCallback((_notify: () => void) => {
+  useMountSubscription(() => {
     try {
       const saved = localStorage.getItem("local-studio-pinned-recipes");
       if (saved) setPinnedRecipes(new Set(JSON.parse(saved)));
     } catch {}
-    return () => {};
   }, []);
-
-  useSyncExternalStore(
-    subscribePinnedRecipes,
-    getRecipesContentModelSnapshot,
-    getRecipesContentModelSnapshot,
-  );
 
   const togglePin = useCallback((recipeId: string) => {
     setPinnedRecipes((prev) => {
@@ -62,39 +68,33 @@ export function useRecipesContentModel() {
 
   const loadRecipes = useCallback(async () => {
     try {
-      const [recipesData, modelsData] = await Promise.all([
+      const [recipesData, modelsData, runtimeData] = await Promise.all([
         api.getRecipes().catch(() => ({ recipes: [] as RecipeWithStatus[] })),
         api.getModels().catch(() => ({ models: [] as ModelInfo[] })),
+        api.getRuntimeTargets().catch(() => ({ targets: [] as RuntimeTarget[] })),
       ]);
       const recipesList = recipesData.recipes || [];
+      writePageCache("recipes:list", recipesList);
+      writePageCache("recipes:models", modelsData.models || []);
       setRecipes(recipesList);
       const running = recipesList.find((r) => r.status === "running")?.id || null;
       setRunningRecipeId(running);
       setAvailableModels(modelsData.models || []);
+      setRuntimeTargets(runtimeData.targets || []);
     } catch (e) {
       console.error("Failed to load recipes:", e);
     }
   }, []);
 
-  const subscribeRecipes = useCallback(
-    (_notify: () => void) => {
-      void (async () => {
-        try {
-          await loadRecipes();
-        } finally {
-          setLoading(false);
-        }
-      })();
-      return () => {};
-    },
-    [loadRecipes],
-  );
-
-  useSyncExternalStore(
-    subscribeRecipes,
-    getRecipesContentModelSnapshot,
-    getRecipesContentModelSnapshot,
-  );
+  useMountSubscription(() => {
+    void (async () => {
+      try {
+        await loadRecipes();
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [loadRecipes]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -104,6 +104,25 @@ export function useRecipesContentModel() {
 
   const handleNewRecipe = useCallback(() => {
     setModalRecipe(normalizeRecipeForEditor({ ...DEFAULT_RECIPE }));
+    setModalOpen(true);
+  }, []);
+
+  useMountSubscription(() => {
+    if (searchParams.get("new") !== "1") return;
+    setTab("serves");
+    handleNewRecipe();
+  }, [handleNewRecipe, searchParams]);
+
+  const handleCreateServeFromDownload = useCallback((download: ModelDownload) => {
+    const modelName = download.model_id.split("/").filter(Boolean).at(-1) ?? download.model_id;
+    setModalRecipe(
+      normalizeRecipeForEditor({
+        ...DEFAULT_RECIPE,
+        name: modelName,
+        model_path: download.target_dir,
+        served_model_name: modelName,
+      }),
+    );
     setModalOpen(true);
   }, []);
 
@@ -123,10 +142,13 @@ export function useRecipesContentModel() {
       if (recipeToSave.id) {
         await api.updateRecipe(recipeToSave.id, recipeToSave);
       } else {
-        const id = recipeToSave.name
+        const slug = recipeToSave.name
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-|-$/g, "");
+        // A name with no ASCII alphanumerics slugs to "" — an empty id creates
+        // a ghost recipe that can't be edited, deleted, or launched.
+        const id = slug || `recipe-${Date.now()}`;
         await api.createRecipe({ ...recipeToSave, id });
       }
       await loadRecipes();
@@ -157,21 +179,7 @@ export function useRecipesContentModel() {
     async (recipeId: string) => {
       setLaunching(true);
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-        try {
-          await fetch(`/api/proxy/launch/${recipeId}`, {
-            method: "POST",
-            signal: controller.signal,
-          });
-        } catch {
-          // Timeout/abort is fine - launch continues on the controller.
-        } finally {
-          clearTimeout(timeoutId);
-        }
-
-        await delay(1000);
+        await api.launchRecipe(recipeId);
         await loadRecipes();
       } catch (e) {
         alert("Failed to launch: " + (e as Error).message);
@@ -213,6 +221,35 @@ export function useRecipesContentModel() {
     deleteConfirm,
   });
 
+  const table = useMemo<RecipesTableProps>(
+    () => ({
+      recipes: derived.sortedRecipes,
+      pinnedRecipes,
+      recipeMenuOpen,
+      launching,
+      runningRecipeId,
+      onTogglePin: togglePin,
+      onToggleMenu: handleToggleRecipeMenu,
+      onLaunch: handleLaunchRecipe,
+      onStop: handleEvictModel,
+      onEdit: handleEditRecipe,
+      onRequestDelete: handleRequestDelete,
+    }),
+    [
+      derived.sortedRecipes,
+      pinnedRecipes,
+      recipeMenuOpen,
+      launching,
+      runningRecipeId,
+      togglePin,
+      handleToggleRecipeMenu,
+      handleLaunchRecipe,
+      handleEvictModel,
+      handleEditRecipe,
+      handleRequestDelete,
+    ],
+  );
+
   return {
     tab,
     setTab,
@@ -233,16 +270,18 @@ export function useRecipesContentModel() {
     setModalRecipe,
     saving,
     availableModels,
-    modelServedNames: derived.modelServedNames,
+    runtimeTargets,
     launchProgress,
     derived: {
       sortedRecipes: derived.sortedRecipes,
       runningRecipe: derived.runningRecipe,
       deleteRecipe: derived.deleteRecipe,
     },
+    table,
     actions: {
       handleRefresh,
       handleNewRecipe,
+      handleCreateServeFromDownload,
       handleEditRecipe,
       handleSaveRecipe,
       handleDeleteRecipe,
@@ -254,5 +293,3 @@ export function useRecipesContentModel() {
     },
   };
 }
-
-const getRecipesContentModelSnapshot = (): number => 0;

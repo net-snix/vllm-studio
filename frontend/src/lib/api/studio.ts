@@ -3,6 +3,7 @@ import type {
   EngineJob,
   ModelInfo,
   ModelRecommendation,
+  StarterPreset,
   StorageInfo,
   StudioDiagnostics,
   StudioSettings,
@@ -11,7 +12,7 @@ import type {
   RuntimeRocmInfo,
   RuntimeTarget,
 } from "../types";
-import { encodePathSegments, type ApiCore } from "./core";
+import { encodePathSegments, type ApiCore, type RequestOptions } from "./core";
 
 export interface StudioModelsRoot {
   path: string;
@@ -42,11 +43,6 @@ export interface RuntimeJobResponse {
   job: EngineJob;
 }
 
-export interface RuntimeCommandPayload {
-  command?: string;
-  args?: string[];
-}
-
 export function createStudioApi(core: ApiCore) {
   return {
     getModels: (): Promise<{
@@ -55,7 +51,8 @@ export function createStudioApi(core: ApiCore) {
       configured_models_dir?: string;
     }> => core.request("/v1/studio/models"),
 
-    getStudioSettings: (): Promise<StudioSettings> => core.request("/studio/settings"),
+    getStudioSettings: (options?: RequestOptions): Promise<StudioSettings> =>
+      core.request("/studio/settings", options),
 
     updateStudioSettings: (payload: {
       models_dir?: string | null;
@@ -74,6 +71,11 @@ export function createStudioApi(core: ApiCore) {
       recommendations: ModelRecommendation[];
       max_vram_gb: number;
     }> => core.request("/studio/recommendations"),
+
+    getStarterPresets: (): Promise<{
+      presets: StarterPreset[];
+      max_vram_gb: number;
+    }> => core.request("/studio/presets"),
 
     getDownloads: (): Promise<{ downloads: ModelDownload[] }> => core.request("/studio/downloads"),
 
@@ -232,46 +234,17 @@ export function createStudioApi(core: ApiCore) {
 
     getRocmRuntime: (): Promise<RuntimeRocmInfo> => core.request("/runtime/rocm"),
 
-    upgradeVllmRuntime: (
-      payload: {
-        preferBundled?: boolean;
-        command?: string;
-        args?: string[];
-        version?: string;
-      } = {},
+    upgradeRuntime: (
+      backend: "vllm" | "sglang" | "llamacpp" | "mlx" | "cuda" | "rocm",
+      payload: { preferBundled?: boolean; version?: string; targetId?: string } = {},
     ): Promise<RuntimeJobResponse> =>
-      core.request("/runtime/vllm/upgrade", {
+      core.request(`/runtime/${backend}/upgrade`, {
         method: "POST",
         body: JSON.stringify({
           prefer_bundled: payload.preferBundled,
-          command: payload.command,
-          args: payload.args,
           version: payload.version,
+          targetId: payload.targetId,
         }),
-      }),
-
-    upgradeSglangRuntime: (payload: RuntimeCommandPayload = {}): Promise<RuntimeJobResponse> =>
-      core.request("/runtime/sglang/upgrade", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-
-    upgradeLlamacppRuntime: (payload: RuntimeCommandPayload = {}): Promise<RuntimeJobResponse> =>
-      core.request("/runtime/llamacpp/upgrade", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-
-    upgradeCudaRuntime: (payload: RuntimeCommandPayload = {}): Promise<RuntimeJobResponse> =>
-      core.request("/runtime/cuda/upgrade", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-
-    upgradeRocmRuntime: (payload: RuntimeCommandPayload = {}): Promise<RuntimeJobResponse> =>
-      core.request("/runtime/rocm/upgrade", {
-        method: "POST",
-        body: JSON.stringify(payload),
       }),
   };
 }

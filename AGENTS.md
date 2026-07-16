@@ -6,13 +6,12 @@ touching anything, then obey it for every turn.
 ## What this is
 
 Local Studio — a local-first workstation for running, managing, and using
-self-hosted LLM backends. Three modules share one controller API:
+self-hosted LLM backends. Two modules share one controller API:
 
 - `controller/` — Bun/Hono backend (model lifecycle, OpenAI-compatible proxy,
   GPU/system state, SSE, downloads, settings).
 - `frontend/` — Next.js 16 + React 19 UI and the Electron desktop shell. Hosts
   `/agent` (Pi coding agent runtime), settings, usage, recipes, logs, setup.
-- `cli/` — Bun command-line client for a controller.
 
 One machine launches models, watches GPU/runtime state, chats with
 OpenAI-compatible endpoints, and runs agent sessions against local or remote
@@ -26,6 +25,15 @@ controllers. See README.md for the system outline and architecture diagrams.
 - Prefer momentum over permission. Make a decision, record it, keep moving.
 - Never print, log, commit, or otherwise expose credentials.
 - Never bypass git hooks with `--no-verify`.
+- **Always rebuild the installed desktop app after shipping frontend work.** Any
+  turn that lands a feature or bug fix touching `frontend/` MUST finish by
+  rebuilding and reinstalling the canonical Electron app — the desktop bundles
+  its own frontend, so uninstalled changes are invisible to the user. Run the
+  full reinstall in "Desktop reinstall" below (`desktop:dist` → `rm -rf` +
+  `ditto` into `/Applications/Local Studio.app` → relaunch) and confirm
+  `GET /api/desktop-health` returns 200 before yielding. Do not make the user
+  ask. Skip only for controller-only or docs-only changes that never touch
+  `frontend/`, or when the user explicitly says not to.
 
 ## Code standards (non-negotiable)
 
@@ -52,7 +60,7 @@ These apply to all new and edited code. Existing code is legacy; do not
 ### DRY
 
 - Do not duplicate logic. If two call sites share logic, extract it once.
-- Do not reinvent types; reuse `shared/contracts` and existing `@/lib` types.
+- Do not reinvent types; reuse `controller/contracts` (the `@local-studio/contracts` package) and existing `@/lib` types.
 - The `check:dupes` (jscpd) and `check:deadcode` (knip) gates enforce this.
 
 ### Fewest lines that say it
@@ -65,9 +73,8 @@ These apply to all new and edited code. Existing code is legacy; do not
 ### Effect — the runtime pattern
 
 Use the Effect pattern for async, scheduling, fibers, and streaming. Docs:
-<https://effect.website/docs> (Effect core) and
-<https://effect.website/docs/schema> (`@effect/schema`). Follow the Effect v4
-idioms already established in this repo.
+<https://effect.website/docs> and <https://effect.website/docs/schema>. Follow
+the Effect v4 idioms already established in this repo.
 
 - Prefer `Effect.gen`, `Effect.sync`, `Effect.tryPromise`, `Effect.sleep`,
   `Schedule.spaced`/`Schedule.exponential`, and `Stream` over hand-rolled async.
@@ -78,7 +85,7 @@ idioms already established in this repo.
   with a module-level store whose `subscribe` owns Effect fibers (see
   `src/hooks/realtime-status-store.ts`, `src/hooks/use-controller-events.ts`).
   The few surviving `useEffect` calls are error-boundary legacy; do not add more.
-- Validate data at boundaries with `@effect/schema`, not ad-hoc guards.
+- Validate data at boundaries with Effect v4 `Schema`, not ad-hoc guards.
 
 ### UI — use the kit, do not reinvent
 
@@ -111,9 +118,9 @@ idioms already established in this repo.
 ```bash
 npm --prefix frontend run check:quality   # lint + typecheck + desktop typecheck
                                            # + cycles + ui-structure + knip + jscpd + depcheck + build
-npm run check                              # full repo gate (contracts + structure + frontend + controller + cli)
-npm --prefix frontend run test             # frontend unit tests (tsx --test)
-npm run test:e2e                           # controller integration + frontend e2e
+npm run check                              # full repo gate (contracts + structure + frontend + controller)
+npm --prefix frontend run test             # frontend unit tests (bun test scripts)
+npm run test:integration                   # controller integration + frontend regression suites (bun test)
 ```
 
 The pre-push hook (`.githooks/pre-push`) checks conventional commits and runs
@@ -138,7 +145,7 @@ The pre-push hook (`.githooks/pre-push`) checks conventional commits and runs
 
 Never commit secrets. Put them in `.env.local` (gitignored). See `.env.example`
 for variable names. The deploy script reads `REMOTE_HOST`, `REMOTE_USER`,
-`REMOTE_PATH`, `REMOTE_URL` from `.env.local`.
+`REMOTE_PATH` (and optional `REMOTE_SSH_KEY`) from `.env.local`.
 
 ## Deployment
 
@@ -211,8 +218,8 @@ path) is the exception, only for risky feature-branch testing.
 
 - The agent page uses `@earendil-works/pi-coding-agent` directly in the Next.js
   Node process (no `pi --mode rpc` subprocess, no bundled CLI). Entry point:
-  `src/features/agent/pi-runtime.ts` → `piRuntimeManager.getSession(id)`.
-  Extensions/skills are wired in `src/features/agent/pi-runtime-helpers.ts`.
+  `services/agent-runtime/src/pi-runtime.ts` → `piRuntimeManager.getSession(id)`.
+  Extensions/skills are wired in `services/agent-runtime/src/pi-runtime-helpers.ts`.
 - Agent file read/write in chat is local-only, stored under `data/agentfs`. The
   filesystem root boundary (`src/features/agent/fs-store.ts`) trusts the caller's
   workspace cwd while rejecting filesystem roots and system directories. If file
@@ -221,7 +228,7 @@ path) is the exception, only for risky feature-branch testing.
 
 ## Notes
 
-- Remote server: AMD EPYC, 4x RTX PRO 6000 Blackwell + 1x RTX 3090, CUDA 12.8
+- Remote server: AMD EPYC, 4x RTX PRO 6000 Blackwell, CUDA 12.8
   (host in `.env.local`).
 - `npm run start` runs the standalone server (`scripts/start-standalone.mjs`).
   Never use plain `next start` — it breaks SSE streaming.

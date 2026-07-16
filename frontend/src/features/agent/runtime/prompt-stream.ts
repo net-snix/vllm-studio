@@ -6,11 +6,9 @@ import {
   runtimeStatusLooksActive,
   sessionTitleFromPrompt,
 } from "@/features/agent/messages";
-import {
-  activeComposerPlugins,
-  type ComposerPluginRef,
-  type ComposerPromptTemplateRef,
-  type ComposerSkillRef,
+import type {
+  ComposerPromptTemplateRef,
+  ComposerSkillRef,
 } from "@/features/agent/composer-context";
 import type { AgentImageInput } from "@/features/agent/contracts";
 import type { BrowserBackend, ToolSelection } from "@/features/agent/tools/types";
@@ -18,8 +16,8 @@ import * as api from "@/features/agent/runtime/api";
 import type { RuntimeStatus } from "@/features/agent/runtime/api";
 import { sessionRuntimeController } from "@/features/agent/runtime/session-runtime-controller";
 import type { Session, SessionId, UpdateSession } from "@/features/agent/runtime/types";
+import { settleTurn } from "@/features/agent/runtime/session-status";
 
-const EMPTY_PLUGINS: ComposerPluginRef[] = [];
 const EMPTY_SKILLS: ComposerSkillRef[] = [];
 const EMPTY_PROMPT_TEMPLATES: ComposerPromptTemplateRef[] = [];
 
@@ -34,7 +32,6 @@ export type SubmitArgs = {
   images?: AgentImageInput[];
   attachments?: ChatMessageAttachment[];
   browserToolEnabled?: boolean;
-  plugins?: ComposerPluginRef[];
   skills?: ComposerSkillRef[];
   promptTemplates?: ComposerPromptTemplateRef[];
   targetSessionId?: SessionId;
@@ -48,7 +45,6 @@ export type PromptStreamDeps = {
   cwd: string;
   modelId: string;
   onPiSessionIdChange?: (piSessionId: string) => void;
-  runtimeSessionId: string;
   selectionFor: (sessionId: SessionId) => ToolSelection;
   tabsRef: MutableRef<Session[]>;
   updateSession: UpdateSession;
@@ -57,7 +53,6 @@ export type PromptStreamDeps = {
 type PromptTurnContext = {
   assistantId: string;
   browserEnabledForTurn: boolean;
-  plugins: ComposerPluginRef[];
   promptTemplates: ComposerPromptTemplateRef[];
   runtime: string;
   selected: Session;
@@ -66,12 +61,31 @@ type PromptTurnContext = {
   userId: string;
 };
 
-export async function submitPromptTurn(deps: PromptStreamDeps, args: SubmitArgs): Promise<void> {
+export type SessionSubmitGuard = Set<SessionId>;
+
+export function beginSessionSubmit(
+  guard: SessionSubmitGuard,
+  sessionId: SessionId | null | undefined,
+): boolean {
+  if (!sessionId || guard.has(sessionId)) return false;
+  guard.add(sessionId);
+  return true;
+}
+
+export function endSessionSubmit(
+  guard: SessionSubmitGuard,
+  sessionId: SessionId | null | undefined,
+): void {
+  if (!sessionId) return;
+  guard.delete(sessionId);
+}
+
+export function submitPromptTurn(deps: PromptStreamDeps, args: SubmitArgs): Promise<void> {
   const context = createPromptTurnContext(deps, args);
-  if (!context) return;
+  if (!context) return Promise.resolve();
 
   appendOptimisticPrompt(deps, context, args);
-  await startPromptCommand(deps, context, args);
+  return startPromptCommand(deps, context, args);
 }
 
 function createPromptTurnContext(
@@ -83,7 +97,6 @@ function createPromptTurnContext(
   if (!selected || !deps.modelId) return null;
 
   const selection = deps.selectionFor(sessionId);
-  const plugins = args.plugins ?? activeComposerPlugins(selection.plugins ?? EMPTY_PLUGINS);
   const skills = args.skills ?? selection.skills ?? EMPTY_SKILLS;
   const promptTemplates =
     args.promptTemplates ?? selection.promptTemplates ?? EMPTY_PROMPT_TEMPLATES;
@@ -91,9 +104,10 @@ function createPromptTurnContext(
   return {
     assistantId: newId("assistant"),
     browserEnabledForTurn: args.browserToolEnabled ?? deps.browserToolEnabled,
-    plugins,
     promptTemplates,
-    runtime: selected.runtimeSessionId || deps.runtimeSessionId,
+    // The session id is the opaque runtime key the server addresses this
+    // session by.
+    runtime: selected.id,
     selected,
     sessionId,
     skills,
@@ -135,15 +149,11 @@ function appendOptimisticPrompt(
   }));
 }
 
-async function startPromptCommand(
+function startPromptCommand(
   deps: PromptStreamDeps,
   context: PromptTurnContext,
   args: SubmitArgs,
 ): Promise<void> {
-  // The turn-accept flow is an Effect program: submit the command, and on any
-  // failure probe the runtime status to see if the turn actually took (the
-  // POST can fail while the runtime still starts the turn). Errors are written
-  // into the session — this function never throws.
   const program = Effect.gen(function* () {
     const result = yield* Effect.tryPromise({
       try: () => api.submitTurnCommand(promptTurnRequest(deps, context, args)),
@@ -163,7 +173,7 @@ async function startPromptCommand(
     );
     if (result.piSessionId) deps.onPiSessionIdChange?.(result.piSessionId);
   }).pipe(
-    Effect.catchAll(({ error }) =>
+    Effect.catch(({ error }) =>
       Effect.gen(function* () {
         const currentPiSessionId = latestPiSessionId(deps, context, null);
         const status = yield* Effect.tryPromise({
@@ -193,7 +203,7 @@ async function startPromptCommand(
       }),
     ),
   );
-  await Effect.runPromise(program);
+  return Effect.runPromise(program);
 }
 
 /**
@@ -207,7 +217,7 @@ async function startPromptCommand(
  */
 export function settleFailedTurn(session: Session, assistantId: string, message: string): Session {
   if (session.activeAssistantId && session.activeAssistantId !== assistantId) return session;
-  return { ...session, error: message, status: "idle", activeAssistantId: undefined };
+  return { ...settleTurn(session), error: message };
 }
 
 function promptTurnRequest(
@@ -228,7 +238,6 @@ function promptTurnRequest(
     browserSessionId: context.runtime,
     browserBackend: deps.browserBackend,
     canvasEnabled: deps.canvasEnabled,
-    plugins: context.plugins,
     skills: context.skills,
     promptTemplates: context.promptTemplates,
   };
@@ -256,13 +265,6 @@ function mergeSkills(
   for (const skill of existing ?? []) byId.set(skill.id || skill.path || skill.name, skill);
   for (const skill of next) byId.set(skill.id || skill.path || skill.name, skill);
   return [...byId.values()];
-}
-
-export function resolveRuntimeSessionId(
-  session: Pick<Session, "runtimeSessionId"> | null | undefined,
-  fallbackRuntimeSessionId: string,
-): string {
-  return session?.runtimeSessionId || fallbackRuntimeSessionId;
 }
 
 export function runtimeIsActiveForPiSession(

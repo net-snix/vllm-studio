@@ -2,20 +2,20 @@
 
 import { effectInterval, effectTimeout } from "@/lib/effect-timers";
 
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ArrowUpCircle, Check, Loader2, XCircle } from "@/ui/icon-registry";
-import { useRealtimeStatus } from "@/hooks/use-realtime-status";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { ArrowUpCircle, Check, XCircle } from "@/ui/icon-registry";
+import { useRealtimeStatusStore } from "@/hooks/realtime-status-store";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import api from "@/lib/api/client";
 import type { EngineJob, RuntimeBackendInfo, RuntimeTarget, SystemRuntimeInfo } from "@/lib/types";
+import { RowDetailLine, StatusPill, Spinner } from "@/ui";
 import {
-  RowDetailLine,
   SettingsButton,
   SettingsGroup,
   SettingsNotice,
   SettingsRow,
   SettingsValue,
-  StatusPill,
-} from "@/ui";
+} from "./settings-ui";
 import {
   ENGINE_META,
   MANAGED_RUNTIME_BACKENDS,
@@ -35,7 +35,7 @@ import {
 type UpgradeState = { status: "idle" | "upgrading" | "success" | "error"; message?: string };
 
 export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null }) {
-  const { runtimeSummary, status, lease } = useRealtimeStatus();
+  const { runtimeSummary, status, lease } = useRealtimeStatusStore();
   const [targets, setTargets] = useState<RuntimeTarget[]>([]);
   const [jobs, setJobs] = useState<EngineJob[]>([]);
   const [lostJobNotice, setLostJobNotice] = useState<string | null>(null);
@@ -74,26 +74,23 @@ export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null
     setJobs(jobPayload.jobs);
   }, []);
 
-  const subscribeRuntimeJobs = useCallback(
-    (_notify: () => void) => {
-      void Promise.resolve().then(refreshRuntimeJobs);
-      const jobTimer = effectInterval(() => void refreshRuntimeJobs(), 2500);
-      return () => jobTimer.cancel();
-    },
-    [refreshRuntimeJobs],
-  );
-
-  useSyncExternalStore(subscribeRuntimeJobs, getEnginesSectionSnapshot, getEnginesSectionSnapshot);
+  useMountSubscription(() => {
+    void Promise.resolve().then(refreshRuntimeJobs);
+    const jobTimer = effectInterval(() => void refreshRuntimeJobs(), 2500);
+    return () => jobTimer.cancel();
+  }, [refreshRuntimeJobs]);
 
   const engineRows = useMemo(() => resolveEngineRowsView(targets, backends), [backends, targets]);
   const hasRows = hasHydratedEngineRows(engineRows);
 
   return (
-    <div className="space-y-8">
+    <div>
       <SettingsGroup
-        title="Inference engines"
-        description="Model-serving runtimes installed on the controller host."
+        title="Runtime engines"
+        description="Install, update, and inspect the model-serving runtimes on this controller."
         actions={<HydrationStatus hasRows={hasRows} />}
+        collapsible
+        defaultOpen={false}
       >
         {lostJobNotice ? (
           <SettingsNotice tone="warning" className="m-3">
@@ -106,20 +103,12 @@ export function EnginesSection({ runtime }: { runtime?: SystemRuntimeInfo | null
           onJobCreated={refreshRuntimeJobs}
           view={engineRows}
         />
-      </SettingsGroup>
-
-      <SettingsGroup
-        title="Hardware monitor"
-        description="GPU telemetry and lease state reported by the controller."
-      >
         <GpuMonitoringRow gpuMon={gpuMon} />
         <GpuLeaseRow holder={lease?.holder} />
       </SettingsGroup>
     </div>
   );
 }
-
-const getEnginesSectionSnapshot = (): number => 0;
 
 function HydrationStatus({ hasRows }: { hasRows: boolean }) {
   // Nothing to announce once the data is in — the rows speak for themselves, and
@@ -293,7 +282,7 @@ function BackendRow({
             disabled={state.status === "upgrading"}
           >
             {state.status === "upgrading" ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
+              <Spinner size="xs" />
             ) : state.status === "success" ? (
               <Check className="h-3 w-3 text-(--hl2)" />
             ) : state.status === "error" ? (
@@ -325,8 +314,6 @@ function EngineStatus({ installed, active }: { installed: boolean; active?: bool
 }
 
 function upgradeHandler(id: string) {
-  if (id === "vllm") return () => api.upgradeVllmRuntime();
-  if (id === "sglang") return () => api.upgradeSglangRuntime();
-  if (id === "llamacpp") return () => api.upgradeLlamacppRuntime();
+  if (id === "vllm" || id === "sglang" || id === "llamacpp") return () => api.upgradeRuntime(id);
   return undefined;
 }

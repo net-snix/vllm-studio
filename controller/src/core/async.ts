@@ -1,32 +1,39 @@
+import { Effect } from "effect";
+
+export const delayEffect = (milliseconds: number): Effect.Effect<void> =>
+  Effect.sleep(milliseconds);
+
 export const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-/** FIFO async mutex for controller operations that must not overlap. */
 export class AsyncLock {
   private queue: Array<() => void> = [];
   private locked = false;
 
-  public async acquire(): Promise<() => void> {
+  // Each acquire hands back a single-use release closure. Guarding against a
+  // double-call is essential: releasing twice would pop two waiters and grant
+  // the lock to both, silently breaking mutual exclusion.
+  private guardedRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.release();
+    };
+  }
+
+  public acquire(): Promise<() => void> {
     if (!this.locked) {
       this.locked = true;
-      return () => this.release();
+      return Promise.resolve(this.guardedRelease());
     }
 
     return new Promise((resolve) => {
       this.queue.push(() => {
         this.locked = true;
-        resolve(() => this.release());
+        resolve(this.guardedRelease());
       });
     });
-  }
-
-  public async acquireWithTimeout(timeoutMs: number): Promise<(() => void) | null> {
-    const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), timeoutMs);
-    });
-    const acquirePromise = this.acquire().then((release) => release);
-    const result = await Promise.race([timeoutPromise, acquirePromise]);
-    return result;
   }
 
   public release(): void {
@@ -39,14 +46,16 @@ export class AsyncLock {
   }
 }
 
-/** Bounded async queue with backpressure — drops oldest items when full. */
+type QueueResolver<TValue> = {
+  resolve: (value: TValue) => void;
+  reject: (error: Error) => void;
+  cleanup: () => void;
+};
+
 export class AsyncQueue<TValue> {
   private readonly capacity: number;
   private readonly items: TValue[] = [];
-  private readonly resolvers: Array<{
-    resolve: (value: TValue) => void;
-    reject: (error: Error) => void;
-  }> = [];
+  private readonly resolvers: Array<QueueResolver<TValue>> = [];
   private closed = false;
   private evictedCount = 0;
 
@@ -60,6 +69,7 @@ export class AsyncQueue<TValue> {
     }
     const resolver = this.resolvers.shift();
     if (resolver) {
+      resolver.cleanup();
       resolver.resolve(item);
       return true;
     }
@@ -101,34 +111,41 @@ export class AsyncQueue<TValue> {
     while (this.resolvers.length > 0) {
       const resolver = this.resolvers.shift();
       if (resolver) {
+        resolver.cleanup();
         resolver.reject(new Error("Queue closed"));
       }
     }
   }
 
-  public async shift(signal?: AbortSignal): Promise<TValue> {
+  public shift(signal?: AbortSignal): Promise<TValue> {
     if (this.items.length > 0) {
-      return this.items.shift() as TValue;
+      return Promise.resolve(this.items.shift() as TValue);
+    }
+    // A closed, drained queue will never push or close again, so a resolver
+    // registered below would never settle. Reject instead of hanging.
+    if (this.closed) {
+      return Promise.reject(new Error("Queue closed"));
+    }
+    // An already-aborted signal never dispatches `abort` to a listener added
+    // afterwards, so registering below would hang forever and leak the resolver.
+    if (signal?.aborted) {
+      return Promise.reject(new Error("Queue aborted"));
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise<TValue>((resolve, reject) => {
+      const entry: QueueResolver<TValue> = {
+        resolve,
+        reject,
+        cleanup: () => signal?.removeEventListener("abort", onAbort),
+      };
       const onAbort = (): void => {
-        signal?.removeEventListener("abort", onAbort);
+        const index = this.resolvers.indexOf(entry);
+        if (index >= 0) this.resolvers.splice(index, 1);
+        entry.cleanup();
         reject(new Error("Queue aborted"));
       };
-      if (signal) {
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
-      this.resolvers.push({
-        resolve: (value) => {
-          signal?.removeEventListener("abort", onAbort);
-          resolve(value);
-        },
-        reject: (error) => {
-          signal?.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      });
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      this.resolvers.push(entry);
     });
   }
 }

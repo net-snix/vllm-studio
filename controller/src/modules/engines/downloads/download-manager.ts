@@ -12,13 +12,16 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "../../../config/env";
 import type { Logger } from "../../../core/logger";
 import { Event, type EventManager } from "../../system/event-manager";
-import { CONTROLLER_EVENTS } from "../../../../../shared/contracts/controller-events";
+import { CONTROLLER_EVENTS } from "@local-studio/contracts/controller-events";
 import type { DownloadFileInfo, DownloadStatus, ModelDownload } from "../types";
 import type { DownloadStore } from "./download-store";
-import { buildHuggingFaceFileList, fetchHuggingFaceModelInfo } from "./huggingface-api";
+import {
+  buildHuggingFaceFileList,
+  fetchHuggingFaceModelInfo,
+  type FetchLike,
+} from "./huggingface-api";
+import { trackWriterFailure, waitForWriterDrain } from "./stream-backpressure";
 import { DOWNLOAD_DEFAULT_IGNORE_FILENAMES, DOWNLOAD_PROGRESS_THROTTLE_MS } from "../configs";
-
-// --- Byte accounting (merged from download-math.ts) ---
 
 const sumDownloadedBytes = (files: DownloadFileInfo[]): number => {
   return files.reduce((total, file) => total + (file.downloaded_bytes || 0), 0);
@@ -34,8 +37,6 @@ const sumTotalBytes = (files: DownloadFileInfo[]): number | null => {
   return known.reduce((total, file) => total + file.size_bytes, 0);
 };
 
-// --- Path resolution (merged from download-paths.ts) ---
-
 const sanitizePathSegments = (value: string): string[] => {
   return value
     .split(/[\\/]/)
@@ -46,7 +47,7 @@ const sanitizePathSegments = (value: string): string[] => {
 const resolveDownloadRoot = (
   config: Config,
   modelId: string,
-  destination?: string | null
+  destination?: string | null,
 ): string => {
   const base = resolve(config.models_dir);
   const segments = destination ? sanitizePathSegments(destination) : sanitizePathSegments(modelId);
@@ -82,7 +83,8 @@ export class DownloadManager {
     private readonly config: Config,
     private readonly store: DownloadStore,
     private readonly eventManager: EventManager,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly fetchImpl: FetchLike = fetch,
   ) {
     this.rehydrate();
   }
@@ -124,7 +126,7 @@ export class DownloadManager {
     this.ensureModelsDirectoryWritable();
     const hfToken = request.hf_token ?? null;
 
-    const info = await fetchHuggingFaceModelInfo(modelId, request.revision, hfToken);
+    const info = await fetchHuggingFaceModelInfo(modelId, request.revision, hfToken, this.fetchImpl);
     const files = buildHuggingFaceFileList(info, allowPatterns, ignorePatterns);
     if (files.length === 0) {
       throw new Error("No downloadable files found for this model");
@@ -161,7 +163,7 @@ export class DownloadManager {
     } catch (error) {
       throw new Error(
         `Models directory is not writable by the controller: ${this.config.models_dir}. ` +
-          `Update Settings → Models directory to a writable server path. ${String(error)}`
+          `Update Settings → Models directory to a writable server path. ${String(error)}`,
       );
     }
   }
@@ -226,7 +228,14 @@ export class DownloadManager {
       return;
     }
     const controller = new AbortController();
-    this.active.set(id, { controller, running: true });
+    // Identity token for this run. pause() deletes the active entry and a
+    // following resume() starts a NEW run that overwrites it; this token lets a
+    // superseded old run detect it no longer owns the download and make zero
+    // state writes (otherwise its abort-driven catch clobbers the live run's
+    // status to "paused" and its finally deletes the live run's active entry).
+    const self = { controller, running: true };
+    this.active.set(id, self);
+    const stillOwner = (): boolean => this.active.get(id) === self;
 
     let current = {
       ...download,
@@ -253,6 +262,10 @@ export class DownloadManager {
         current = this.store.get(id) ?? current;
       }
 
+      // A newer run superseded this one (pause→resume): leave all state to it.
+      if (!stillOwner()) {
+        return;
+      }
       current = this.store.get(id) ?? current;
       if (current.status === "paused" || current.status === "canceled") {
         return;
@@ -266,6 +279,11 @@ export class DownloadManager {
       this.store.save(current);
       this.publishState(current, current.status);
     } catch (error) {
+      // If a newer run already took over, this run's abort must not rewrite the
+      // live download's status.
+      if (!stillOwner()) {
+        return;
+      }
       const latest = this.store.get(id) ?? current;
       if (controller.signal.aborted) {
         latest.status = latest.status === "canceled" ? "canceled" : "paused";
@@ -281,7 +299,11 @@ export class DownloadManager {
         this.logger.error("Download failed", { error: String(error), id });
       }
     } finally {
-      this.active.delete(id);
+      // Only clear the active entry if it is still ours — a newer run may have
+      // replaced it.
+      if (stillOwner()) {
+        this.active.delete(id);
+      }
     }
   }
 
@@ -289,7 +311,7 @@ export class DownloadManager {
     download: ModelDownload,
     file: DownloadFileInfo,
     controller: AbortController,
-    hfToken: string | null
+    hfToken: string | null,
   ): Promise<void> {
     const closeWriter = (writer: ReturnType<typeof createWriteStream>): Promise<void> =>
       new Promise((resolve, reject) => {
@@ -325,7 +347,7 @@ export class DownloadManager {
     file.downloaded_bytes = existing;
     currentDownload = this.persistFileUpdate(currentDownload, file);
 
-    const response = await fetch(url, { headers, signal: controller.signal });
+    const response = await this.fetchImpl(url, { headers, signal: controller.signal });
     if (response.status === 416) {
       if (file.size_bytes && existing >= file.size_bytes) {
         renameSync(temporaryPath, localPath);
@@ -351,9 +373,14 @@ export class DownloadManager {
       currentDownload = this.persistFileUpdate(currentDownload, file);
     }
     const writer = createWriteStream(temporaryPath, { flags: shouldAppend ? "a" : "w" });
+    const writerFailure = trackWriterFailure(writer);
     const reader = response.body?.getReader();
     if (!reader) {
-      await closeWriter(writer);
+      try {
+        await closeWriter(writer);
+      } finally {
+        writerFailure.dispose();
+      }
       throw new Error("Download response has no body");
     }
 
@@ -361,17 +388,18 @@ export class DownloadManager {
     let downloaded = baseExisting;
     try {
       while (true) {
+        writerFailure.throwIfFailed();
         const { done, value } = await reader.read();
+        writerFailure.throwIfFailed();
         if (done) {
           break;
         }
         if (value) {
           const ok = writer.write(Buffer.from(value));
+          writerFailure.throwIfFailed();
           if (!ok) {
-            await new Promise<void>((resolveDrain, rejectDrain) => {
-              writer.once("drain", resolveDrain);
-              writer.once("error", rejectDrain);
-            });
+            await waitForWriterDrain(writer);
+            writerFailure.throwIfFailed();
           }
           downloaded += value.length;
           file.downloaded_bytes = downloaded;
@@ -383,7 +411,11 @@ export class DownloadManager {
         }
       }
     } finally {
-      await closeWriter(writer);
+      try {
+        await closeWriter(writer);
+      } finally {
+        writerFailure.dispose();
+      }
     }
 
     file.downloaded_bytes = downloaded;
@@ -402,7 +434,7 @@ export class DownloadManager {
   private persistFileUpdate(download: ModelDownload, file: DownloadFileInfo): ModelDownload {
     const latest = this.store.get(download.id) ?? download;
     const updatedFiles = latest.files.map((entry) =>
-      entry.path === file.path ? { ...file } : entry
+      entry.path === file.path ? { ...file } : entry,
     );
     const updated: ModelDownload = {
       ...latest,

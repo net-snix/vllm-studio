@@ -12,7 +12,6 @@ const targetFiles = [
 ];
 
 const helperMarker = "function localStudioJoinTextParts";
-const legacyHelperMarker = "function vllmStudioJoinTextParts";
 const helper =
   [
     "function localStudioTextPartBoundary(left, right) {",
@@ -51,11 +50,9 @@ const injectionPoint = `function isTextContentBlock(block) {
 }
 `;
 const helperStartMarker = "function localStudioTextPartBoundary";
-const legacyHelperStartMarker = "function vllmStudioTextPartBoundary";
 const helperEndMarker = "function isThinkingContentBlock";
 const originalJoin = `const assistantText = assistantTextParts.map((part) => part.text).join("");`;
 const patchedJoin = `const assistantText = localStudioJoinTextParts(assistantTextParts);`;
-const legacyPatchedJoin = `const assistantText = vllmStudioJoinTextParts(assistantTextParts);`;
 
 let found = 0;
 let patched = 0;
@@ -63,16 +60,14 @@ for (const file of targetFiles) {
   if (!existsSync(file)) continue;
   found += 1;
   let source = readFileSync(file, "utf8");
-  let next = source;
-  if (!next.includes(helperMarker) && !next.includes(legacyHelperMarker)) {
+  let next = source.replaceAll("vllmStudio", "localStudio");
+  if (!next.includes(helperMarker)) {
     if (!next.includes(injectionPoint)) {
       throw new Error(`Could not find pi-ai text block helper injection point in ${file}`);
     }
     next = next.replace(injectionPoint, `${injectionPoint}${helper}`);
   } else {
-    const helperStart = next.includes(helperStartMarker)
-      ? next.indexOf(helperStartMarker)
-      : next.indexOf(legacyHelperStartMarker);
+    const helperStart = next.indexOf(helperStartMarker);
     const helperEnd = next.indexOf(helperEndMarker, helperStart);
     if (helperStart === -1 || helperEnd === -1) {
       throw new Error(`Could not find existing pi-ai text boundary helper block in ${file}`);
@@ -81,8 +76,6 @@ for (const file of targetFiles) {
   }
   if (next.includes(originalJoin)) {
     next = next.replace(originalJoin, patchedJoin);
-  } else if (next.includes(legacyPatchedJoin)) {
-    next = next.replace(legacyPatchedJoin, patchedJoin);
   } else if (!next.includes(patchedJoin)) {
     throw new Error(`Could not find pi-ai assistant text join in ${file}`);
   }

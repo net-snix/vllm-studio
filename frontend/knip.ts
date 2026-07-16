@@ -6,8 +6,12 @@ const config = {
     "desktop/preload.ts",
     "desktop/app-identity.ts",
     "desktop/resources/pi-extensions/*.ts",
+    // Unit tests run via `bun test scripts` — the npm script no longer names a
+    // file glob knip can pick entries from, so list them explicitly.
+    "scripts/*.test.ts",
+    "src/**/*.test.ts",
   ],
-  project: ["src/**/*.{ts,tsx}", "desktop/**/*.{ts,tsx}"],
+  project: ["src/**/*.{ts,tsx}", "desktop/**/*.{ts,tsx}", "scripts/*.{ts,tsx}"],
   ignore: [".next/**", "node_modules/**"],
   ignoreIssues: {
     // IpcRequestMap is unreferenced; desktop/ is outside the frontend cleanup scope,
@@ -16,7 +20,28 @@ const config = {
   },
   // Some tooling is used implicitly (CSS/postcss pipeline, git hooks), which knip can't reliably
   // infer from source imports. Keep this list small and intentional.
-  ignoreDependencies: ["tailwindcss", "postcss"],
+  // @local-studio/contracts and @local-studio/agent-runtime are file: symlinks
+  // exporting raw .ts — knip cannot map their subpath imports back to the
+  // dependency entries.
+  ignoreDependencies: [
+    "tailwindcss",
+    "postcss",
+    "@local-studio/contracts",
+    "@local-studio/agent-runtime",
+    // ws is imported only by @local-studio/agent-runtime sources (outside
+    // knip's project scope) but must stay in frontend deps: it is a
+    // serverExternalPackages entry resolved from frontend/node_modules at
+    // runtime, and @types/ws types those imports when tsc checks the package
+    // sources as part of the frontend program.
+    "ws",
+    "@types/ws",
+    // hono + @hono/node-server are imported only by the agent-runtime
+    // package's standalone server (services/agent-runtime/src/server.ts,
+    // outside knip's project scope) but must live in frontend deps so the
+    // services/node_modules -> frontend/node_modules bridge resolves them.
+    "hono",
+    "@hono/node-server",
+  ],
   ignoreExportsUsedInFile: true,
 };
 

@@ -45,12 +45,18 @@ extraResources:
     to: app/frontend/.next/standalone/frontend/public
     filter:
       - "**/*"
+  - from: ../scripts/install-controller.sh
+    to: app/scripts/install-controller.sh
   - from: desktop/resources/pi-extensions
     to: desktop/resources/pi-extensions
     filter:
       - "**/*"
   - from: desktop/resources/mcp
     to: desktop/resources/mcp
+    filter:
+      - "**/*"
+  - from: desktop/resources/plugins
+    to: desktop/resources/plugins
     filter:
       - "**/*"
   - from: desktop/resources/skills
@@ -80,6 +86,8 @@ mac:
   gatekeeperAssess: false
   entitlements: desktop/resources/entitlements.mac.plist
   entitlementsInherit: desktop/resources/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Record your own voice to create a private, local voice profile.
 
 win:
   target:

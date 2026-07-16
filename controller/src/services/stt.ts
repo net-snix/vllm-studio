@@ -1,5 +1,4 @@
-import { resolveBinary } from "../core/command";
-import { runCliCommand } from "./cli-runner";
+import { resolveBinary, runCommandAsync } from "../core/command";
 
 export type SttMode = "strict" | "best_effort";
 
@@ -25,7 +24,7 @@ export class SttIntegrationError extends Error {
     status: number,
     code: string,
     message: string,
-    details: Record<string, unknown> = {}
+    details: Record<string, unknown> = {},
   ) {
     super(message);
     this.status = status;
@@ -58,7 +57,7 @@ const parseWhisperOutput = (stdout: string, stderr: string): string => {
 };
 
 const transcribeWithWhisperCpp = async (
-  request: SttTranscriptionRequest
+  request: SttTranscriptionRequest,
 ): Promise<SttTranscriptionResult> => {
   const configuredPath = process.env["LOCAL_STUDIO_STT_CLI"];
   const cliPath = configuredPath ? resolveBinary(configuredPath) : resolveBinary("whisper-cli");
@@ -71,7 +70,7 @@ const transcribeWithWhisperCpp = async (
       {
         configured_path: configuredPath ?? null,
         expected_binary: "whisper-cli",
-      }
+      },
     );
   }
 
@@ -80,9 +79,7 @@ const transcribeWithWhisperCpp = async (
     args.push("--language", request.language.trim());
   }
 
-  const result = await runCliCommand({
-    command: cliPath,
-    args,
+  const result = await runCommandAsync(cliPath, args, {
     timeoutMs: request.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   });
 
@@ -94,14 +91,14 @@ const transcribeWithWhisperCpp = async (
     });
   }
 
-  if (result.exitCode !== 0) {
+  if (result.status !== 0) {
     throw new SttIntegrationError(502, "stt_cli_failed", "STT CLI exited with an error", {
-      exit_code: result.exitCode,
+      exit_code: result.status,
       signal: result.signal,
       stderr: result.stderr,
       stdout: result.stdout,
-      command: result.command,
-      args: result.args,
+      command: cliPath,
+      args,
     });
   }
 
@@ -121,7 +118,7 @@ const transcribeWithWhisperCpp = async (
 };
 
 export const transcribeAudio = async (
-  request: SttTranscriptionRequest
+  request: SttTranscriptionRequest,
 ): Promise<SttTranscriptionResult> => {
   const backend = (process.env["LOCAL_STUDIO_STT_BACKEND"] ?? "whispercpp").toLowerCase();
 

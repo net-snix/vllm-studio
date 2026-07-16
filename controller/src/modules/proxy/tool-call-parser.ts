@@ -264,8 +264,6 @@ export const stripToolCallsFromContent = (content: string): string => {
   return stripControlTagNoise(cleaned);
 };
 
-export const stripToolCallProtocolBlocks = stripToolCallsFromContent;
-
 const buildToolCall = (name: string, args: unknown, index: number): ToolCall => ({
   index,
   id: createToolCallId(),

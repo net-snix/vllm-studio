@@ -1,6 +1,6 @@
 import os from "node:os";
 import { NextRequest, NextResponse } from "next/server";
-import { getApiSettings } from "@/lib/services/settings-service";
+import { getApiSettings } from "@local-studio/agent-runtime/settings-service";
 import { requireApiAccess } from "@/lib/auth/guard";
 import { createApiCore, type ApiCore } from "@/lib/api/core";
 import type { RecipeWithStatus } from "@/lib/types";
@@ -62,7 +62,9 @@ export async function POST(request: NextRequest) {
     return jsonError("modelId is required");
   }
   if (!Array.isArray(targets) || targets.length === 0 || !targets.every(isLocalAgentId)) {
-    return jsonError("targets must be a non-empty array of agent ids (pi, opencode, droid)");
+    return jsonError(
+      "targets must be a non-empty array of agent ids (pi, opencode, droid, hermes, omp)",
+    );
   }
 
   const settings = await getApiSettings();

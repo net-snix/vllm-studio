@@ -1,34 +1,26 @@
-// Pure HTTP/SSE clients for the agent session endpoints. No React state, no
-// component coupling — engine code calls into these and reacts to the results.
-
+import { Effect } from "effect";
 import { safeJson } from "@/features/agent/safe-json";
 import {
   parseAgentTurnCommandResult,
   type AgentTurnCommandResult,
-  type RuntimeLoggedEvent,
 } from "@/features/agent/messages";
 import type { AgentImageInput } from "@/features/agent/contracts";
 import type { BrowserBackend } from "@/features/agent/tools/types";
 import type {
-  ComposerPluginRef,
   ComposerPromptTemplateRef,
   ComposerSkillRef,
 } from "@/features/agent/composer-context";
 
 import {
   decodeRuntimeEventPayload,
+  decodeRuntimeSessions,
+  decodeRuntimeStatusResponse,
   type RuntimeContextUsage,
+  type RuntimeEventPayload,
+  type RuntimeSessionSummary,
+  type RuntimeStatus,
 } from "@/features/agent/runtime/runtime-schema";
-export type { RuntimeContextUsage };
-export type RuntimeStatus = {
-  active?: boolean;
-  running?: boolean;
-  piSessionId?: string | null;
-  modelId?: string | null;
-  eventSeq?: number;
-  events?: RuntimeLoggedEvent[];
-  contextUsage?: RuntimeContextUsage | null;
-};
+export type { RuntimeContextUsage, RuntimeEventPayload, RuntimeSessionSummary, RuntimeStatus };
 
 export function runtimeContextUsage(
   status: RuntimeStatus | null | undefined,
@@ -38,71 +30,116 @@ export function runtimeContextUsage(
   return fallback ?? null;
 }
 
-export type RuntimeSessionSummary = {
-  sessionId: string;
-  status: RuntimeStatus;
-};
+const fetchEffect = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Effect.Effect<Response, unknown> =>
+  Effect.tryPromise({
+    try: () => fetch(input, init),
+    catch: (error) => error,
+  });
 
-export async function listRuntimeSessions(): Promise<RuntimeSessionSummary[]> {
-  try {
-    const response = await fetch("/api/agent/runtime/sessions", { cache: "no-store" });
-    const payload = await safeJson<{ sessions?: RuntimeSessionSummary[] }>(response);
-    return Array.isArray(payload.sessions) ? payload.sessions : [];
-  } catch {
-    return [];
-  }
+const safeJsonEffect = <T>(response: Response): Effect.Effect<T, unknown> =>
+  Effect.tryPromise({
+    try: () => safeJson<T>(response),
+    catch: (error) => error,
+  });
+
+export function listRuntimeSessions(): Promise<RuntimeSessionSummary[]> {
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const response = yield* fetchEffect("/api/agent/runtime/sessions", { cache: "no-store" });
+      const payload = yield* safeJsonEffect<unknown>(response);
+      return decodeRuntimeSessions(payload);
+    }).pipe(Effect.catch(() => Effect.succeed([]))),
+  );
 }
 
-export async function loadRuntimeStatus(
+export function loadRuntimeStatus(
   sessionId: string,
   piSessionId?: string | null,
 ): Promise<RuntimeStatus | null> {
-  try {
-    const params = new URLSearchParams({ sessionId });
-    if (piSessionId) params.set("piSessionId", piSessionId);
-    const response = await fetch(`/api/agent/runtime/status?${params.toString()}`, {
-      cache: "no-store",
-    });
-    const payload = await safeJson<{
-      status?: {
-        active?: boolean;
-        running?: boolean;
-        piSessionId?: string | null;
-        modelId?: string | null;
-        eventSeq?: number;
-        contextUsage?: RuntimeContextUsage | null;
-      };
-      events?: RuntimeLoggedEvent[];
-    }>(response);
-    return payload.status ? { ...payload.status, events: payload.events ?? [] } : null;
-  } catch {
-    return null;
-  }
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const params = new URLSearchParams({ sessionId });
+      if (piSessionId) params.set("piSessionId", piSessionId);
+      const response = yield* fetchEffect(`/api/agent/runtime/status?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const payload = yield* safeJsonEffect<unknown>(response);
+      const decoded = decodeRuntimeStatusResponse(payload);
+      if (!decoded) return null;
+      return { ...decoded.status, events: decoded.events ?? [] };
+    }).pipe(Effect.catch(() => Effect.succeed(null))),
+  );
 }
 
-export async function abortSession(sessionId: string): Promise<void> {
-  await fetch("/api/agent/abort", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId }),
-  }).catch(() => undefined);
+export function abortSession(sessionId: string): Promise<void> {
+  return Effect.runPromise(
+    fetchEffect("/api/agent/abort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    }).pipe(
+      Effect.map(() => undefined),
+      Effect.catch(() => Effect.succeed(undefined)),
+    ),
+  );
 }
+
+export type CanonicalSessionMeta = {
+  title: string | null;
+  modelId: string | null;
+  startedAt: string | null;
+  piSessionId: string | null;
+};
 
 export type CanonicalSessionResult = {
   events: Record<string, unknown>[];
+  // Byte-offset cursor to pass as `before` to load the previous (older) page,
+  // or null when this page already reaches the start of the session log.
+  cursor: number | null;
+  // Session metadata from a head-scan; present on an initial tail load only.
+  meta: CanonicalSessionMeta | null;
 };
 
-export async function loadCanonicalSession(
+// Default page size for the initial tail load — enough to fill a long scrollback
+// while keeping a giant log from being read/parsed whole.
+export const DEFAULT_SESSION_TAIL = 500;
+
+export type LoadCanonicalSessionOptions = { tail?: number; before?: number };
+
+export function loadCanonicalSession(
   piSessionId: string,
   cwd: string,
+  options: LoadCanonicalSessionOptions = {},
 ): Promise<CanonicalSessionResult> {
-  const response = await fetch(
-    `/api/agent/sessions/${encodeURIComponent(piSessionId)}?cwd=${encodeURIComponent(cwd)}`,
-    { cache: "no-store" },
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const params = new URLSearchParams({ cwd });
+      const tail =
+        options.before === undefined ? (options.tail ?? DEFAULT_SESSION_TAIL) : undefined;
+      if (tail !== undefined) params.set("tail", String(tail));
+      if (options.before !== undefined) params.set("before", String(options.before));
+      const response = yield* fetchEffect(
+        `/api/agent/sessions/${encodeURIComponent(piSessionId)}?${params.toString()}`,
+        { cache: "no-store" },
+      );
+      const payload = yield* safeJsonEffect<{
+        events?: Record<string, unknown>[];
+        cursor?: number | null;
+        meta?: CanonicalSessionMeta | null;
+        error?: string;
+      }>(response);
+      if (!response.ok)
+        return yield* Effect.fail(new Error(payload.error || "Failed to load session"));
+      return {
+        events: payload.events ?? [],
+        cursor: payload.cursor ?? null,
+        meta: payload.meta ?? null,
+      };
+    }),
   );
-  const payload = await safeJson<{ events?: Record<string, unknown>[]; error?: string }>(response);
-  if (!response.ok) throw new Error(payload.error || "Failed to load session");
-  return { events: payload.events ?? [] };
 }
 
 export type CompactSessionArgs = {
@@ -114,7 +151,6 @@ export type CompactSessionArgs = {
   browserSessionId?: string;
   browserBackend?: BrowserBackend;
   canvasEnabled?: boolean;
-  plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
   promptTemplates?: ComposerPromptTemplateRef[];
 };
@@ -123,18 +159,22 @@ export type CompactSessionResult = {
   status?: RuntimeStatus;
 };
 
-export async function compactSession(args: CompactSessionArgs): Promise<CompactSessionResult> {
-  const response = await fetch("/api/agent/compact", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args),
-  });
-  const payload = await safeJson<{
-    error?: string;
-    status?: RuntimeStatus;
-  }>(response);
-  if (!response.ok) throw new Error(payload.error || "Compaction failed");
-  return payload;
+export function compactSession(args: CompactSessionArgs): Promise<CompactSessionResult> {
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const response = yield* fetchEffect("/api/agent/compact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args),
+      });
+      const payload = yield* safeJsonEffect<{
+        error?: string;
+        status?: RuntimeStatus;
+      }>(response);
+      if (!response.ok) return yield* Effect.fail(new Error(payload.error || "Compaction failed"));
+      return payload;
+    }),
+  );
 }
 
 export type SubmitTurnArgs = {
@@ -150,36 +190,34 @@ export type SubmitTurnArgs = {
   browserSessionId?: string;
   browserBackend?: BrowserBackend;
   canvasEnabled?: boolean;
-  plugins: ComposerPluginRef[];
   skills: ComposerSkillRef[];
   promptTemplates?: ComposerPromptTemplateRef[];
 };
 
-export async function submitTurnCommand(args: SubmitTurnArgs): Promise<AgentTurnCommandResult> {
-  const response = await fetch("/api/agent/turn", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args),
-  });
-  const payload = await safeJson<{ error?: string } & Partial<AgentTurnCommandResult>>(response);
-  const parsed = parseAgentTurnCommandResult(payload);
-  if (!response.ok || !parsed) {
-    throw new Error(payload.error || `Agent request failed: ${response.status}`);
-  }
-  if (parsed.outcome === "rejected") {
-    throw new Error(parsed.error || "Agent request was rejected");
-  }
-  return parsed;
+export function submitTurnCommand(args: SubmitTurnArgs): Promise<AgentTurnCommandResult> {
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const response = yield* fetchEffect("/api/agent/turn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args),
+      });
+      const payload = yield* safeJsonEffect<{ error?: string } & Partial<AgentTurnCommandResult>>(
+        response,
+      );
+      const parsed = parseAgentTurnCommandResult(payload);
+      if (!response.ok || !parsed) {
+        return yield* Effect.fail(
+          new Error(payload.error || `Agent request failed: ${response.status}`),
+        );
+      }
+      if (parsed.outcome === "rejected") {
+        return yield* Effect.fail(new Error(parsed.error || "Agent request was rejected"));
+      }
+      return parsed;
+    }),
+  );
 }
-
-/**
- * Subscribe to the runtime's per-session event stream. Returns an
- * unsubscribe function that closes the EventSource. Callers handle `onError`
- * (e.g. probe runtime status to see if the session still exists).
- */
-export type RuntimeEventPayload =
-  | { type: "status"; phase: string; session?: RuntimeStatus }
-  | { type: "pi"; seq?: number; event: Record<string, unknown> };
 
 export type RuntimeEventSubscription = { close: () => void };
 
@@ -196,10 +234,6 @@ export function subscribeRuntimeEvents(
   if (piSessionId) params.set("piSessionId", piSessionId);
   const source = new EventSource(`/api/agent/runtime/events?${params.toString()}`);
   source.onmessage = (event) => {
-    // Validate the SSE frame at the boundary via the Effect schema. Malformed
-    // or unrecognized payloads are dropped silently (matching the legacy
-    // JSON.parse-cast behavior, but now without untrusted data reaching the
-    // reducer).
     let parsed: unknown;
     try {
       parsed = JSON.parse(event.data);
@@ -208,7 +242,7 @@ export function subscribeRuntimeEvents(
     }
     const payload = decodeRuntimeEventPayload(parsed);
     if (!payload) return;
-    handlers.onPayload(payload as unknown as RuntimeEventPayload);
+    handlers.onPayload(payload);
   };
   source.onerror = handlers.onError;
   return {

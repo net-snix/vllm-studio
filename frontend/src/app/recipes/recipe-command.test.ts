@@ -6,7 +6,7 @@ import { generateCommand } from "@/features/recipes/recipe-command";
 import { normalizeRecipeForEditor } from "@/features/recipes/normalize-recipe";
 import { prepareRecipeForSave } from "@/features/recipes/prepare-recipe";
 
-test("vLLM disable log requests emits the v0.22 boolean flag", () => {
+test("vLLM disable log requests emits the current boolean flag", () => {
   const command = generateCommand({
     id: "recipe-test",
     name: "Recipe test",
@@ -15,11 +15,10 @@ test("vLLM disable log requests emits the v0.22 boolean flag", () => {
     disable_log_requests: true,
   } as RecipeEditor);
 
-  assert.match(command, /--no-enable-log-requests/);
-  assert.doesNotMatch(command, /--disable-log-requests/);
+  assert.match(command, /--disable-log-requests/);
 });
 
-test("legacy disable log requests extra arg normalizes to the current vLLM flag", () => {
+test("disable log requests extra arg round-trips through the recipe editor", () => {
   const recipe = normalizeRecipeForEditor({
     id: "recipe-test",
     name: "Recipe test",
@@ -33,6 +32,5 @@ test("legacy disable log requests extra arg normalizes to the current vLLM flag"
   assert.equal(recipe.disable_log_requests, true);
 
   const saved = prepareRecipeForSave(recipe);
-  assert.equal(saved.extra_args?.["no-enable-log-requests"], true);
-  assert.equal(saved.extra_args?.["disable-log-requests"], undefined);
+  assert.equal(saved.extra_args?.["disable-log-requests"], true);
 });

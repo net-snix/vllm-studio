@@ -2,7 +2,7 @@
  * Shared frontend types: re-exports of the shared contracts plus the
  * frontend-only view models used across multiple features.
  */
-import type { RecipeBase, RecipePayload } from "../../../shared/contracts/recipes";
+import type { RecipeBase, RecipePayload } from "@local-studio/contracts/recipes";
 
 // --- Shared contract re-exports ---
 
@@ -15,8 +15,12 @@ export type {
   ModelInfo,
   RecipeBase,
   RecipePayload,
+  Serve,
+  ServePayload,
+  ServeRuntime,
+  ServeRuntimeKind,
   StorageInfo,
-} from "../../../shared/contracts/recipes";
+} from "@local-studio/contracts/recipes";
 
 export type {
   CompatibilityCheck,
@@ -52,14 +56,19 @@ export type {
   LinuxDashboardService,
   LinuxDashboardSnapshot,
   LinuxDashboardThermal,
-} from "../../../shared/contracts/system";
+} from "@local-studio/contracts/system";
+
+export type { ControllerUsageStats, UsageStats } from "@local-studio/contracts/usage";
 
 export type {
-  ControllerUsageStats,
-  SortDirection,
-  SortField,
-  UsageStats,
-} from "../../../shared/contracts/usage";
+  Rig,
+  RigAccelerator,
+  RigHardwareType,
+  RigNode,
+  RigNodeRole,
+  RigNodeSource,
+  RigsPayload,
+} from "@local-studio/contracts/rigs";
 
 export type {
   GPU,
@@ -70,7 +79,7 @@ export type {
   StudioDiagnostics,
   StudioSettings,
   VRAMCalculation,
-} from "../../../shared/contracts/observability";
+} from "@local-studio/contracts/observability";
 
 // --- Recipes ---
 
@@ -125,6 +134,23 @@ export interface ModelRecommendation {
   min_vram_gb: number | null;
   description: string;
   tags: string[];
+}
+
+export interface StarterPreset {
+  id: string;
+  name: string;
+  description: string;
+  kind: "download" | "remote";
+  tags: string[];
+  size_gb: number | null;
+  min_vram_gb: number | null;
+  model_id?: string;
+  allow_patterns?: string[];
+  backend?: "vllm" | "llamacpp";
+  gguf_file?: string;
+  recipe_overrides?: Record<string, unknown>;
+  remote?: { base_url: string; model: string };
+  fits?: boolean;
 }
 
 export interface HuggingFaceModel {

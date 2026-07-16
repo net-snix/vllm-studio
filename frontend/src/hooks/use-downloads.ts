@@ -2,9 +2,10 @@
 
 import { effectInterval } from "@/lib/effect-timers";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState } from "react";
 import api from "@/lib/api/client";
 import type { ModelDownload } from "@/lib/types";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 
 type StartDownloadParams = {
   model_id: string;
@@ -33,17 +34,17 @@ export function useDownloads(pollIntervalMs = 2500) {
     }
   }, []);
 
-  const subscribeDownloads = useCallback(
-    (_notify: () => void) => {
-      void refresh();
-      if (pollIntervalMs <= 0) return () => {};
-      const timer = effectInterval(refresh, pollIntervalMs);
-      return () => timer.cancel();
-    },
-    [pollIntervalMs, refresh],
-  );
+  // Only in-flight/resumable-soon states justify the fast poll; terminal
+  // states (failed/canceled/completed) don't change server-side, so they fall
+  // back to the slow poll instead of holding the fast interval forever.
+  const hasActive = downloads.some((d) => d.status === "downloading" || d.status === "paused");
 
-  useSyncExternalStore(subscribeDownloads, getDownloadsSnapshot, getDownloadsSnapshot);
+  useMountSubscription(() => {
+    void refresh();
+    if (pollIntervalMs <= 0) return;
+    const timer = effectInterval(refresh, hasActive ? pollIntervalMs : 15_000);
+    return () => timer.cancel();
+  }, [pollIntervalMs, refresh, hasActive]);
 
   const startDownload = useCallback(
     async (params: StartDownloadParams) => {
@@ -118,5 +119,3 @@ export function useDownloads(pollIntervalMs = 2500) {
     cancelDownload,
   };
 }
-
-const getDownloadsSnapshot = (): number => 0;

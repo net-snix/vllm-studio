@@ -18,16 +18,6 @@ export function useRecipesDerived({
   runningRecipeId,
   deleteConfirm,
 }: Args) {
-  const modelServedNames = useMemo(() => {
-    const lookup: Record<string, string> = {};
-    for (const r of recipes) {
-      if (r.model_path && r.served_model_name && !lookup[r.model_path]) {
-        lookup[r.model_path] = r.served_model_name;
-      }
-    }
-    return lookup;
-  }, [recipes]);
-
   const runningRecipe = useMemo(() => {
     if (!runningRecipeId) return null;
     return recipes.find((recipe) => recipe.id === runningRecipeId) ?? null;
@@ -46,7 +36,9 @@ export function useRecipesDerived({
         recipe.name.toLowerCase().includes(filterLower) ||
         recipe.model_path.toLowerCase().includes(filterLower) ||
         (recipe.served_model_name?.toLowerCase().includes(filterLower) ?? false) ||
-        recipe.backend.toLowerCase().includes(filterLower)
+        recipe.backend.toLowerCase().includes(filterLower) ||
+        (recipe.runtime?.kind.toLowerCase().includes(filterLower) ?? false) ||
+        (recipe.runtime?.ref.toLowerCase().includes(filterLower) ?? false)
       );
     });
   }, [filterLower, recipes]);
@@ -61,5 +53,5 @@ export function useRecipesDerived({
     });
   }, [filteredRecipes, pinnedRecipes]);
 
-  return { modelServedNames, runningRecipe, deleteRecipe, sortedRecipes };
+  return { runningRecipe, deleteRecipe, sortedRecipes };
 }

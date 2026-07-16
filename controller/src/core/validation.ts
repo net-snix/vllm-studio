@@ -7,7 +7,9 @@ type JsonBodyContext = { req: { json: () => Promise<unknown> } };
  * plain object. The standard guard used by mutating routes; throws the same
  * `badRequest("Invalid payload")` the routes previously raised inline.
  */
-export const parseJsonObjectBody = async (ctx: JsonBodyContext): Promise<Record<string, unknown>> => {
+export const parseJsonObjectBody = async (
+  ctx: JsonBodyContext,
+): Promise<Record<string, unknown>> => {
   const body = await ctx.req.json().catch(() => ({}));
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw badRequest("Invalid payload");
@@ -15,27 +17,8 @@ export const parseJsonObjectBody = async (ctx: JsonBodyContext): Promise<Record<
   return body as Record<string, unknown>;
 };
 
-export const optionalString = (
-  record: Record<string, unknown>,
-  key: string,
-): string | undefined => (typeof record[key] === "string" ? (record[key] as string) : undefined);
-
-/**
- * Optional string-array field. Matches the historical inline guards:
- * non-array values are treated as absent; an array containing non-string
- * entries is rejected.
- */
-export const optionalStringArray = (
-  record: Record<string, unknown>,
-  key: string,
-): string[] | undefined => {
-  const value = record[key];
-  if (!Array.isArray(value)) return undefined;
-  if (value.some((entry) => typeof entry !== "string")) {
-    throw badRequest(`${key} must be an array of strings`);
-  }
-  return value as string[];
-};
+export const optionalString = (record: Record<string, unknown>, key: string): string | undefined =>
+  typeof record[key] === "string" ? (record[key] as string) : undefined;
 
 /**
  * Optional string-enum field. Matches the historical inline guards: values

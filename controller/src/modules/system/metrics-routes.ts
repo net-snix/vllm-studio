@@ -1,71 +1,17 @@
 import { performance } from "node:perf_hooks";
-import { observeControllerFunction } from "../../core/function-observability";
+import { findObservedInferenceProcess } from "../../core/function-observability";
 import type { RouteRegistrar } from "../../http/route-registrar";
 import type { AppContext } from "../../app-context";
 import { getGpuInfo } from "./platform/gpu";
-import { fetchInference } from "../../services/inference-client";
-import { fetchLocal } from "../../http/local-fetch";
+import { fetchInference } from "../../http/local-fetch";
+import type { UsageAggregate } from "../../stores/inference-request-store";
+import {
+  SGLANG_METRIC_NAMES,
+  VLLM_METRIC_NAMES,
+  scrapeEngineMetrics,
+} from "./engine-metrics-scrape";
+import { firstMetric, positiveOrUndefined } from "./metrics-peaks";
 import { scrapeDs4Throughput } from "./log-throughput";
-
-type UsageAggregate = {
-  totals?: {
-    total_tokens?: number;
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_requests?: number;
-  };
-  latency?: { avg_ms?: number | null };
-  ttft?: { avg_ms?: number | null };
-};
-
-const positiveOrUndefined = (value: unknown): number | undefined => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-};
-
-const firstMetric = (metrics: Record<string, number>, names: string[]): number => {
-  for (const name of names) {
-    const value = metrics[name];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return 0;
-};
-
-type EngineScrape = {
-  metrics: Record<string, number>;
-  modelName: string | null;
-  hasVllm: boolean;
-  hasSglang: boolean;
-};
-
-const scrapePrometheusMetrics = async (port: number): Promise<EngineScrape> => {
-  const empty: EngineScrape = { metrics: {}, modelName: null, hasVllm: false, hasSglang: false };
-  try {
-    const response = await fetchLocal(port, "/metrics", { timeoutMs: 1500 });
-    if (response.status !== 200) return empty;
-    const text = await response.text();
-    const metrics: Record<string, number> = {};
-    let modelName: string | null = null;
-    let hasVllm = false;
-    let hasSglang = false;
-    for (const line of text.split("\n")) {
-      if (line.startsWith("#") || line.trim().length === 0) continue;
-      if (!hasVllm && line.startsWith("vllm:")) hasVllm = true;
-      if (!hasSglang && line.startsWith("sglang:")) hasSglang = true;
-      if (!modelName) {
-        const label = line.match(/(?:served_model_name|model_name)="([^"]+)"/);
-        if (label?.[1]) modelName = label[1];
-      }
-      const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)\{?[^}]*\}?\s+([\d.eE+-]+)$/);
-      if (!match?.[1] || !match[2]) continue;
-      const value = Number(match[2]);
-      if (Number.isFinite(value)) metrics[match[1]] = value;
-    }
-    return { metrics, modelName, hasVllm, hasSglang };
-  } catch {
-    return empty;
-  }
-};
 
 // Previous-scrape token counters per model, used to derive live throughput as a
 // rate for engines (vLLM) that expose only cumulative counters, not gauges.
@@ -85,20 +31,13 @@ const buildModelKeys = (modelId: string, modelPath: string | null | undefined): 
 };
 
 const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, unknown>> => {
-  const current = await observeControllerFunction(
-    context,
-    "metrics.current.findInferenceProcess",
-    () => context.processManager.findInferenceProcess(context.config.inference_port)
-  );
+  const current = await findObservedInferenceProcess(context, "metrics.current");
   const gpus = getGpuInfo();
   const lifetimeData = context.stores.lifetimeMetricsStore.getAll();
   const currentPowerWatts = gpus.reduce((sum, gpu) => sum + gpu.power_draw, 0);
-  const vramUsedGb = gpus.reduce((sum, gpu) => sum + Number(gpu.memory_used_mb ?? 0) / 1024, 0);
-  const vramCapacityGb = gpus.reduce(
-    (sum, gpu) => sum + Number(gpu.memory_total_mb ?? 0) / 1024,
-    0
-  );
-  const powerLimitWatts = gpus.reduce((sum, gpu) => sum + Number(gpu.power_limit ?? 0), 0);
+  const vramUsedGb = gpus.reduce((sum, gpu) => sum + gpu.memory_used_mb / 1024, 0);
+  const vramCapacityGb = gpus.reduce((sum, gpu) => sum + gpu.memory_total_mb / 1024, 0);
+  const powerLimitWatts = gpus.reduce((sum, gpu) => sum + gpu.power_limit, 0);
   const baseMetrics: Record<string, unknown> = {
     lifetime_prompt_tokens: lifetimeData["prompt_tokens_total"] ?? 0,
     lifetime_completion_tokens: lifetimeData["completion_tokens_total"] ?? 0,
@@ -114,7 +53,7 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
   // Scrape the inference port directly so metrics resolve for any engine and any
   // launch style (manual `vllm serve`, `python -m …`, controller-launched),
   // independent of host-process detection.
-  const scrape = await scrapePrometheusMetrics(context.config.inference_port);
+  const scrape = await scrapeEngineMetrics(context.config.inference_port, 1500);
   const engineActive = scrape.hasVllm || scrape.hasSglang;
 
   if (!current && !engineActive) {
@@ -133,32 +72,19 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
     scrape.modelName ??
     "active";
   const prometheus = scrape.metrics;
-  const promptTokenNames = isSglang
-    ? ["sglang:prompt_tokens_total", "sglang:prefill_tokens_total"]
-    : ["vllm:prompt_tokens_total"];
-  const generationTokenNames = isSglang
-    ? [
-        "sglang:generation_tokens_total",
-        "sglang:completion_tokens_total",
-        "sglang:gen_tokens_total",
-      ]
-    : ["vllm:generation_tokens_total"];
-  const usageAggregate = context.stores.inferenceRequestStore.aggregate(
-    buildModelKeys(modelId, current?.model_path)
-  ) as UsageAggregate | null;
+  const names = isSglang ? SGLANG_METRIC_NAMES : VLLM_METRIC_NAMES;
+  const usageAggregate: UsageAggregate | null = context.stores.inferenceRequestStore.aggregate(
+    buildModelKeys(modelId, current?.model_path),
+  );
   const usageTotals = usageAggregate?.totals;
-  const promptTokensTotal = firstMetric(prometheus, promptTokenNames);
-  const generationTokensTotal = firstMetric(prometheus, generationTokenNames);
+  const promptTokensTotal = firstMetric(prometheus, names.promptTokens);
+  const generationTokensTotal = firstMetric(prometheus, names.generationTokens);
 
   // Throughput: SGLang publishes instantaneous gauges; vLLM (and most engines)
   // publish only cumulative token counters, so derive a live rate from the delta
   // between scrapes. Sub-interval polls reuse the previous rate to avoid spikes.
-  let promptThroughput = isSglang
-    ? firstMetric(prometheus, ["sglang:prompt_throughput", "sglang:prefill_throughput"])
-    : 0;
-  let generationThroughput = isSglang
-    ? firstMetric(prometheus, ["sglang:gen_throughput", "sglang:generation_throughput"])
-    : 0;
+  let promptThroughput = isSglang ? firstMetric(prometheus, names.promptThroughput) : 0;
+  let generationThroughput = isSglang ? firstMetric(prometheus, names.generationThroughput) : 0;
   if (!isSglang) {
     const nowMs = Date.now();
     const previous = throughputSamples.get(modelId);
@@ -167,7 +93,7 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
       promptThroughput = Math.max(0, (promptTokensTotal - previous.promptTokens) / elapsedSeconds);
       generationThroughput = Math.max(
         0,
-        (generationTokensTotal - previous.genTokens) / elapsedSeconds
+        (generationTokensTotal - previous.genTokens) / elapsedSeconds,
       );
       throughputSamples.set(modelId, {
         promptTokens: promptTokensTotal,
@@ -189,14 +115,8 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
       });
     }
   }
-  const ttftSumName = isSglang
-    ? "sglang:time_to_first_token_seconds_sum"
-    : "vllm:time_to_first_token_seconds_sum";
-  const ttftCountName = isSglang
-    ? "sglang:time_to_first_token_seconds_count"
-    : "vllm:time_to_first_token_seconds_count";
-  const ttftCount = prometheus[ttftCountName] ?? 0;
-  const avgTtftMs = ttftCount > 0 ? ((prometheus[ttftSumName] ?? 0) / ttftCount) * 1000 : 0;
+  const ttftCount = prometheus[names.ttftCount] ?? 0;
+  const avgTtftMs = ttftCount > 0 ? ((prometheus[names.ttftSum] ?? 0) / ttftCount) * 1000 : 0;
   const ds4Sample = current?.backend === "ds4" ? scrapeDs4Throughput(context, current) : null;
   const peakData = context.stores.peakMetricsStore.get(modelId);
   const bestSessionPeakData = context.stores.peakMetricsStore.getBestSession(modelId);
@@ -206,22 +126,9 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
     model_id: modelId,
     model_path: current?.model_path ?? null,
     served_model_name: current?.served_model_name ?? scrape.modelName ?? null,
-    running_requests: firstMetric(
-      prometheus,
-      isSglang
-        ? ["sglang:num_running_reqs", "sglang:num_requests_running"]
-        : ["vllm:num_requests_running"]
-    ),
-    pending_requests: firstMetric(
-      prometheus,
-      isSglang
-        ? ["sglang:num_queue_reqs", "sglang:num_pending_reqs", "sglang:num_requests_waiting"]
-        : ["vllm:num_requests_waiting"]
-    ),
-    kv_cache_usage: firstMetric(
-      prometheus,
-      isSglang ? ["sglang:token_usage", "sglang:kv_cache_usage_perc"] : ["vllm:kv_cache_usage_perc"]
-    ),
+    running_requests: firstMetric(prometheus, names.runningRequests),
+    pending_requests: firstMetric(prometheus, names.pendingRequests),
+    kv_cache_usage: firstMetric(prometheus, names.kvCacheUsage),
     prompt_tokens_total:
       positiveOrUndefined(promptTokensTotal) ?? positiveOrUndefined(usageTotals?.prompt_tokens),
     generation_tokens_total:
@@ -248,32 +155,13 @@ const buildCurrentMetrics = async (context: AppContext): Promise<Record<string, 
   };
 };
 
+// Peak metrics are an analytics read (updated by the collector every few
+// seconds), so a short TTL collapses dashboard polling without going stale.
+const PEAK_METRICS_CACHE_TTL_MS = 15_000;
+
 export const registerMonitoringRoutes: RouteRegistrar = (app, context) => {
-  app.get("/metrics", async (_ctx) => {
-    const current = await observeControllerFunction(
-      context,
-      "metrics.prometheus.findInferenceProcess",
-      () => context.processManager.findInferenceProcess(context.config.inference_port)
-    );
-    if (current) {
-      context.metrics.updateActiveModel(
-        current.model_path,
-        current.backend,
-        current.served_model_name
-      );
-    } else {
-      context.metrics.updateActiveModel();
-    }
-
-    const gpus = getGpuInfo();
-    context.metrics.updateGpuMetrics(gpus.map((gpu) => ({ ...gpu })));
-    context.metrics.updateSseMetrics(context.eventManager.getStats());
-
-    const content = await context.metricsRegistry.getMetrics();
-    return new Response(content, {
-      headers: { "Content-Type": context.metricsRegistry.contentType },
-    });
-  });
+  type PeakMetricsBody = Record<string, unknown> | { metrics: Array<Record<string, unknown>> };
+  const peakMetricsCache = new Map<string, { at: number; body: PeakMetricsBody }>();
 
   app.get("/v1/metrics/vllm", async (ctx) => {
     try {
@@ -290,41 +178,22 @@ export const registerMonitoringRoutes: RouteRegistrar = (app, context) => {
 
   app.get("/peak-metrics", async (ctx) => {
     const modelId = ctx.req.query("model_id");
-    if (modelId) {
-      const result = context.stores.peakMetricsStore.get(modelId);
-      return ctx.json(result ?? { error: "No metrics for this model" });
+    const cacheKey = modelId ?? " all";
+    const cached = peakMetricsCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < PEAK_METRICS_CACHE_TTL_MS) {
+      return ctx.json(cached.body);
     }
-    return ctx.json({ metrics: context.stores.peakMetricsStore.getAll() });
-  });
-
-  app.get("/lifetime-metrics", async (ctx) => {
-    const data = context.stores.lifetimeMetricsStore.getAll();
-    const uptimeHours = (data["uptime_seconds"] ?? 0) / 3600;
-    const energyKwh = (data["energy_wh"] ?? 0) / 1000;
-    const tokens = data["tokens_total"] ?? 0;
-    const kwhPerMillion = tokens > 0 ? energyKwh / (tokens / 1_000_000) : 0;
-    const gpus = getGpuInfo();
-    const currentPower = gpus.reduce((sum, gpu) => sum + gpu.power_draw, 0);
-
-    return ctx.json({
-      tokens_total: Math.floor(data["tokens_total"] ?? 0),
-      requests_total: Math.floor(data["requests_total"] ?? 0),
-      energy_wh: data["energy_wh"] ?? 0,
-      energy_kwh: energyKwh,
-      uptime_seconds: data["uptime_seconds"] ?? 0,
-      uptime_hours: uptimeHours,
-      first_started_at: data["first_started_at"] ?? 0,
-      kwh_per_million_tokens: kwhPerMillion,
-      current_power_watts: currentPower,
-    });
+    const body = modelId
+      ? (context.stores.peakMetricsStore.get(modelId) ?? { error: "No metrics for this model" })
+      : { metrics: context.stores.peakMetricsStore.getAll() };
+    peakMetricsCache.set(cacheKey, { at: Date.now(), body });
+    return ctx.json(body);
   });
 
   app.post("/benchmark", async (ctx) => {
     const promptTokens = Number(ctx.req.query("prompt_tokens") ?? 1000);
     const maxTokens = Number(ctx.req.query("max_tokens") ?? 100);
-    const current = await observeControllerFunction(context, "benchmark.findInferenceProcess", () =>
-      context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const current = await findObservedInferenceProcess(context, "benchmark");
     if (!current) {
       return ctx.json({ error: "No model running" });
     }
@@ -361,7 +230,7 @@ export const registerMonitoringRoutes: RouteRegistrar = (app, context) => {
           modelId,
           undefined,
           generationTps,
-          undefined
+          undefined,
         );
         context.stores.peakMetricsStore.addTokens(modelId, completionTokens, 1);
 

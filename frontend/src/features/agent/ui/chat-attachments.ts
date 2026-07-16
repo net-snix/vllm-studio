@@ -3,6 +3,7 @@
 import { newId, randomIdSegment } from "@/features/agent/messages/helpers";
 import type { AgentImageInput } from "@/features/agent/contracts";
 import { formatBytes } from "@/lib/formatters";
+import { AGENT_IMAGE_LIMITS, agentImageSizesLimitError } from "@shared/agent/agent-image-input";
 
 export type ChatAttachment = {
   id: string;
@@ -26,7 +27,7 @@ export type ProjectFileAttachmentInput = {
 };
 
 const MAX_INLINE_TEXT_ATTACHMENT_BYTES = 350_000;
-const MAX_INLINE_IMAGE_ATTACHMENT_BYTES = 6_000_000;
+const MAX_INLINE_IMAGE_ATTACHMENT_BYTES = AGENT_IMAGE_LIMITS.perImageBytes;
 
 export function attachmentDedupKey(file: Pick<ChatAttachment, "name" | "type" | "size" | "path">) {
   const path = file.path?.trim();
@@ -52,6 +53,85 @@ export function imageInputFromAttachment(
   return { type: "image", data, mimeType: file.type };
 }
 
+export function imageInputsFromAttachments(attachments: readonly ChatAttachment[]) {
+  return attachments.flatMap((file) => {
+    const image = imageInputFromAttachment(file);
+    return image ? [image] : [];
+  });
+}
+
+export function inlineImageAttachmentStats(attachments: readonly ChatAttachment[]) {
+  const images = attachments.filter(isImageAttachment);
+  return {
+    count: images.length,
+    bytes: images.reduce((total, image) => total + image.size, 0),
+  };
+}
+
+function imageAttachmentLimitError(attachments: readonly ChatAttachment[]) {
+  return agentImageSizesLimitError(
+    attachments.filter(isImageAttachment).map((image) => image.size),
+  );
+}
+
+export function preflightAttachmentFiles(
+  current: readonly ChatAttachment[],
+  incoming: readonly File[],
+) {
+  const accepted: File[] = [];
+  const discarded: File[] = [];
+  const seen = new Set(current.map(attachmentDedupKey));
+  let imageSizes = current.filter(isImageAttachment).map((image) => image.size);
+  let error: string | null = null;
+  for (const file of incoming) {
+    const key = attachmentDedupKey(file);
+    if (seen.has(key)) {
+      discarded.push(file);
+      continue;
+    }
+    const nextImageSizes =
+      file.type.startsWith("image/") && file.size <= AGENT_IMAGE_LIMITS.perImageBytes
+        ? [...imageSizes, file.size]
+        : imageSizes;
+    const candidateError = agentImageSizesLimitError(nextImageSizes);
+    if (candidateError) {
+      discarded.push(file);
+      error ??= candidateError;
+      continue;
+    }
+    seen.add(key);
+    imageSizes = nextImageSizes;
+    accepted.push(file);
+  }
+  return { accepted, discarded, error };
+}
+
+export function appendAttachmentsWithinImageLimits(
+  current: readonly ChatAttachment[],
+  incoming: readonly ChatAttachment[],
+) {
+  const attachments = [...current];
+  const discarded: ChatAttachment[] = [];
+  const seen = new Set(current.map(attachmentDedupKey));
+  let error: string | null = null;
+  incoming.forEach((file) => {
+    const key = attachmentDedupKey(file);
+    if (seen.has(key)) {
+      discarded.push(file);
+      return;
+    }
+    const candidateError = imageAttachmentLimitError([...attachments, file]);
+    if (candidateError) {
+      discarded.push(file);
+      error ??= candidateError;
+      return;
+    }
+    seen.add(key);
+    attachments.push(file);
+  });
+  return { attachments, discarded, error };
+}
+
 function previewKindFor(type: string): ChatAttachment["previewKind"] {
   if (type.startsWith("image/")) return "image";
   if (type.startsWith("video/")) return "video";
@@ -66,6 +146,23 @@ function objectUrlFor(file: File): string | undefined {
     return URL.createObjectURL(file);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Release an attachment's blob preview URL. Safe to call for any attachment;
+ * a no-op unless previewUrl is a `blob:` URL (data: URLs and the durable
+ * inline content are left alone). Call when an attachment is discarded before
+ * being sent — a sent attachment's blob may still be referenced by the message.
+ */
+export function revokeAttachmentPreview(attachment: Pick<ChatAttachment, "previewUrl">): void {
+  const url = attachment.previewUrl;
+  if (!url || !url.startsWith("blob:")) return;
+  if (typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    // best-effort
   }
 }
 

@@ -1,8 +1,9 @@
 import "./app-identity";
-import { app, dialog, ipcMain, shell, type BrowserWindow } from "electron";
+import { app, dialog, globalShortcut, ipcMain, shell, type BrowserWindow } from "electron";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { DesktopAppState } from "./types";
+import { DESKTOP_CONFIG } from "./configs";
 import { writeJsonAtomic } from "./helpers/fs-json";
 import { log } from "./helpers/logger";
 import { isHttpUrl } from "./helpers/url";
@@ -11,6 +12,15 @@ import { registerNavigationPolicy } from "./logic/security";
 import { startFrontendServer, stopFrontendServer, type ServerHandle } from "./logic/app-server";
 import { checkForUpdates, getUpdateState, initializeAutoUpdates } from "./logic/update-manager";
 import { addProject, listProjectsWithMeta, removeProject } from "./logic/projects-store";
+import { deployController } from "./logic/controller-deploy";
+import {
+  hideQuickPanel,
+  resetQuickPanel,
+  resizeQuickPanelToHome,
+  resizeQuickPanelToThread,
+  toggleQuickPanel,
+} from "./logic/quick-panel-window";
+import { getStoredQuickPanelHotkey, setStoredQuickPanelHotkey } from "./logic/desktop-settings";
 import {
   closePty,
   closePtyByOwner,
@@ -161,7 +171,16 @@ async function restartFrontendServer(port?: number): Promise<void> {
       await delay(backoffMs);
       if (isAppStopping()) return;
     }
-    frontendServer = await startFrontendServer({ port, onExit: handleFrontendServerExit });
+    const started = await startFrontendServer({ port, onExit: handleFrontendServerExit });
+    // Shutdown may have begun during the fork. If so, shutdown() already cleared
+    // the health monitor and no-op'd the (mid-restart undefined) server stop —
+    // so tear this just-started server down instead of re-arming the monitor and
+    // resurrecting a server the app is trying to quit.
+    if (isAppStopping()) {
+      await stopFrontendServer(started).catch(() => undefined);
+      return;
+    }
+    frontendServer = started;
     startFrontendHealthMonitor();
     const nextUrl = frontendServer.runtime.url;
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -215,6 +234,20 @@ function registerIpcHandlers(): void {
       throw error;
     }
   });
+
+  ipcMain.handle(
+    "desktop:controller-deploy",
+    async (event, options: { host: string; port?: number; installDir?: string }) => {
+      const resourcesPath = app.isPackaged
+        ? path.join(process.resourcesPath, "app", "scripts")
+        : path.join(app.getAppPath(), "..", "scripts");
+      return deployController(options, resourcesPath, (line) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send("desktop:controller-deploy-log", { line });
+        }
+      });
+    },
+  );
 
   ipcMain.handle("desktop:list-projects", async () => listProjectsWithMeta());
 
@@ -292,6 +325,112 @@ function registerIpcHandlers(): void {
     if (typeof ownerKey !== "string") return;
     closePtyByOwner(ownerKey);
   });
+
+  ipcMain.handle("desktop:quick-panel-expand", async () => {
+    resizeQuickPanelToThread();
+  });
+
+  ipcMain.handle("desktop:quick-panel-dismiss", async () => {
+    hideQuickPanel();
+    resizeQuickPanelToHome();
+    resetQuickPanel();
+  });
+
+  ipcMain.handle("desktop:quick-panel-get-hotkey", async () => ({
+    hotkey: quickPanelHotkey ?? getStoredQuickPanelHotkey() ?? DESKTOP_CONFIG.quickPanel.hotkey,
+    defaultHotkey: DESKTOP_CONFIG.quickPanel.hotkey,
+  }));
+
+  ipcMain.handle("desktop:quick-panel-set-hotkey", async (_, hotkey: unknown) =>
+    setQuickPanelHotkey(hotkey),
+  );
+
+  ipcMain.handle(
+    "desktop:focus-main-and-navigate",
+    async (_, projectId: string, sessionId?: string) => {
+      if (typeof projectId !== "string" || !frontendServer) return;
+      const query =
+        typeof sessionId === "string" && sessionId
+          ? `?project=${encodeURIComponent(projectId)}&session=${encodeURIComponent(sessionId)}`
+          : `?project=${encodeURIComponent(projectId)}&new=1`;
+      const targetUrl = `${frontendServer.runtime.url}/agent${query}`;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await mainWindow.loadURL(targetUrl);
+      } else {
+        mainWindow = createMainWindow(targetUrl);
+        mainWindow.on("closed", () => {
+          mainWindow = null;
+        });
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+      hideQuickPanel();
+      resizeQuickPanelToHome();
+      // The thread now lives in the main window; next quick-panel open starts fresh.
+      resetQuickPanel();
+    },
+  );
+}
+
+let quickPanelHotkey: string | null = null;
+
+function onQuickPanelHotkey(): void {
+  if (!frontendServer) return;
+  toggleQuickPanel(frontendServer.runtime.url);
+}
+
+function registerQuickPanelHotkey(): void {
+  const accelerator = getStoredQuickPanelHotkey() ?? DESKTOP_CONFIG.quickPanel.hotkey;
+  if (globalShortcut.register(accelerator, onQuickPanelHotkey)) {
+    quickPanelHotkey = accelerator;
+    return;
+  }
+  log.warn(`Failed to register quick panel hotkey: ${accelerator}`);
+  // A stored hotkey can become unregisterable (claimed by another app, or a
+  // stale/invalid accelerator). Fall back to the default so the panel keeps
+  // a working hotkey instead of silently having none.
+  const fallback = DESKTOP_CONFIG.quickPanel.hotkey;
+  if (accelerator !== fallback && globalShortcut.register(fallback, onQuickPanelHotkey)) {
+    quickPanelHotkey = fallback;
+  }
+}
+
+function setQuickPanelHotkey(hotkey: unknown): { ok: boolean; hotkey: string; error?: string } {
+  const current = quickPanelHotkey ?? DESKTOP_CONFIG.quickPanel.hotkey;
+  if (typeof hotkey !== "string" || !hotkey.trim()) {
+    return { ok: false, hotkey: current, error: "Hotkey must be a non-empty string" };
+  }
+  const next = hotkey.trim();
+  if (next === quickPanelHotkey) {
+    setStoredQuickPanelHotkey(next);
+    return { ok: true, hotkey: next };
+  }
+
+  let registered = false;
+  try {
+    registered = globalShortcut.register(next, onQuickPanelHotkey);
+  } catch {
+    registered = false; // invalid accelerator strings throw
+  }
+  if (!registered) {
+    return {
+      ok: false,
+      hotkey: current,
+      error: `Could not register "${next}" — it may be invalid or already in use by another app`,
+    };
+  }
+
+  if (quickPanelHotkey && quickPanelHotkey !== next) {
+    try {
+      globalShortcut.unregister(quickPanelHotkey);
+    } catch {
+      // best effort; unregisterAll on quit still cleans up
+    }
+  }
+  quickPanelHotkey = next;
+  setStoredQuickPanelHotkey(next);
+  log.info(`Quick panel hotkey set to ${next}`);
+  return { ok: true, hotkey: next };
 }
 
 async function shutdown(): Promise<void> {
@@ -299,6 +438,7 @@ async function shutdown(): Promise<void> {
   shutdownPromise = (async () => {
     appState = "stopping";
     stopFrontendHealthMonitor();
+    globalShortcut.unregisterAll();
     killAllPtys();
     await stopFrontendServer(frontendServer);
     frontendServer = undefined;
@@ -380,8 +520,19 @@ async function run(): Promise<void> {
 
   try {
     await bootstrap();
+    registerQuickPanelHotkey();
   } catch (error) {
     log.error(`Failed to bootstrap desktop app: ${String(error)}`);
+    // Surface the failure instead of vanishing from the dock with no feedback
+    // (port in use, unwritable userData, missing server.js, slow-start timeout).
+    try {
+      dialog.showErrorBox(
+        "Local Studio failed to start",
+        `${error instanceof Error ? error.message : String(error)}\n\nSee the app logs for details.`,
+      );
+    } catch {
+      // dialog unavailable (very early failure) — the log above still records it.
+    }
     app.quit();
   }
 }

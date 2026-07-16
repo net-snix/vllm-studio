@@ -44,9 +44,6 @@ export interface EngineCapabilities {
   toolCalling: boolean;
   reasoning: boolean;
   chatTemplates: boolean;
-
-  // Environment tab
-  pythonPath: boolean;
 }
 
 const VLLM: EngineCapabilities = {
@@ -71,33 +68,9 @@ const VLLM: EngineCapabilities = {
   toolCalling: true,
   reasoning: true,
   chatTemplates: true,
-  pythonPath: true,
 };
 
-const SGLANG: EngineCapabilities = {
-  backend: "sglang",
-  tabs: ["general", "model", "resources", "performance", "features", "environment", "command"],
-  options: "none",
-  contextLength: true,
-  seed: true,
-  advancedModelLoading: true,
-  quantization: true,
-  trustRemoteCode: true,
-  parallelism: "full",
-  gpuMemoryUtil: true,
-  visibleDevices: true,
-  memoryManagement: true,
-  kvCacheDtype: true,
-  blockSize: true,
-  caching: true,
-  schedulerAdvanced: true,
-  maxNumSeqs: true,
-  cudaGraphs: true,
-  toolCalling: true,
-  reasoning: true,
-  chatTemplates: true,
-  pythonPath: true,
-};
+const SGLANG: EngineCapabilities = { ...VLLM, backend: "sglang" };
 
 const LLAMACPP: EngineCapabilities = {
   backend: "llamacpp",
@@ -121,7 +94,6 @@ const LLAMACPP: EngineCapabilities = {
   toolCalling: false,
   reasoning: false,
   chatTemplates: false,
-  pythonPath: false,
 };
 
 const MLX: EngineCapabilities = {
@@ -146,7 +118,6 @@ const MLX: EngineCapabilities = {
   toolCalling: false,
   reasoning: false,
   chatTemplates: false,
-  pythonPath: true,
 };
 
 const DS4: EngineCapabilities = {

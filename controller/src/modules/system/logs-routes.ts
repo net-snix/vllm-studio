@@ -4,9 +4,9 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import type { RouteRegistrar } from "../../http/route-registrar";
 import { badRequest, notFound } from "../../core/errors";
-import { observeControllerFunction } from "../../core/function-observability";
+import { findObservedInferenceProcess } from "../../core/function-observability";
 import { streamAsyncStrings, buildSseHeaders, withSseHeartbeat } from "../../http/sse";
-import { CONTROLLER_EVENTS } from "../../../../shared/contracts/controller-events";
+import { CONTROLLER_EVENTS } from "@local-studio/contracts/controller-events";
 import { Event } from "./event-manager";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import {
@@ -72,7 +72,7 @@ export const registerLogsRoutes: RouteRegistrar = (app, context) => {
   async function* streamDockerLogLines(
     container: string,
     replayLimit: number,
-    signal: AbortSignal
+    signal: AbortSignal,
   ): AsyncGenerator<string> {
     const child = spawn("docker", ["logs", "--tail", String(replayLimit), "--follow", container], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -108,9 +108,7 @@ export const registerLogsRoutes: RouteRegistrar = (app, context) => {
 
   app.get("/logs", async (ctx) => {
     maybeCleanup();
-    const current = await observeControllerFunction(context, "logs.findInferenceProcess", () =>
-      context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const current = await findObservedInferenceProcess(context, "logs");
     const entries = listLogFiles(context.config.data_dir);
     type LogSessionRow = {
       id: string;
@@ -205,8 +203,8 @@ export const registerLogsRoutes: RouteRegistrar = (app, context) => {
           }
         })(),
         15_000,
-        signal
-      )
+        signal,
+      ),
     );
     return new Response(stream, {
       headers: buildSseHeaders(),
@@ -252,7 +250,7 @@ export const registerLogsRoutes: RouteRegistrar = (app, context) => {
             yield event.toSse();
           }
         }
-      })()
+      })(),
     );
 
     return new Response(stream, {
@@ -261,9 +259,5 @@ export const registerLogsRoutes: RouteRegistrar = (app, context) => {
         Connection: "keep-alive",
       }),
     });
-  });
-
-  app.get("/events/stats", async (ctx) => {
-    return ctx.json(context.eventManager.getStats());
   });
 };

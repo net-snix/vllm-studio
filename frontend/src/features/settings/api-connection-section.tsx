@@ -5,7 +5,6 @@ import {
   Eye,
   EyeOff,
   Link as LinkIcon,
-  Loader2,
   Plus,
   Save,
   Trash2,
@@ -18,17 +17,24 @@ import {
   saveSavedControllers,
   type SavedController,
 } from "@/lib/api/controllers";
-import { getStoredBackendUrl, setApiKey, setStoredBackendUrl } from "@/lib/api/connection";
+import {
+  clearApiKey,
+  getStoredBackendUrl,
+  setApiKey,
+  setStoredBackendUrl,
+} from "@/lib/api/connection";
 import { scheduleDurableUiPreferencesSave } from "@/lib/desktop-ui-preferences";
+import { DeployControllerPanel } from "./deploy-controller-panel";
+import { StatusPill, Spinner } from "@/ui";
+import { ApiUrlCensorToggle, useApiUrlCensored } from "@/ui/api-url-censor";
 import {
   SettingsButton,
   SettingsGroup,
   SettingsInput,
   SettingsRow,
   SettingsValue,
-  StatusPill,
   type StatusTone,
-} from "@/ui";
+} from "./settings-ui";
 
 type ControllerEntry = SavedController & { id: string };
 
@@ -105,6 +111,7 @@ export function ApiConnectionSection({
   };
   const [draft, setDraft] = useState<SavedController>({ url: "" });
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const censorUrls = useApiUrlCensored();
 
   const activeId = useMemo(() => normalizeControllerUrl(activeUrl), [activeUrl]);
   const persist = setEntries;
@@ -113,7 +120,10 @@ export function ApiConnectionSection({
 
   const activate = (entry: ControllerEntry) => {
     // Switching never deletes anything — every row stays in the list.
+    // Clear the runtime key when the target has none, so the previous
+    // controller's key isn't leaked to this controller's host.
     if (entry.apiKey) setApiKey(entry.apiKey);
+    else clearApiKey();
     setStoredBackendUrl(entry.url);
     onApiSettingsChange({
       ...apiSettings,
@@ -136,16 +146,19 @@ export function ApiConnectionSection({
   };
 
   return (
-    <div className="space-y-8">
+    <div>
       <SettingsGroup
         title="Controllers"
         description="Every controller is saved in one list. Switch active with the radio button."
         actions={
-          <ApiStatus
-            status={connectionStatus}
-            message={statusMessage}
-            loading={apiSettingsLoading}
-          />
+          <div className="flex items-center gap-2">
+            <ApiUrlCensorToggle />
+            <ApiStatus
+              status={connectionStatus}
+              message={statusMessage}
+              loading={apiSettingsLoading}
+            />
+          </div>
         }
       >
         {entries.length === 0 ? (
@@ -160,6 +173,7 @@ export function ApiConnectionSection({
               index={index}
               active={entry.id === activeId}
               revealed={Boolean(revealed[entry.id])}
+              censorUrls={censorUrls}
               onToggleReveal={() => toggleReveal(entry.id)}
               onActivate={() => activate(entry)}
               onCommit={(next) => {
@@ -194,6 +208,7 @@ export function ApiConnectionSection({
             placeholder="http://192.168.1.70:8080"
             onChange={(url) => setDraft((current) => ({ ...current, url }))}
             className="min-w-60 flex-1"
+            censored={censorUrls}
           />
           <ControllerSecretInput
             value={draft.apiKey ?? ""}
@@ -227,6 +242,18 @@ export function ApiConnectionSection({
         </div>
       </SettingsGroup>
 
+      <DeployControllerPanel
+        onDeployed={(controller) => {
+          const url = normalizeControllerUrl(controller.url);
+          if (!url) return;
+          const entry: ControllerEntry = { ...controller, url, id: url };
+          if (!entries.find((row) => row.id === url)) {
+            persist([...entries, entry]);
+          }
+          activate(entry);
+        }}
+      />
+
       <SettingsGroup
         title="Connection"
         description="Fast status probe against the active controller."
@@ -237,11 +264,7 @@ export function ApiConnectionSection({
           actions={
             <>
               <SettingsButton onClick={onTestConnection} disabled={testing || apiSettingsLoading}>
-                {testing ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <LinkIcon className="h-3 w-3" />
-                )}
+                {testing ? <Spinner size="xs" /> : <LinkIcon className="h-3 w-3" />}
                 Test
               </SettingsButton>
               <SettingsButton
@@ -249,51 +272,11 @@ export function ApiConnectionSection({
                 disabled={saving || apiSettingsLoading}
                 tone="primary"
               >
-                {saving ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <Save className="h-3 w-3" />
-                )}
+                {saving ? <Spinner size="xs" /> : <Save className="h-3 w-3" />}
                 Save active
               </SettingsButton>
             </>
           }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup
-        title="Voice"
-        description="Optional transcription endpoint used by voice workflows."
-      >
-        <SettingsRow
-          label="Voice URL"
-          description="Leave unset to keep voice disabled without breaking settings."
-          control={
-            <SettingsInput
-              value={apiSettings.voiceUrl}
-              placeholder="https://voice.example.com"
-              onChange={(voiceUrl) => onApiSettingsChange({ ...apiSettings, voiceUrl })}
-              className="w-64"
-            />
-          }
-          status={
-            <StatusPill tone={apiSettings.voiceUrl ? "info" : "default"}>
-              {apiSettings.voiceUrl ? "custom" : "off"}
-            </StatusPill>
-          }
-        />
-        <SettingsRow
-          label="Voice model"
-          description="Stable default stays populated even when no voice backend is configured."
-          control={
-            <SettingsInput
-              value={apiSettings.voiceModel}
-              placeholder="whisper-large-v3-turbo"
-              onChange={(voiceModel) => onApiSettingsChange({ ...apiSettings, voiceModel })}
-              className="w-64"
-            />
-          }
-          status={<StatusPill>{apiSettings.voiceModel ? "ready" : "default"}</StatusPill>}
         />
       </SettingsGroup>
     </div>
@@ -305,6 +288,7 @@ function ControllerListRow({
   index,
   active,
   revealed,
+  censorUrls,
   onToggleReveal,
   onActivate,
   onCommit,
@@ -314,6 +298,7 @@ function ControllerListRow({
   index: number;
   active: boolean;
   revealed: boolean;
+  censorUrls: boolean;
   onToggleReveal: () => void;
   onActivate: () => void;
   onCommit: (entry: ControllerEntry) => void;
@@ -360,6 +345,7 @@ function ControllerListRow({
         onChange={(url) => setDraft((current) => ({ ...current, url }))}
         onBlur={() => commit(draft)}
         className="min-w-60 flex-1"
+        censored={censorUrls}
       />
       <ControllerSecretInput
         value={draft.apiKey ?? ""}
@@ -382,16 +368,25 @@ function ControllerTextInput({
   onChange,
   onBlur,
   className,
+  censored = false,
 }: {
   value: string;
   placeholder: string;
   onChange: (value: string) => void;
   onBlur?: () => void;
   className: string;
+  censored?: boolean;
 }) {
   return (
     <div className={className}>
-      <SettingsInput value={value} placeholder={placeholder} onChange={onChange} onBlur={onBlur} />
+      <SettingsInput
+        value={value}
+        placeholder={placeholder}
+        onChange={onChange}
+        onBlur={onBlur}
+        className={censored ? "blur-[6px]" : undefined}
+        aria-label={censored ? "API URL censored" : undefined}
+      />
     </div>
   );
 }

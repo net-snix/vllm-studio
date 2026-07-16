@@ -1,45 +1,53 @@
-import { isRecord } from "@/features/agent/guards";
-import { collectLeaves } from "@/features/agent/workspace/layout";
-import {
-  mergeActiveAgentSessions,
-  type ActiveAgentSessionSnapshot,
-  type ActiveSessionPrefs,
-} from "@/features/agent/active-sessions";
-import { cleanSessionTitle, makeFreshTab, newId } from "@/features/agent/messages/helpers";
+import { clampLayoutToLimits, collectLeaves, removeLeaf } from "@/features/agent/workspace/layout";
+import { cleanSessionTitle, makeFreshTab } from "@/features/agent/messages/helpers";
 import type { Session, SessionId } from "@/features/agent/runtime/types";
 import type { ToolSelection } from "@/features/agent/tools/types";
-import type { ComposerPluginRef, ComposerSkillRef } from "@/features/agent/composer-context";
+import {
+  persistedTabFieldsFromSelection,
+  toolSelectionFromPersistedTab,
+  type PersistedToolSelectionFields,
+} from "@/features/agent/tools/selection-persistence";
+import type { ComposerSkillRef } from "@/features/agent/composer-context";
 import type {
   PaneId,
   PaneState,
   WorkspaceLayout,
   WorkspaceState,
 } from "@/features/agent/workspace/types";
-// Computer/browser tool state moved to features/agent/tools/ — workspace no longer
-// owns or mutates it.
-
-export { isEmptyStarterTab } from "@/features/agent/workspace/pane-controller";
 
 export const PANE_LAYOUT_KEY = "local-studio.agent.paneLayout";
 export const PANE_STATE_KEY = "local-studio.agent.paneState";
-export const ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY = "local-studio.agent.activeSessions.snapshot";
 export const SESSION_PREFS_KEY = "local-studio.agent.sessionPrefs";
 
 export type WorkspaceStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+type PersistedPaneRecord = {
+  tabs?: unknown[];
+  activeTabId?: unknown;
+  runtimeSessionId?: unknown;
+  kind?: unknown;
+};
 
 type PersistedPaneState = {
   version: 1;
   layout: WorkspaceLayout;
   focusedPaneId: PaneId;
-  panes: Record<
-    string,
-    {
-      tabs?: unknown[];
-      activeTabId?: unknown;
-      runtimeSessionId?: unknown;
-    }
-  >;
+  panes: Record<string, PersistedPaneRecord>;
 };
+
+function isWorkspaceLayout(value: unknown, depth = 0): value is WorkspaceLayout {
+  if (!value || typeof value !== "object" || depth > 16) return false;
+  const layout = value as Record<string, unknown>;
+  if (layout.kind === "leaf") {
+    return typeof layout.paneId === "string" && layout.paneId.length > 0;
+  }
+  if (layout.kind !== "split") return false;
+  if (layout.direction !== "vertical" && layout.direction !== "horizontal") return false;
+  if (typeof layout.ratio !== "number" || !Number.isFinite(layout.ratio)) return false;
+  return isWorkspaceLayout(layout.a, depth + 1) && isWorkspaceLayout(layout.b, depth + 1);
+}
+
+export type PersistedPaneEntry = { activeTabId: string; tabs: PersistedSessionMeta[] };
 
 export function createInitialState(): WorkspaceState {
   const session = makeFreshTab();
@@ -67,100 +75,61 @@ export function setupWarningFromPiCheck(
 }
 
 type PersistedTabShape = Partial<Session> & {
-  plugins?: ComposerPluginRef[];
   skills?: ComposerSkillRef[];
+  runtimeSessionId?: unknown;
 };
 
-export type PersistedSessionMeta = Omit<Session, "messages" | "error"> & {
-  plugins?: ComposerPluginRef[];
-  skills?: ComposerSkillRef[];
-};
+export type PersistedSessionMeta = Omit<
+  Session,
+  "messages" | "error" | "status" | "activeAssistantId"
+> &
+  PersistedToolSelectionFields;
 
 export function normalizePersistedTab(value: unknown): Session | null {
   if (!value || typeof value !== "object") return null;
   const tab = value as PersistedTabShape;
   if (typeof tab.id !== "string") return null;
   const fallback = makeFreshTab();
+  const { runtimeSessionId: _legacyRuntimeKey, ...persisted } = tab;
   return {
     ...fallback,
-    ...tab,
+    ...persisted,
     id: tab.id,
-    // The session-level runtime id is the durable one; legacy records missing
-    // it get a fresh mint via the fallback.
-    runtimeSessionId:
-      typeof tab.runtimeSessionId === "string" && tab.runtimeSessionId.trim()
-        ? tab.runtimeSessionId
-        : fallback.runtimeSessionId,
     piSessionId: typeof tab.piSessionId === "string" ? tab.piSessionId : null,
     title: cleanSessionTitle(tab.title) || fallback.title,
-    // The canonical session log is the transcript source of truth. Legacy
-    // pane-state entries may still contain messages, but restoring them here
-    // would put large reasoning/tool payloads back onto the renderer hot path.
     messages: [],
-    status: typeof tab.status === "string" ? tab.status : "idle",
+    status: "idle",
     error: "",
     startedAt: typeof tab.startedAt === "string" ? tab.startedAt : undefined,
     input: typeof tab.input === "string" ? tab.input : "",
     queue: Array.isArray(tab.queue) ? tab.queue : undefined,
-    activeAssistantId:
-      typeof tab.activeAssistantId === "string" ? tab.activeAssistantId : undefined,
+    activeAssistantId: undefined,
     lastEventSeq: typeof tab.lastEventSeq === "number" ? tab.lastEventSeq : undefined,
     usedSkills: Array.isArray(tab.usedSkills) ? (tab.usedSkills as ComposerSkillRef[]) : undefined,
   };
 }
 
-/**
- * Pull the per-session tool selection out of a persisted tab record. Returns
- * null when the persisted shape didn't carry plugins/skills (legacy or fresh).
- * `restorePersistedPaneState` aggregates these so the workspace can rehydrate
- * the tools subsystem after mount.
- */
-export function selectionFromPersistedTab(value: unknown): ToolSelection | null {
+export function legacyRuntimeKeyFromPersistedTab(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
-  const tab = value as PersistedTabShape & {
-    promptTemplates?: ToolSelection["promptTemplates"];
-  };
-  const plugins = Array.isArray(tab.plugins) ? tab.plugins : [];
-  const skills = Array.isArray(tab.skills) ? tab.skills : [];
-  const promptTemplates = Array.isArray(tab.promptTemplates) ? tab.promptTemplates : [];
-  if (plugins.length === 0 && skills.length === 0 && promptTemplates.length === 0) {
-    return null;
-  }
-  return { plugins, skills, promptTemplates };
+  const tab = value as PersistedTabShape;
+  return typeof tab.runtimeSessionId === "string" && tab.runtimeSessionId.trim()
+    ? tab.runtimeSessionId.trim()
+    : null;
 }
 
 export type RestoredPaneState = {
   layout: WorkspaceLayout;
   panesById: Map<PaneId, PaneState>;
   sessions: Map<SessionId, Session>;
-  /** Plugin/skill selections rebuilt from the persisted tab records. */
   selections: Map<SessionId, ToolSelection>;
+  legacyRuntimeKeys: Map<SessionId, string>;
   focusedPaneId: PaneId;
 };
 
-function isPaneId(value: unknown): value is PaneId {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function isWorkspaceLayout(value: unknown, depth = 0): value is WorkspaceLayout {
-  if (!isRecord(value) || depth > 24) return false;
-  if (value.kind === "leaf") return isPaneId(value.paneId);
-  if (value.kind !== "split") return false;
-  const directionOk = value.direction === "vertical" || value.direction === "horizontal";
-  return (
-    directionOk &&
-    typeof value.ratio === "number" &&
-    Number.isFinite(value.ratio) &&
-    isWorkspaceLayout(value.a, depth + 1) &&
-    isWorkspaceLayout(value.b, depth + 1)
-  );
-}
-
 function parsePersistedPaneState(raw: string): Partial<PersistedPaneState> | null {
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isRecord(parsed) || !isWorkspaceLayout(parsed.layout)) return null;
-    return parsed as Partial<PersistedPaneState>;
+    const parsed = JSON.parse(raw) as Partial<PersistedPaneState>;
+    return isWorkspaceLayout(parsed.layout) ? parsed : null;
   } catch {
     return null;
   }
@@ -169,17 +138,23 @@ function parsePersistedPaneState(raw: string): Partial<PersistedPaneState> | nul
 function restoreTabsWithSelections(rawTabs: unknown[]): {
   tabs: Session[];
   selections: Map<SessionId, ToolSelection>;
+  legacyRuntimeKeys: Map<SessionId, string>;
 } {
   const tabs: Session[] = [];
   const selections = new Map<SessionId, ToolSelection>();
+  const legacyRuntimeKeys = new Map<SessionId, string>();
   for (const raw of rawTabs) {
     const session = normalizePersistedTab(raw);
     if (!session) continue;
     tabs.push(session);
-    const selection = selectionFromPersistedTab(raw);
+    const selection = toolSelectionFromPersistedTab(raw);
     if (selection) selections.set(session.id, selection);
+    const legacyRuntimeKey = legacyRuntimeKeyFromPersistedTab(raw);
+    if (legacyRuntimeKey && legacyRuntimeKey !== session.id) {
+      legacyRuntimeKeys.set(session.id, legacyRuntimeKey);
+    }
   }
-  return { tabs: tabs.length > 0 ? tabs : [makeFreshTab()], selections };
+  return { tabs: tabs.length > 0 ? tabs : [makeFreshTab()], selections, legacyRuntimeKeys };
 }
 
 function activePersistedTabId(
@@ -199,18 +174,33 @@ function focusedPersistedPaneId(focusedPaneId: unknown, leaves: PaneId[]): PaneI
     : leaves[0];
 }
 
+function removeLegacyTerminalPanes(
+  layout: WorkspaceLayout,
+  panes: Record<string, PersistedPaneRecord>,
+): WorkspaceLayout | null {
+  let next: WorkspaceLayout | null = layout;
+  for (const paneId of collectLeaves(layout)) {
+    if (panes[paneId]?.kind !== "terminal" || !next) continue;
+    next = removeLeaf(next, paneId);
+  }
+  return next;
+}
+
 export function restorePersistedPaneState(raw: string): RestoredPaneState | null {
   const parsed = parsePersistedPaneState(raw);
   if (!parsed) return null;
 
-  const layout = parsed.layout as WorkspaceLayout;
-  const leaves = collectLeaves(layout).filter(isPaneId);
+  const persistedPanes = parsed.panes && typeof parsed.panes === "object" ? parsed.panes : {};
+  const chatLayout = removeLegacyTerminalPanes(parsed.layout as WorkspaceLayout, persistedPanes);
+  if (!chatLayout) return null;
+  const layout = clampLayoutToLimits(chatLayout, () => false);
+  const leaves = collectLeaves(layout);
   if (leaves.length === 0) return null;
 
-  const persistedPanes = isRecord(parsed.panes) ? parsed.panes : {};
   const panesById = new Map<PaneId, PaneState>();
   const sessions = new Map<SessionId, Session>();
   const selections = new Map<SessionId, ToolSelection>();
+  const legacyRuntimeKeys = new Map<SessionId, string>();
 
   for (const paneId of leaves) {
     const pane = persistedPanes[paneId] ?? {};
@@ -221,9 +211,8 @@ export function restorePersistedPaneState(raw: string): RestoredPaneState | null
     sessions.set(session.id, session);
     const selection = restored.selections.get(session.id);
     if (selection) selections.set(session.id, selection);
-    // The persisted pane-level runtimeSessionId is ignored: the session's own
-    // id is the durable runtime identity, so a crash/reload reattaches to the
-    // still-running runtime instead of minting a fresh orphan.
+    const legacyRuntimeKey = restored.legacyRuntimeKeys.get(session.id);
+    if (legacyRuntimeKey) legacyRuntimeKeys.set(session.id, legacyRuntimeKey);
     panesById.set(paneId, { sessionId: session.id });
   }
 
@@ -232,148 +221,33 @@ export function restorePersistedPaneState(raw: string): RestoredPaneState | null
     panesById,
     sessions,
     selections,
+    legacyRuntimeKeys,
     focusedPaneId: focusedPersistedPaneId(parsed.focusedPaneId, leaves),
   };
 }
 
-/**
- * Serialize only durable session metadata. Transcripts, reasoning, tool
- * payloads, attachment bodies, and preview data belong to canonical session
- * storage or runtime memory, never pane-state localStorage.
- */
 export function sessionMetaForPersistence(
   tab: Session,
   selection?: ToolSelection,
 ): PersistedSessionMeta {
   const base: PersistedSessionMeta = {
     id: tab.id,
-    runtimeSessionId: tab.runtimeSessionId,
     piSessionId: tab.piSessionId,
     projectId: tab.projectId,
     cwd: tab.cwd,
     modelId: tab.modelId,
     title: cleanSessionTitle(tab.title) || "New session",
-    status: tab.status,
     startedAt: tab.startedAt,
     input: tab.input,
     tokenStats: tab.tokenStats,
     usedSkills: tab.usedSkills,
-    activeAssistantId: tab.activeAssistantId,
     lastEventSeq: tab.lastEventSeq,
     queue: tab.queue,
   };
   if (selection) {
-    return {
-      ...base,
-      ...(selection.plugins.length > 0 ? { plugins: selection.plugins } : {}),
-      ...(selection.skills.length > 0 ? { skills: selection.skills } : {}),
-      ...(selection.promptTemplates.length > 0
-        ? { promptTemplates: selection.promptTemplates }
-        : {}),
-    };
+    return { ...base, ...persistedTabFieldsFromSelection(selection) };
   }
   return base;
-}
-
-function defaultWorkspaceStorage(): WorkspaceStorage | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage;
-}
-
-function loadSessionPrefs(storage: WorkspaceStorage): ActiveSessionPrefs {
-  try {
-    const raw = storage.getItem(SESSION_PREFS_KEY);
-    return raw ? (JSON.parse(raw) as ActiveSessionPrefs) : {};
-  } catch {
-    return {};
-  }
-}
-
-export function loadPersistedActiveAgentSessions(
-  storage: WorkspaceStorage | null = defaultWorkspaceStorage(),
-): ActiveAgentSessionSnapshot[] {
-  if (!storage) return [];
-  try {
-    const raw = storage.getItem(ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY);
-    if (!raw) return [];
-    const prefs = loadSessionPrefs(storage);
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter(isRecord)
-      .map((entry): ActiveAgentSessionSnapshot => {
-        const piSessionId = typeof entry.piSessionId === "string" ? entry.piSessionId.trim() : null;
-        return {
-          projectId: typeof entry.projectId === "string" ? entry.projectId : "",
-          cwd: typeof entry.cwd === "string" ? entry.cwd : "",
-          paneId: typeof entry.paneId === "string" ? entry.paneId : "",
-          tabId: typeof entry.tabId === "string" ? entry.tabId : "",
-          runtimeSessionId:
-            typeof entry.runtimeSessionId === "string" ? entry.runtimeSessionId.trim() : "",
-          piSessionId: piSessionId || null,
-          modelId: typeof entry.modelId === "string" ? entry.modelId : undefined,
-          title:
-            cleanSessionTitle(typeof entry.title === "string" ? entry.title : null) ||
-            "Loading session",
-          status: typeof entry.status === "string" ? entry.status : "idle",
-          focused: entry.focused === true,
-          startedAt: typeof entry.startedAt === "string" ? entry.startedAt : undefined,
-          updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : "",
-          plugins: Array.isArray(entry.plugins)
-            ? (entry.plugins as ComposerPluginRef[])
-            : undefined,
-          skills: Array.isArray(entry.skills) ? (entry.skills as ComposerSkillRef[]) : undefined,
-          usedSkills: Array.isArray(entry.usedSkills)
-            ? (entry.usedSkills as ComposerSkillRef[])
-            : undefined,
-        };
-      })
-      .filter(
-        (entry) =>
-          !prefs[entry.piSessionId ?? ""]?.hidden &&
-          Boolean(entry.cwd) &&
-          Boolean(entry.paneId) &&
-          Boolean(entry.tabId) &&
-          Boolean(entry.runtimeSessionId),
-      );
-  } catch {
-    return [];
-  }
-}
-
-// One id per app instance (window), minted lazily on the first client-side
-// write. Stamped onto every entry this instance persists so the merge can
-// authoritatively replace its own entries (dropping closed sessions) while
-// preserving entries written by other windows.
-let activeSessionsWriterId: string | null = null;
-function ownActiveSessionsWriterId(): string {
-  return (activeSessionsWriterId ??= newId("writer"));
-}
-
-// Hard ceiling on the persisted snapshot so the blob can never grow unbounded
-// over a long-lived app session (legacy/other-window entries included). Entries
-// are sorted most-recent-first by the merge, so the cap keeps the freshest ones.
-const MAX_PERSISTED_ACTIVE_SESSIONS = 50;
-
-export function persistActiveAgentSessions(
-  sessions: ActiveAgentSessionSnapshot[],
-  storage: WorkspaceStorage | null = defaultWorkspaceStorage(),
-): void {
-  if (!storage) return;
-  const prefs = loadSessionPrefs(storage);
-  const writerId = ownActiveSessionsWriterId();
-  const stamped = sessions.map((session) => ({ ...session, writerId }));
-  const merged = mergeActiveAgentSessions(
-    loadPersistedActiveAgentSessions(storage),
-    stamped,
-    prefs,
-    writerId,
-  ).slice(0, MAX_PERSISTED_ACTIVE_SESSIONS);
-  if (merged.length > 0) {
-    storage.setItem(ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY, JSON.stringify(merged));
-  } else {
-    storage.removeItem(ACTIVE_AGENT_SESSIONS_SNAPSHOT_KEY);
-  }
 }
 
 export { reducer } from "@/features/agent/workspace/reducer";

@@ -4,8 +4,12 @@ import {
   stripToolCallsFromContent,
   type ToolCall,
 } from "./tool-call-parser";
-import { REASONING_FIELDS, firstReasoningField } from "./reasoning-fields";
-import { createThinkRewriter, thinkingTagPrefixIsPartial } from "./think-rewriter";
+import {
+  REASONING_FIELDS,
+  firstReasoningField,
+  createThinkRewriter,
+  thinkingTagPrefixIsPartial,
+} from "./reasoning";
 
 export interface StreamUsage {
   prompt_tokens: number;
@@ -25,7 +29,7 @@ export const createToolCallStream = (
   reader: ReadableStreamDefaultReader<Uint8Array>,
   onUsage?: (usage: StreamUsage) => void,
   onFirstToken?: () => void,
-  options: ToolCallStreamOptions = {}
+  options: ToolCallStreamOptions = {},
 ): ReadableStream<Uint8Array> => {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -55,7 +59,7 @@ export const createToolCallStream = (
     history: Map<string, { text: string; snapshot: boolean }>,
     key: string,
     text: string,
-    forceSnapshot = false
+    forceSnapshot = false,
   ): string => {
     if (!text) return text;
     const previous = history.get(key) ?? { text: "", snapshot: forceSnapshot };
@@ -122,7 +126,7 @@ export const createToolCallStream = (
 
   const enqueueLine = (
     controller: ReadableStreamDefaultController<Uint8Array>,
-    line: string
+    line: string,
   ): void => {
     if (downstreamClosed) return;
     try {
@@ -138,7 +142,7 @@ export const createToolCallStream = (
   // `data: [DONE]` concatenates to `{...}\n[DONE]` and fails JSON.parse.
   const enqueueDataEvent = (
     controller: ReadableStreamDefaultController<Uint8Array>,
-    dataLine: string
+    dataLine: string,
   ): void => {
     enqueueLine(controller, dataLine);
     enqueueLine(controller, "");
@@ -173,7 +177,7 @@ export const createToolCallStream = (
 
   const emitVisibleContent = (
     controller: ReadableStreamDefaultController<Uint8Array>,
-    content: string
+    content: string,
   ): void => {
     if (!content) return;
     visibleContentBuffer += content;
@@ -305,7 +309,7 @@ export const createToolCallStream = (
               contentHistory,
               `${choiceIndex}:content`,
               rawContent,
-              !hasDelta
+              !hasDelta,
             );
             const rawReasoning = firstReasoningField(delta);
             const reasoningRaw = rawReasoning
@@ -313,7 +317,7 @@ export const createToolCallStream = (
                   reasoningHistory,
                   `${choiceIndex}:reasoning`,
                   rawReasoning,
-                  !hasDelta
+                  !hasDelta,
                 )
               : "";
             if (content || reasoningRaw) trackFirstToken();
@@ -383,6 +387,10 @@ export const createToolCallStream = (
             return;
           }
           if (result.done) {
+            // Flush any bytes the streaming decoder is still holding (an
+            // incomplete multibyte char at the final chunk boundary); without
+            // this final decode the trailing character would be dropped.
+            buffer += decoder.decode();
             if (buffer) {
               const trailing = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
               if (trailing.length > 0) {

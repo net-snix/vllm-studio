@@ -1,20 +1,20 @@
-import { spawn, spawnSync } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import type { WriteStream } from "node:fs";
 import { createInterface } from "node:readline";
-import { setTimeout as delayTimeout } from "node:timers/promises";
+import { Effect } from "effect";
 import type { Config } from "../../../config/env";
-import { delay } from "../../../core/async";
+import { delay, delayEffect } from "../../../core/async";
 import {
   cleanupLogFiles,
   getLogCleanupDefaultsFromEnvironment,
   primaryLogPathFor,
 } from "../../../core/log-files";
 import type { Logger } from "../../../core/logger";
+import { realProcessRunner, type ProcessRunner } from "../../../core/command";
 import type { LaunchResult, ProcessInfo, Recipe } from "../../models/types";
 import type { EventManager } from "../../system/event-manager";
 import { buildBackendCommand } from "./backend-builder";
+import { listProcessInventory, type ProcessInventoryEntry } from "./process-inventory";
 import {
   buildEnvironment,
   collectChildren,
@@ -27,23 +27,32 @@ import {
 
 export interface ProcessManager {
   findInferenceProcess: (port: number) => Promise<ProcessInfo | null>;
-  launchModel: (recipe: Recipe) => Promise<LaunchResult>;
-  evictModel: (force: boolean) => Promise<number | null>;
+  confirmInferenceStopped: (port: number) => Promise<boolean>;
+  launchModel: (recipe: Recipe, options?: LaunchModelOptions) => Promise<LaunchResult>;
   killProcess: (pid: number, force: boolean) => Promise<boolean>;
 }
+
+export interface LaunchModelOptions {
+  readonly gpuUuids?: readonly string[];
+}
+
+const recipeForLaunch = (recipe: Recipe, port: number, options: LaunchModelOptions): Recipe => {
+  const updated = { ...recipe, port };
+  if (options.gpuUuids === undefined) return updated;
+  const selector = options.gpuUuids.join(",");
+  return {
+    ...updated,
+    env_vars: { ...updated.env_vars, CUDA_VISIBLE_DEVICES: selector },
+    extra_args: { ...updated.extra_args, visible_devices: selector },
+  };
+};
 
 export const createProcessManager = (
   config: Config,
   logger: Logger,
-  eventManager?: EventManager
+  eventManager?: EventManager,
+  runner: ProcessRunner = realProcessRunner,
 ): ProcessManager => {
-  type ProcessTableEntry = {
-    pid: number;
-    ppid: number;
-    stat: string;
-    command: string;
-  };
-
   const findInferenceProcess = async (port: number): Promise<ProcessInfo | null> => {
     const processes = listProcesses();
     for (const proc of processes) {
@@ -96,50 +105,54 @@ export const createProcessManager = (
     return null;
   };
 
-  const killProcess = async (pid: number, force: boolean): Promise<boolean> => {
-    if (!pidExists(pid)) {
-      return true;
-    }
-    const tree = buildProcessTree();
-    const children = new Set<number>();
-    collectChildren(tree, pid, children);
-    const allPids = [...children, pid];
-
-    // Docker-backed recipes often leave the actual server inside a container whose
-    // host process tree does not reliably die when the docker CLI process is
-    // signalled. Stop/kill the named container first, then signal the process tree.
-    stopDockerContainersForProcesses(allPids, force);
-
-    const signal = force ? "SIGKILL" : "SIGTERM";
-    for (const childPid of allPids) {
-      sendSignal(childPid, signal);
-    }
-
-    const deadline = Date.now() + (force ? 15_000 : 10_000);
-    while (Date.now() < deadline) {
+  const killProcessEffect = (pid: number, force: boolean): Effect.Effect<boolean> =>
+    Effect.gen(function* () {
       if (!pidExists(pid)) {
-        break;
+        return true;
       }
-      await delayTimeout(250);
-    }
+      const tree = buildProcessTree();
+      const children = new Set<number>();
+      collectChildren(tree, pid, children);
+      const allPids = [...children, pid];
 
-    if (pidExists(pid)) {
-      stopDockerContainersForProcesses(allPids, true);
-      if (!sendSignal(pid, "SIGKILL")) {
-        return false;
+      // Docker-backed recipes often leave the actual server inside a container whose
+      // host process tree does not reliably die when the docker CLI process is
+      // signalled. Stop/kill the named container first, then signal the process tree.
+      stopDockerContainersForProcesses(allPids, force);
+
+      const signal = force ? "SIGKILL" : "SIGTERM";
+      for (const childPid of allPids) {
+        sendSignal(childPid, signal);
       }
-      const finalDeadline = Date.now() + 5_000;
-      while (Date.now() < finalDeadline) {
+
+      const deadline = Date.now() + (force ? 15_000 : 10_000);
+      while (Date.now() < deadline) {
         if (!pidExists(pid)) {
           break;
         }
-        await delayTimeout(250);
+        yield* delayEffect(250);
       }
-    }
 
-    await delay(force ? 500 : 1000);
-    return !pidExists(pid);
-  };
+      if (pidExists(pid)) {
+        stopDockerContainersForProcesses(allPids, true);
+        if (!sendSignal(pid, "SIGKILL")) {
+          return false;
+        }
+        const finalDeadline = Date.now() + 5_000;
+        while (Date.now() < finalDeadline) {
+          if (!pidExists(pid)) {
+            break;
+          }
+          yield* delayEffect(250);
+        }
+      }
+
+      yield* delayEffect(force ? 500 : 1000);
+      return !pidExists(pid);
+    });
+
+  const killProcess = (pid: number, force: boolean): Promise<boolean> =>
+    Effect.runPromise(killProcessEffect(pid, force));
 
   const stopDockerContainersForProcesses = (pids: number[], force: boolean): void => {
     const pidSet = new Set(pids);
@@ -153,7 +166,7 @@ export const createProcessManager = (
       if (Number.isFinite(port) && port > 0) inferencePorts.add(port);
 
       const dockerIndex = proc.args.findIndex(
-        (argument) => argument === "docker" || argument.endsWith("/docker")
+        (argument) => argument === "docker" || argument.endsWith("/docker"),
       );
       if (dockerIndex < 0 || proc.args[dockerIndex + 1] !== "run") continue;
       const name = extractFlag(proc.args.slice(dockerIndex + 2), "--name");
@@ -167,7 +180,7 @@ export const createProcessManager = (
     if (inferencePorts.size > 0) {
       for (const proc of processes) {
         const dockerIndex = proc.args.findIndex(
-          (argument) => argument === "docker" || argument.endsWith("/docker")
+          (argument) => argument === "docker" || argument.endsWith("/docker"),
         );
         if (dockerIndex < 0 || proc.args[dockerIndex + 1] !== "run") continue;
         const dockerPort = Number(extractFlag(proc.args, "--port"));
@@ -180,13 +193,26 @@ export const createProcessManager = (
     for (const name of names) {
       const action = force ? "kill" : "stop";
       const args = force ? [action, name] : [action, "--time", "2", name];
-      let result = spawnSync("docker", args, { stdio: "ignore" });
+      let result = runner.runSync("docker", args);
       if (result.status !== 0) {
-        result = spawnSync("sudo", ["-n", "docker", ...args], { stdio: "ignore" });
+        result = runner.runSync("sudo", ["-n", "docker", ...args]);
       }
       if (result.status !== 0) {
         logger.warn("Failed to stop docker inference container", { name, action });
       }
+    }
+  };
+
+  const removeStaleDockerContainerForCommand = (command: string[]): void => {
+    const dockerIndex = command.findIndex(
+      (argument) => argument === "docker" || argument.endsWith("/docker"),
+    );
+    if (dockerIndex < 0 || command[dockerIndex + 1] !== "run") return;
+    const name = extractFlag(command.slice(dockerIndex + 2), "--name");
+    if (!name) return;
+    const result = runner.runSync("docker", ["rm", "-f", name]);
+    if (result.status !== 0) {
+      runner.runSync("sudo", ["-n", "docker", "rm", "-f", name]);
     }
   };
 
@@ -195,93 +221,70 @@ export const createProcessManager = (
       process.kill(pid, signal);
       return true;
     } catch {
-      const result = spawnSync("sudo", ["-n", "kill", `-${signal}`, String(pid)], {
-        stdio: "ignore",
-      });
+      const result = runner.runSync("sudo", ["-n", "kill", `-${signal}`, String(pid)]);
       return result.status === 0;
     }
   };
 
-  const listProcessTable = (): ProcessTableEntry[] => {
-    try {
-      const result = spawnSync("ps", ["-eo", "pid=,ppid=,stat=,args="]);
-      if (result.status !== 0) {
-        return [];
-      }
-      const output = result.stdout.toString("utf-8").trim();
-      if (!output) {
-        return [];
-      }
-      return output
-        .split("\n")
-        .map((line): ProcessTableEntry | null => {
-          const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
-          if (!match) {
-            return null;
-          }
-          const command = match[4] ?? "";
-          return {
-            pid: Number(match[1]),
-            ppid: Number(match[2]),
-            stat: match[3] ?? "",
-            command,
-          };
-        })
-        .filter((entry): entry is ProcessTableEntry => entry !== null && entry.pid > 0);
-    } catch {
-      return [];
-    }
-  };
-
-  const isOrphanedInferenceWorker = (entry: ProcessTableEntry): boolean => {
+  const isOrphanedInferenceWorker = (entry: ProcessInventoryEntry): boolean => {
     if (entry.ppid !== 1 || entry.stat.includes("Z")) {
       return false;
     }
     return entry.command.includes("VLLM::Worker");
   };
 
-  const cleanupOrphanedInferenceWorkers = async (reason: string): Promise<number> => {
-    const workers = listProcessTable().filter(isOrphanedInferenceWorker);
-    if (workers.length === 0) {
-      return 0;
-    }
+  const cleanupOrphanedInferenceWorkersEffect = (reason: string): Effect.Effect<number> =>
+    Effect.gen(function* () {
+      const workers = listProcessInventory(runner).filter(isOrphanedInferenceWorker);
+      if (workers.length === 0) {
+        return 0;
+      }
 
-    for (const worker of workers) {
-      logger.warn("Killing orphaned inference worker", {
-        pid: worker.pid,
-        reason,
-        command: worker.command,
-      });
-      sendSignal(worker.pid, "SIGTERM");
-    }
-
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline && workers.some((worker) => pidExists(worker.pid))) {
-      await delayTimeout(200);
-    }
-
-    for (const worker of workers) {
-      if (pidExists(worker.pid)) {
-        logger.warn("Force killing orphaned inference worker", {
+      for (const worker of workers) {
+        logger.warn("Killing orphaned inference worker", {
           pid: worker.pid,
           reason,
           command: worker.command,
         });
-        sendSignal(worker.pid, "SIGKILL");
+        sendSignal(worker.pid, "SIGTERM");
       }
-    }
 
-    return workers.length;
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline && workers.some((worker) => pidExists(worker.pid))) {
+        yield* delayEffect(200);
+      }
+
+      for (const worker of workers) {
+        if (pidExists(worker.pid)) {
+          logger.warn("Force killing orphaned inference worker", {
+            pid: worker.pid,
+            reason,
+            command: worker.command,
+          });
+          sendSignal(worker.pid, "SIGKILL");
+        }
+      }
+
+      return workers.length;
+    });
+
+  const cleanupOrphanedInferenceWorkers = (reason: string): Promise<number> =>
+    Effect.runPromise(cleanupOrphanedInferenceWorkersEffect(reason));
+
+  const confirmInferenceStopped = async (port: number): Promise<boolean> => {
+    await cleanupOrphanedInferenceWorkers("confirm-stopped");
+    const process = await findInferenceProcess(port);
+    return process === null && !listProcessInventory(runner).some(isOrphanedInferenceWorker);
   };
 
-  const launchModel = async (recipe: Recipe): Promise<LaunchResult> => {
-    const updatedRecipe: Recipe = {
-      ...recipe,
-      port: config.inference_port,
-    };
+  const launchModel = async (
+    recipe: Recipe,
+    options: LaunchModelOptions = {},
+  ): Promise<LaunchResult> => {
+    const updatedRecipe = recipeForLaunch(recipe, config.inference_port, options);
     let command: string[] | null = null;
     try {
-      command = buildBackendCommand(updatedRecipe, config);
+      command = buildBackendCommand(updatedRecipe, config, options.gpuUuids !== undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -301,6 +304,7 @@ export const createProcessManager = (
     }
 
     await cleanupOrphanedInferenceWorkers("before-launch");
+    removeStaleDockerContainerForCommand(command);
 
     const logFile = primaryLogPathFor(config.data_dir, updatedRecipe.id);
     // Best-effort retention to prevent unbounded growth over long-running installs.
@@ -308,7 +312,7 @@ export const createProcessManager = (
       ...getLogCleanupDefaultsFromEnvironment(),
       excludePaths: new Set([logFile]),
     });
-    const env = buildEnvironment(updatedRecipe);
+    const env = buildEnvironment(updatedRecipe, config);
 
     try {
       const entry = command[0];
@@ -322,11 +326,7 @@ export const createProcessManager = (
       }
       let spawnError: string | null = null;
 
-      const child = spawn(entry, command.slice(1), {
-        stdio: ["ignore", "pipe", "pipe"],
-        env,
-        detached: true,
-      }) as ChildProcess;
+      const child = runner.spawnDetached(entry, command.slice(1), { env, stdio: "pipe" });
 
       child.on("error", (error) => {
         spawnError = String(error);
@@ -430,21 +430,10 @@ export const createProcessManager = (
     }
   };
 
-  const evictModel = async (force: boolean): Promise<number | null> => {
-    const current = await findInferenceProcess(config.inference_port);
-    if (!current) {
-      await cleanupOrphanedInferenceWorkers("evict-without-active-process");
-      return null;
-    }
-    await killProcess(current.pid, force);
-    await cleanupOrphanedInferenceWorkers("after-evict");
-    return current.pid;
-  };
-
   return {
     findInferenceProcess,
+    confirmInferenceStopped,
     launchModel,
-    evictModel,
     killProcess,
   };
 };

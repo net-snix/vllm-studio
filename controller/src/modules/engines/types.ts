@@ -3,7 +3,7 @@ export type {
   DownloadFileStatus,
   DownloadFileInfo,
   ModelDownload,
-} from "../shared/recipe-types";
+} from "@local-studio/contracts/recipes";
 
 export type {
   ServiceInfo,
@@ -27,6 +27,6 @@ export type {
   CompatibilityCheck,
   SystemRuntimeInfo,
   CompatibilityReport,
-} from "../shared/system-types";
+} from "@local-studio/contracts/system";
 
 export type { LaunchResult, ProcessInfo, Recipe, GpuInfo } from "../models/types";

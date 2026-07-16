@@ -42,6 +42,43 @@ export interface PtyBridge {
   ): () => void;
 }
 
+export interface QuickPanelHotkeyState {
+  hotkey: string;
+  defaultHotkey: string;
+}
+
+export interface QuickPanelHotkeyResult {
+  ok: boolean;
+  hotkey: string;
+  error?: string;
+}
+
+export interface QuickPanelBridge {
+  expand(): Promise<void>;
+  dismiss(): Promise<void>;
+  focusMainAndNavigate(projectId: string, sessionId?: string): Promise<void>;
+  getHotkey(): Promise<QuickPanelHotkeyState>;
+  setHotkey(hotkey: string): Promise<QuickPanelHotkeyResult>;
+}
+
+export interface ControllerDeployResultPayload {
+  ok: boolean;
+  url?: string;
+  apiKey?: string;
+  error?: string;
+}
+
+export interface ControllerDeployBridge {
+  /** Deploy a controller to an ssh host; resolves with url + api key. */
+  start(options: {
+    host: string;
+    port?: number;
+    installDir?: string;
+  }): Promise<ControllerDeployResultPayload>;
+  /** Streamed installer output lines for the in-flight deploy. */
+  onLog(listener: (line: string) => void): () => void;
+}
+
 export interface DesktopBridge {
   getRuntime(): Promise<{
     platform: NodeJS.Platform;
@@ -64,17 +101,6 @@ export interface DesktopBridge {
   loadUiPreferences(): Promise<UiPreferencesPayload>;
   saveUiPreferences(prefs: UiPreferencesPayload): Promise<void>;
   terminal: PtyBridge;
-}
-
-export interface IpcRequestMap {
-  "desktop:get-runtime": () => Awaited<ReturnType<DesktopBridge["getRuntime"]>>;
-  "desktop:open-external": (url: string) => Awaited<ReturnType<DesktopBridge["openExternal"]>>;
-  "desktop:get-update-status": () => Awaited<ReturnType<DesktopBridge["getUpdateStatus"]>>;
-  "desktop:check-for-updates": () => Awaited<ReturnType<DesktopBridge["checkForUpdates"]>>;
-  "desktop:open-directory": () => Awaited<ReturnType<DesktopBridge["openDirectory"]>>;
-  "desktop:list-projects": () => Awaited<ReturnType<DesktopBridge["listProjects"]>>;
-  "desktop:add-project": (
-    directoryPath: string,
-  ) => Awaited<ReturnType<DesktopBridge["addProject"]>>;
-  "desktop:remove-project": (id: string) => Awaited<ReturnType<DesktopBridge["removeProject"]>>;
+  quickPanel: QuickPanelBridge;
+  controllerDeploy: ControllerDeployBridge;
 }

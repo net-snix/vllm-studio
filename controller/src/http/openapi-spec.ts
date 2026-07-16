@@ -5,7 +5,8 @@ export const createOpenApiSpec = (context: AppContext): Record<string, unknown> 
   info: {
     title: "Local Studio API",
     version: "0.3.2",
-    description: "Model lifecycle management for vLLM, SGLang, and TabbyAPI inference servers",
+    description:
+      "Model lifecycle management for vLLM, SGLang, llama.cpp, and MLX inference servers",
   },
   servers: [
     {
@@ -236,17 +237,6 @@ export const createOpenApiSpec = (context: AppContext): Record<string, unknown> 
         responses: {
           "200": {
             description: "Model launched",
-          },
-        },
-      },
-    },
-    "/lifetime-metrics": {
-      get: {
-        summary: "Lifetime metrics",
-        description: "Get cumulative token/request/energy counters used by the CLI dashboard",
-        responses: {
-          "200": {
-            description: "Lifetime metrics payload",
           },
         },
       },

@@ -36,9 +36,9 @@ data/
 
 # Node.js
 node_modules/
+services/node_modules
 .next/
 .turbo/
-bun.lock
 
 # IDE
 .idea/
@@ -75,8 +75,6 @@ work/
 .osgrep/
 opencode.json
 
-# MCP servers config (contains API keys)
-data/mcp_servers.json
 
 # Local scripts (user-specific)
 scripts/*.local.sh
@@ -88,3 +86,8 @@ scripts/*.local.sh
 # Sensitive data - do not commit specific IPs or domains
 # Use environment variables or config files instead
 refactory/
+release-staging/
+frontend/dist-desktop/
+frontend/dist-installers/
+.vercel
+.env*

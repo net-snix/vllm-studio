@@ -1,8 +1,6 @@
 import type { ModelDownload } from "../types";
 import { openSqliteDatabase } from "../../../stores/sqlite";
 
-// --- JSON parsing (merged from core/json.ts) ---
-
 /**
  * Parse a JSON string, returning `null` on empty input or parse failure.
  * @param value - JSON string value.
@@ -79,7 +77,7 @@ export class DownloadStore {
       INSERT INTO model_downloads (id, data, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP
-    `
+    `,
       )
       .run(download.id, data);
   }

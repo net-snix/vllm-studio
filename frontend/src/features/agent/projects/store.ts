@@ -1,4 +1,4 @@
-import { PROJECTS_LOADED_EVENT, SESSIONS_CHANGED_EVENT } from "@/lib/workspace-events";
+import { SESSIONS_CHANGED_EVENT } from "@/lib/workspace-events";
 import * as defaultApi from "@/features/agent/projects/api";
 import type { GitSummary, Project, ProjectId } from "@/features/agent/projects/types";
 
@@ -30,6 +30,7 @@ export type ProjectsStore = {
   selectProject: (project: Project | null) => void;
   upsertProject: (project: Project) => void;
   removeProject: (id: string) => Promise<void>;
+  moveProjectBefore: (dragId: string, targetId: string | null) => void;
   loadGitSummary: (cwd: string) => Promise<GitSummary | null>;
   initGitForActiveProject: () => Promise<void>;
 };
@@ -41,9 +42,6 @@ const notify = (target: BrowserWindowLike | null, eventName: string): void => {
   target?.dispatchEvent(new Event(eventName));
 };
 
-const loadedEvent = (projects: Project[]): Event =>
-  new CustomEvent<{ projects: Project[] }>(PROJECTS_LOADED_EVENT, { detail: { projects } });
-
 export function createProjectsStore(dependencies: ProjectsStoreDependencies = {}): ProjectsStore {
   const api = dependencies.api ?? defaultApi;
   const readSelection = dependencies.readSelectedProjectId ?? readSelectedProjectId;
@@ -51,10 +49,9 @@ export function createProjectsStore(dependencies: ProjectsStoreDependencies = {}
   const getWindow = dependencies.getWindow ?? getBrowserWindow;
   const listeners = new Set<() => void>();
   let started = false;
-  let firstLoad = false;
   let lastGitFetch: string | null = null;
   let snapshot: ProjectsSnapshot = {
-    projects: [],
+    projects: applyProjectOrder(readCachedProjects()),
     loaded: false,
     selectedId: readSelection(),
     gitSummaries: new Map(),
@@ -105,19 +102,16 @@ export function createProjectsStore(dependencies: ProjectsStoreDependencies = {}
   const refresh = async (): Promise<void> => {
     let projects: Project[] = [];
     try {
-      projects = await api.loadProjects();
+      projects = applyProjectOrder(await api.loadProjects());
+      writeCachedProjects(projects);
     } catch {
-      // Swallow — we still mark loaded so consumers don't wait forever.
+      projects = snapshot.projects;
     }
     const previousSelectedId = snapshot.selectedId;
     const selectedId = resolveSelectedProjectId(previousSelectedId, projects);
     update({ ...snapshot, projects, loaded: true, selectedId });
     if (selectedId !== previousSelectedId) writeSelection(selectedId);
     void loadGitSummary(projectPathById(projects, selectedId));
-    if (!firstLoad) {
-      firstLoad = true;
-      getWindow()?.dispatchEvent(loadedEvent(projects));
-    }
   };
 
   const start = (): void => {
@@ -159,6 +153,19 @@ export function createProjectsStore(dependencies: ProjectsStoreDependencies = {}
       if (selectedId !== previousSelectedId) writeSelection(selectedId);
       void refresh();
     },
+    moveProjectBefore: (dragId, targetId) => {
+      if (dragId === targetId) return;
+      const projects = [...snapshot.projects];
+      const fromIndex = projects.findIndex((entry) => entry.id === dragId);
+      if (fromIndex === -1) return;
+      const [moved] = projects.splice(fromIndex, 1);
+      const toIndex = targetId ? projects.findIndex((entry) => entry.id === targetId) : -1;
+      if (toIndex === -1) projects.push(moved);
+      else projects.splice(toIndex, 0, moved);
+      writeProjectOrder(projects.map((entry) => entry.id));
+      writeCachedProjects(projects);
+      replaceProjects(projects);
+    },
     loadGitSummary,
     initGitForActiveProject: async () => {
       const cwd = projectPathById(snapshot.projects, snapshot.selectedId);
@@ -184,6 +191,62 @@ function projectPathById(projects: readonly Project[], projectId: ProjectId | nu
 }
 
 const SELECTED_PROJECT_KEY = "local-studio.agent.selectedProjectId";
+const PROJECTS_CACHE_KEY = "local-studio.agent.projects.cache.v1";
+const PROJECTS_ORDER_KEY = "local-studio.agent.projects.order.v1";
+
+function readProjectOrder(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PROJECTS_ORDER_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeProjectOrder(ids: string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PROJECTS_ORDER_KEY, JSON.stringify(ids));
+  } catch {}
+}
+
+/** Apply the user's saved manual order; projects without a saved position keep
+ * their load order and sort after the ordered ones. */
+function applyProjectOrder(projects: Project[]): Project[] {
+  const order = readProjectOrder();
+  if (order.length === 0) return projects;
+  const position = new Map(order.map((id, index) => [id, index] as const));
+  return [...projects].sort((a, b) => {
+    const pa = position.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+    const pb = position.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+    return pa - pb;
+  });
+}
+
+function readCachedProjects(): Project[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(PROJECTS_CACHE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is Project =>
+        Boolean(entry) &&
+        typeof (entry as Project).id === "string" &&
+        typeof (entry as Project).path === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedProjects(projects: Project[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PROJECTS_CACHE_KEY, JSON.stringify(projects));
+  } catch {}
+}
 
 function readSelectedProjectId(): string | null {
   if (typeof window === "undefined") return null;
@@ -199,7 +262,5 @@ function writeSelectedProjectId(id: string | null): void {
   try {
     if (id) window.localStorage.setItem(SELECTED_PROJECT_KEY, id);
     else window.localStorage.removeItem(SELECTED_PROJECT_KEY);
-  } catch {
-    // Ignore storage failures; selection persists in memory.
-  }
+  } catch {}
 }

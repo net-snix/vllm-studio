@@ -10,15 +10,16 @@ import type {
   SystemRuntimeInfo,
 } from "../../models/types";
 import type { Config } from "../../../config/env";
-import { resolveBinary, runCommand } from "../../../core/command";
-import { getGpuInfo } from "../../system/platform/gpu";
+import { resolveBinary, runCommand, runCommandAsync } from "../../../core/command";
+import { getGpuInfo, queryNvidiaSmiSnapshot } from "../../system/platform/gpu";
+import { extractCudaVersion } from "./cuda-version";
 import { getVllmRuntimeInfo } from "./vllm-runtime";
-import { probeGpuMonitoring } from "../../system/platform/compatibility-report";
+import { probeGpuMonitoringAsync } from "../../system/platform/compatibility-report";
 import { getRocmInfo, resolveRocmSmiTool } from "../../system/platform/rocm-info";
 import { resolveNvidiaSmiBinary } from "../../system/platform/smi-tools";
-import { getTorchBuildInfo } from "../../system/platform/torch-info";
-import { resolveVllmPythonPath } from "./vllm-python-path";
+import { getTorchBuildInfoAsync } from "../../system/platform/torch-info";
 import { getEngineSpec } from "../engine-spec";
+import { splitCommand } from "../process/process-inventory";
 import {
   isUpgradeCommandConfigured,
   CUDA_UPGRADE_ENV,
@@ -43,7 +44,7 @@ let llamacppRuntimeCache: {
 
 export const getSystemRuntimeInfo = async (
   config: Config,
-  runningProcess?: ProcessInfo | null
+  runningProcess?: ProcessInfo | null,
 ): Promise<SystemRuntimeInfo> => {
   const now = Date.now();
   if (systemRuntimeCache && systemRuntimeCache.expiresAt > now) {
@@ -64,24 +65,34 @@ export const getSystemRuntimeInfo = async (
 
 const computeSystemRuntimeInfo = async (
   config: Config,
-  runningProcess?: ProcessInfo | null
+  runningProcess?: ProcessInfo | null,
 ): Promise<SystemRuntimeInfo> => {
-  const gpus = getGpuInfo();
-  const types = Array.from(
-    new Set(gpus.map((gpu) => gpu.name).filter((name) => name && name !== "Unknown"))
-  );
-  const [vllmInfo, sglangInfo, llamaInfo, mlxInfo] = await Promise.all([
-    getVllmRuntimeInfo(),
-    getEngineSpec("sglang").getRuntimeInfo!(config, runningProcess),
-    getEngineSpec("llamacpp").getRuntimeInfo!(config, runningProcess),
-    getEngineSpec("mlx").getRuntimeInfo!(config, runningProcess),
-  ]);
-  const pythonForTorch = config.sglang_python || vllmInfo.python_path || "python3";
-  const torch = getTorchBuildInfo(pythonForTorch);
   const forcedSmiTool = process.env["LOCAL_STUDIO_GPU_SMI_TOOL"];
   const hasNvidiaSmi = Boolean(resolveNvidiaSmiBinary());
   const rocmSmiTool = resolveRocmSmiTool();
   const hasRocmSmi = Boolean(rocmSmiTool);
+  const nvidiaAllowed = !forcedSmiTool?.trim() || forcedSmiTool.trim() === "nvidia-smi";
+
+  // All probes are async and run concurrently. One nvidia-smi invocation feeds
+  // GPU info, the driver version, and the monitoring probe on CUDA hosts.
+  const vllmInfoPromise = getVllmRuntimeInfo();
+  const torchPromise = (async (): Promise<RuntimeTorchBuildInfo> => {
+    const pythonForTorch =
+      config.sglang_python || (await vllmInfoPromise).python_path || "python3";
+    return getTorchBuildInfoAsync(pythonForTorch);
+  })();
+  const [nvidiaSnapshot, vllmInfo, sglangInfo, llamaInfo, mlxInfo, torch] = await Promise.all([
+    nvidiaAllowed && hasNvidiaSmi ? queryNvidiaSmiSnapshot() : Promise.resolve(null),
+    vllmInfoPromise,
+    getEngineSpec("sglang").getRuntimeInfo!(config, runningProcess),
+    getEngineSpec("llamacpp").getRuntimeInfo!(config, runningProcess),
+    getEngineSpec("mlx").getRuntimeInfo!(config, runningProcess),
+    torchPromise,
+  ]);
+  const gpus = nvidiaSnapshot && nvidiaSnapshot.gpus.length > 0 ? nvidiaSnapshot.gpus : getGpuInfo();
+  const types = Array.from(
+    new Set(gpus.map((gpu) => gpu.name).filter((name) => name && name !== "Unknown")),
+  );
   const kind = detectPlatformKind({ forcedSmiTool, torch, hasNvidiaSmi, hasRocmSmi });
   const platform: RuntimePlatformInfo = {
     kind,
@@ -89,14 +100,22 @@ const computeSystemRuntimeInfo = async (
     rocm: kind === "rocm" ? getRocmInfo(rocmSmiTool) : null,
     torch,
   };
-  const gpuMonitoring = probeGpuMonitoring(kind, rocmSmiTool);
+  const [gpuMonitoring, cuda] = await Promise.all([
+    kind === "cuda" && nvidiaSnapshot
+      ? Promise.resolve({ available: nvidiaSnapshot.available, tool: "nvidia-smi" as const })
+      : probeGpuMonitoringAsync(kind, rocmSmiTool),
+    kind === "cuda"
+      ? getCudaInfoAsync(nvidiaSnapshot?.driverVersion ?? null)
+      : Promise.resolve({
+          driver_version: null,
+          cuda_version: null,
+          upgrade_command_available: false,
+        }),
+  ]);
   return {
     platform,
     gpu_monitoring: gpuMonitoring,
-    cuda:
-      kind === "cuda"
-        ? getCudaInfo()
-        : { driver_version: null, cuda_version: null, upgrade_command_available: false },
+    cuda,
     gpus: { count: gpus.length, types },
     backends: {
       vllm: {
@@ -128,147 +147,6 @@ export const detectPlatformKind = (args: {
   if (args.hasNvidiaSmi) return "cuda";
   if (args.hasRocmSmi) return "rocm";
   return "unknown";
-};
-
-const splitCommand = (command: string): string[] => {
-  const tokens = command.match(/(?:[^\s"]+|"[^"]*"|'[^']*')+/g) ?? [];
-  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ""));
-};
-
-const resolvePythonCandidate = (candidate: string | null | undefined): string | null => {
-  const value = candidate?.trim();
-  if (!value) return null;
-  if (value.includes("/")) return existsSync(value) ? resolve(value) : value;
-  return resolveBinary(value) ?? value;
-};
-
-const looksLikePythonExecutable = (value: string): boolean => {
-  const base = value.split("/").pop() ?? value;
-  return /^python(?:\d+(?:\.\d+)?)?$/.test(base) || base.includes("python");
-};
-
-const getRunningSglangPythonCandidates = (
-  runningProcess?: Pick<ProcessInfo, "pid" | "backend"> | null
-): string[] => {
-  if (!runningProcess || runningProcess.backend !== "sglang") return [];
-  const result = runCommand("ps", ["-p", String(runningProcess.pid), "-o", "args="]);
-  if (result.status !== 0 || !result.stdout) return [];
-  const args = splitCommand(result.stdout.trim());
-  const candidates: string[] = [];
-  const first = args[0];
-  if (first && looksLikePythonExecutable(first)) {
-    const resolved = resolvePythonCandidate(first);
-    if (resolved) candidates.push(resolved);
-  }
-  const moduleIndex = args.findIndex((argument) => argument === "sglang.launch_server");
-  if (moduleIndex >= 2 && args[moduleIndex - 1] === "-m") {
-    const resolved = resolvePythonCandidate(args[moduleIndex - 2]);
-    if (resolved) candidates.push(resolved);
-  }
-  return candidates.filter((candidate, index, all) => all.indexOf(candidate) === index);
-};
-
-const SGLANG_IMPORT_PROBE =
-  "import json, sys\ntry:\n import sglang\n print(json.dumps({'version': getattr(sglang, '__version__', None), 'python': sys.executable}))\nexcept Exception:\n print(json.dumps({'version': None, 'python': sys.executable}))";
-
-export const getSglangRuntimeInfo = (
-  config: Config,
-  runningProcess?: Pick<ProcessInfo, "pid" | "backend"> | null
-): RuntimeBackendInfo => {
-  const candidates: string[] = getRunningSglangPythonCandidates(runningProcess);
-  if (config.sglang_python) candidates.push(config.sglang_python);
-  const canonical = resolveVllmPythonPath();
-  if (canonical) candidates.push(canonical);
-  candidates.push("python3", "python");
-  const unique = candidates.filter((candidate, index, all) => all.indexOf(candidate) === index);
-
-  for (const python of unique) {
-    if (runCommand(python, ["-V"]).status !== 0) continue;
-    const result = runCommand(python, ["-c", SGLANG_IMPORT_PROBE]);
-    if (result.status !== 0) continue;
-    let parsed: { version?: string | null; python?: string | null } | null = null;
-    try {
-      parsed = JSON.parse(result.stdout) as { version?: string | null; python?: string | null };
-    } catch {
-      continue;
-    }
-    if (parsed?.version) {
-      return {
-        installed: true,
-        version: parsed.version,
-        python_path: parsed.python ?? python,
-        upgrade_command_available: true,
-      };
-    }
-  }
-  const fallback = unique.find((p) => runCommand(p, ["-V"]).status === 0) ?? null;
-  return {
-    installed: false,
-    version: null,
-    python_path: fallback ?? config.sglang_python ?? null,
-    upgrade_command_available: Boolean(fallback),
-  };
-};
-
-const MLX_IMPORT_PROBE =
-  "import json, sys\ntry:\n import mlx_lm\n print(json.dumps({'version': getattr(mlx_lm, '__version__', None) or 'installed', 'python': sys.executable}))\nexcept Exception:\n print(json.dumps({'version': None, 'python': sys.executable}))";
-
-const getRunningMlxPythonCandidates = (
-  runningProcess?: Pick<ProcessInfo, "pid" | "backend"> | null
-): string[] => {
-  if (!runningProcess || runningProcess.backend !== "mlx") return [];
-  const result = runCommand("ps", ["-p", String(runningProcess.pid), "-o", "args="]);
-  if (result.status !== 0 || !result.stdout) return [];
-  const args = splitCommand(result.stdout.trim());
-  const candidates: string[] = [];
-  const first = args[0];
-  if (first && looksLikePythonExecutable(first)) {
-    const resolved = resolvePythonCandidate(first);
-    if (resolved) candidates.push(resolved);
-  }
-  const moduleIndex = args.findIndex((argument) => argument === "mlx_lm.server");
-  if (moduleIndex >= 2 && args[moduleIndex - 1] === "-m") {
-    const resolved = resolvePythonCandidate(args[moduleIndex - 2]);
-    if (resolved) candidates.push(resolved);
-  }
-  return candidates.filter((candidate, index, all) => all.indexOf(candidate) === index);
-};
-
-export const getMlxRuntimeInfo = (
-  config: Config,
-  runningProcess?: Pick<ProcessInfo, "pid" | "backend"> | null
-): RuntimeBackendInfo => {
-  const candidates: string[] = getRunningMlxPythonCandidates(runningProcess);
-  if (config.mlx_python) candidates.push(config.mlx_python);
-  candidates.push("python3", "python");
-  const unique = candidates.filter((candidate, index, all) => all.indexOf(candidate) === index);
-
-  for (const python of unique) {
-    if (runCommand(python, ["-V"]).status !== 0) continue;
-    const result = runCommand(python, ["-c", MLX_IMPORT_PROBE]);
-    if (result.status !== 0) continue;
-    let parsed: { version?: string | null; python?: string | null } | null = null;
-    try {
-      parsed = JSON.parse(result.stdout) as { version?: string | null; python?: string | null };
-    } catch {
-      continue;
-    }
-    if (parsed?.version) {
-      return {
-        installed: true,
-        version: parsed.version,
-        python_path: parsed.python ?? python,
-        upgrade_command_available: false,
-      };
-    }
-  }
-  const fallback = unique.find((p) => runCommand(p, ["-V"]).status === 0) ?? null;
-  return {
-    installed: false,
-    version: null,
-    python_path: fallback ?? config.mlx_python ?? null,
-    upgrade_command_available: false,
-  };
 };
 
 const parseLlamaVersion = (output: string): string | null => {
@@ -380,11 +258,6 @@ export const getLlamacppRuntimeInfo = (config: Config): RuntimeBackendInfo => {
   return value;
 };
 
-const extractCudaVersion = (output: string): string | null => {
-  const match = output.match(/CUDA Version\s*:\s*([0-9.]+)/i);
-  if (match) return match[1] ?? null;
-  return null;
-};
 
 const extractNvccVersion = (output: string): string | null => {
   const match = output.match(/release\s+([0-9.]+)/i);
@@ -409,6 +282,42 @@ export const getCudaInfo = (): RuntimeCudaInfo => {
   }
   if (!cudaVersion) {
     const nvccResult = runCommand("nvcc", ["--version"]);
+    if (nvccResult.status === 0) {
+      cudaVersion = extractNvccVersion(nvccResult.stdout) ?? extractNvccVersion(nvccResult.stderr);
+    }
+  }
+  return {
+    driver_version: driverVersion,
+    cuda_version: cudaVersion,
+    upgrade_command_available: isUpgradeCommandConfigured(CUDA_UPGRADE_ENV),
+  };
+};
+
+/**
+ * Async mirror of getCudaInfo for the system-runtime snapshot. Accepts a driver
+ * version already parsed from the shared nvidia-smi snapshot so the driver
+ * query is not repeated; only the CUDA-version lookups run here.
+ */
+const getCudaInfoAsync = async (knownDriverVersion: string | null): Promise<RuntimeCudaInfo> => {
+  const nvidiaSmi = process.env["NVIDIA_SMI_PATH"] || "nvidia-smi";
+  let driverVersion = knownDriverVersion;
+  let cudaVersion: string | null = null;
+  if (!driverVersion) {
+    const driverResult = await runCommandAsync(
+      nvidiaSmi,
+      ["--query-gpu=driver_version", "--format=csv,noheader,nounits"],
+      { timeoutMs: 5_000 },
+    );
+    if (driverResult.status === 0 && driverResult.stdout) {
+      driverVersion = driverResult.stdout.split("\n")[0]?.trim() || null;
+    }
+  }
+  const smiResult = await runCommandAsync(nvidiaSmi, [], { timeoutMs: 5_000 });
+  if (smiResult.status === 0) {
+    cudaVersion = extractCudaVersion(smiResult.stdout) ?? extractCudaVersion(smiResult.stderr);
+  }
+  if (!cudaVersion) {
+    const nvccResult = await runCommandAsync("nvcc", ["--version"], { timeoutMs: 5_000 });
     if (nvccResult.status === 0) {
       cudaVersion = extractNvccVersion(nvccResult.stdout) ?? extractNvccVersion(nvccResult.stderr);
     }

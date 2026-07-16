@@ -4,37 +4,20 @@ type BrowserContextPromptInput = {
   enabled: boolean;
   backend: BrowserBackend;
   url: string;
-  modelId: string;
+  vision: boolean;
 };
-
-const VISION_MODEL_NEEDLES = [
-  "4o",
-  "vision",
-  "vl",
-  "qwen2.5-vl",
-  "qwen3-vl",
-  "gemma-3",
-  "llava",
-  "pixtral",
-];
-
-export function modelLikelySupportsVision(modelId: string): boolean {
-  const normalized = modelId.toLowerCase();
-  return VISION_MODEL_NEEDLES.some((needle) => normalized.includes(needle));
-}
 
 export function browserContextPrompt({
   enabled,
   backend,
   url,
-  modelId,
+  vision,
 }: BrowserContextPromptInput): string {
   if (!enabled) return "";
   const activeUrl = url && url !== "about:blank" ? url : "about:blank";
-  const vision = modelLikelySupportsVision(modelId);
   return [
     "<browser_context>",
-    "The in-app Browser is open for this turn. Browser tools are available only because the Browser panel is open.",
+    "A server-side browser is available this turn via the browser_* tools; navigation and reads run on the host, and the user may optionally watch it in the Browser panel.",
     `Backend: ${backend}.`,
     `Active URL: ${activeUrl}.`,
     "The page body has not been preloaded into this prompt. To inspect it, call browser_get_text or browser_get_html first.",

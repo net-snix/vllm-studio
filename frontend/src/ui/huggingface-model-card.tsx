@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Download, ExternalLink, Heart, RefreshCw, Sparkles } from "@/ui/icon-registry";
 import type { HuggingFaceModel } from "@/lib/types";
 import {
@@ -11,6 +11,7 @@ import {
   type HuggingFaceModelCardPayload,
 } from "@/lib/huggingface";
 import { formatBytes, formatNumber } from "@/lib/formatters";
+import { useModelCardPayload } from "@/hooks/use-model-card-payload";
 import { Button } from "./button";
 import { MarkdownContent } from "./markdown-content";
 import { RightDetailPanel } from "./right-detail-panel";
@@ -21,6 +22,14 @@ type HardwareFitSummary = {
   tone: "default" | "good" | "warning" | "danger" | "info";
   score: number;
   reason: string;
+};
+
+export type HuggingFaceModelCardPanelProps = {
+  model: HuggingFaceModel | null;
+  variants?: HuggingFaceModel[];
+  fit?: HardwareFitSummary;
+  open: boolean;
+  onClose: () => void;
 };
 
 type ModelCardStats = {
@@ -35,13 +44,7 @@ export function HuggingFaceModelCardPanel({
   fit,
   open,
   onClose,
-}: {
-  model: HuggingFaceModel | null;
-  variants?: HuggingFaceModel[];
-  fit?: HardwareFitSummary;
-  open: boolean;
-  onClose: () => void;
-}) {
+}: HuggingFaceModelCardPanelProps) {
   const modelId = model?.modelId ?? "";
   const { error, loading, payload } = useModelCardPayload(modelId, open);
   const stats = modelCardStats(model, payload);
@@ -114,44 +117,6 @@ export function HuggingFaceModelCardPanel({
       </div>
     </RightDetailPanel>
   );
-}
-
-function useModelCardPayload(modelId: string, open: boolean) {
-  const [payload, setPayload] = useState<HuggingFaceModelCardPayload | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    if (!modelId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetch(
-        `/api/huggingface/model-card?modelId=${encodeURIComponent(modelId)}`,
-        { cache: "no-store" },
-      );
-      const data = (await response.json()) as HuggingFaceModelCardPayload & { error?: string };
-      if (!response.ok) throw new Error(data.error || "Unable to load model card.");
-      setPayload(data);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load model card.");
-      setPayload(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [modelId]);
-
-  const subscribe = useCallback(
-    (_notify: () => void) => {
-      if (open && modelId) void load();
-      return () => {};
-    },
-    [load, modelId, open],
-  );
-
-  useSyncExternalStore(subscribe, getModelCardSnapshot, getModelCardSnapshot);
-
-  return { error, loading, payload };
 }
 
 function modelCardStats(
@@ -372,5 +337,3 @@ function formatDate(value?: string): string {
   if (Number.isNaN(date.getTime())) return "unknown";
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
-
-const getModelCardSnapshot = (): number => 0;

@@ -5,9 +5,6 @@ import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import type { ProcessInfo, Recipe } from "../models/types";
 
 const LOG_TAIL_LINES = 240;
-const TOKENS_PER_SECOND_PATTERN = /([0-9]+(?:\.[0-9]+)?)\s*tokens\s+per\s+second/i;
-const PROMPT_EVAL_PATTERN = /prompt eval time\s*=/i;
-const EVAL_PATTERN = /(^|\s)eval time\s*=/i;
 const DS4_PREFILL_PATTERN =
   /prefill chunk\s+\d+\/\d+.*?chunk=([0-9]+(?:\.[0-9]+)?)\s*t\/s\s+avg=([0-9]+(?:\.[0-9]+)?)\s*t\/s/i;
 const DS4_DECODE_PATTERN =
@@ -24,45 +21,6 @@ export interface RuntimeThroughputSample {
 const parsePositiveNumber = (raw: string | undefined): number => {
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : 0;
-};
-
-const parseTokensPerSecond = (line: string): number | null => {
-  const match = line.match(TOKENS_PER_SECOND_PATTERN);
-  if (!match?.[1]) return null;
-  const value = parsePositiveNumber(match[1]);
-  return value > 0 ? value : null;
-};
-
-export const parseLlamacppThroughputFromLines = (
-  lines: string[]
-): RuntimeThroughputSample | null => {
-  if (lines.length === 0) return null;
-
-  let promptLine = "";
-  let evalLine = "";
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index] ?? "";
-    if (!promptLine && PROMPT_EVAL_PATTERN.test(line)) {
-      promptLine = line;
-      continue;
-    }
-    if (!evalLine && EVAL_PATTERN.test(line) && !PROMPT_EVAL_PATTERN.test(line)) {
-      evalLine = line;
-    }
-    if (promptLine && evalLine) break;
-  }
-
-  const promptTps = promptLine ? (parseTokensPerSecond(promptLine) ?? 0) : 0;
-  const generationTps = evalLine ? (parseTokensPerSecond(evalLine) ?? 0) : 0;
-  if (promptTps <= 0 && generationTps <= 0) return null;
-
-  return {
-    promptTps,
-    generationTps,
-    ttftMs: 0,
-    sampleKey: `${promptLine}::${evalLine}`,
-  };
 };
 
 export const parseDs4ThroughputFromLines = (lines: string[]): RuntimeThroughputSample | null => {
@@ -133,19 +91,6 @@ export const findRunningRecipeForProcess = (
   );
 };
 
-export const getProcessModelId = (
-  context: Pick<AppContext, "stores">,
-  current: ProcessInfo
-): string => {
-  const recipe = findRunningRecipeForProcess(context, current);
-  return (
-    recipe?.served_model_name ??
-    current.served_model_name ??
-    current.model_path?.split("/").pop() ??
-    "unknown"
-  );
-};
-
 const resolveRuntimeLogPath = (
   context: Pick<AppContext, "config" | "stores">,
   current: ProcessInfo
@@ -180,12 +125,6 @@ const scrapeLogThroughput = (
   if (!logPath) return null;
   return parser(tailFileLines(logPath, LOG_TAIL_LINES));
 };
-
-export const scrapeLlamacppThroughput = (
-  context: Pick<AppContext, "config" | "stores">,
-  current: ProcessInfo
-): RuntimeThroughputSample | null =>
-  scrapeLogThroughput(context, current, parseLlamacppThroughputFromLines);
 
 export const scrapeDs4Throughput = (
   context: Pick<AppContext, "config" | "stores">,

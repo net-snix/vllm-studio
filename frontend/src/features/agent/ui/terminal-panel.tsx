@@ -1,21 +1,45 @@
 "use client";
 
-import { useCallback, useRef, useSyncExternalStore, type RefObject } from "react";
+import { useRef, type RefObject } from "react";
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { TerminalRunResult } from "@/features/agent/contracts";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
+import { effectTimeout } from "@/lib/effect-timers";
+import {
+  bumpTerminalFontSize,
+  getTerminalFontSize,
+  getTerminalKeybinds,
+  matchTerminalAction,
+  resetTerminalFontSize,
+  subscribeTerminalStore,
+  type TerminalAction,
+} from "@/lib/terminal-keybinds";
+
+export function preloadTerminalPanel(): void {
+  void import("@xterm/xterm");
+  void import("@xterm/addon-fit");
+  void import("@xterm/addon-web-links").catch(() => null);
+  void import("@xterm/addon-webgl").catch(() => null);
+}
 
 export function TerminalPanel({ cwd, ownerKey }: { cwd: string | null; ownerKey: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<TerminalRefs>({
     term: null,
     fit: null,
+    applyResize: null,
     input: "",
     running: false,
     disposed: false,
   });
 
-  useTerminalPanelEffects({ containerRef, cwd, ownerKey, stateRef });
+  useTerminalPanelEffects({
+    containerRef,
+    cwd,
+    ownerKey,
+    stateRef,
+  });
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-(--color-terminal-bg)">
@@ -27,14 +51,13 @@ export function TerminalPanel({ cwd, ownerKey }: { cwd: string | null; ownerKey:
           if ((event.target as HTMLElement)?.tagName === "A") return;
           stateRef.current.term?.focus();
         }}
-        className="min-h-0 flex-1 overflow-hidden p-2 [--xterm-color-background:var(--color-terminal-bg)]"
+        className="min-h-0 flex-1 overflow-hidden px-3 py-2.5 [--xterm-color-background:var(--color-terminal-bg)]"
       />
     </section>
   );
 }
 
 type PtyBridge = {
-  status(): Promise<{ available: boolean; reason: string | null }>;
   open(opts: {
     cwd?: string;
     cols?: number;
@@ -43,8 +66,6 @@ type PtyBridge = {
   }): Promise<{ id: string; replay?: string; reused?: boolean }>;
   write(id: string, data: string): Promise<void>;
   resize(id: string, cols: number, rows: number): Promise<void>;
-  close(id: string): Promise<void>;
-  closeOwner(ownerKey: string): Promise<void>;
   onData(listener: (id: string, chunk: string) => void): () => void;
   onExit(
     listener: (id: string, info: { exitCode: number; signal: number | null }) => void,
@@ -61,6 +82,7 @@ function getPtyBridge(): PtyBridge | null {
 type TerminalRefs = {
   term: XTerm | null;
   fit: FitAddon | null;
+  applyResize: (() => void) | null;
   input: string;
   running: boolean;
   disposed: boolean;
@@ -83,9 +105,6 @@ type PtyBootOptions = {
   ownerKey: string;
 };
 
-const getTerminalPanelSnapshot = (): number => 0;
-
-/** Resolve the Geist Mono font stack from the container's computed styles. */
 function resolveTerminalFont(cssVar: (name: string) => string): string {
   const resolved = cssVar("--font-geist-mono") || "";
   return (
@@ -94,28 +113,27 @@ function resolveTerminalFont(cssVar: (name: string) => string): string {
   );
 }
 
-/** Build the xterm theme object from the ZCode `--color-terminal-*` palette. */
 function buildTerminalTheme(cssVar: (name: string) => string): Record<string, string> {
   const v = (name: string, fallback: string) => cssVar(name) || fallback;
   return {
-    background: v("--color-terminal-bg", "#161616"),
+    background: v("--color-terminal-bg", "#181818"),
     foreground: v("--color-terminal-fg", "#d4d4d4"),
     cursor: v("--color-terminal-cursor", "#f8f8f8"),
-    cursorAccent: v("--color-terminal-cursor-accent", "#161616"),
-    selectionBackground: v("--color-terminal-selection", "#4099ff47"),
+    cursorAccent: v("--color-terminal-cursor-accent", "#181818"),
+    selectionBackground: v("--color-terminal-selection", "#339cff47"),
     black: v("--color-terminal-black", "#363636"),
-    red: v("--color-terminal-red", "#ff5c5c"),
-    green: v("--color-terminal-green", "#46bf72"),
-    yellow: v("--color-terminal-yellow", "#ff8a30"),
-    blue: v("--color-terminal-blue", "#4099ff"),
-    magenta: v("--color-terminal-magenta", "#7b5ce5"),
-    cyan: v("--color-terminal-cyan", "#42c8c8"),
+    red: v("--color-terminal-red", "#f67576"),
+    green: v("--color-terminal-green", "#85df7b"),
+    yellow: v("--color-terminal-yellow", "#fa994c"),
+    blue: v("--color-terminal-blue", "#3d8dff"),
+    magenta: v("--color-terminal-magenta", "#b06dff"),
+    cyan: v("--color-terminal-cyan", "#6dcbf4"),
     white: v("--color-terminal-white", "#adadad"),
     brightBlack: v("--color-terminal-bright-black", "#747474"),
     brightRed: v("--color-terminal-bright-red", "#f99"),
     brightGreen: v("--color-terminal-bright-green", "#87d9a4"),
     brightYellow: v("--color-terminal-bright-yellow", "#ffb26b"),
-    brightBlue: v("--color-terminal-bright-blue", "#80beff"),
+    brightBlue: v("--color-terminal-bright-blue", "#55a2ff"),
     brightMagenta: v("--color-terminal-bright-magenta", "#a888f2"),
     brightCyan: v("--color-terminal-bright-cyan", "#8ee5e5"),
     brightWhite: v("--color-terminal-bright-white", "#f8f8f8"),
@@ -124,7 +142,22 @@ function buildTerminalTheme(cssVar: (name: string) => string): Record<string, st
 
 type ITerminalLoadable = { loadAddon(addon: unknown): void };
 
-/** Load the optional web-links addon, routing clicks through the desktop opener. */
+function loadWebglAddon(
+  term: ITerminalLoadable,
+  webglModule: {
+    WebglAddon: new () => { onContextLoss?: (cb: () => void) => void; dispose(): void };
+  } | null,
+): void {
+  // GPU renderer for crisp, fast glyphs; falls back to the DOM renderer when
+  // WebGL is unavailable (headless, software rendering, context loss).
+  if (!webglModule) return;
+  try {
+    const addon = new webglModule.WebglAddon();
+    addon.onContextLoss?.(() => addon.dispose());
+    term.loadAddon(addon);
+  } catch {}
+}
+
 function loadWebLinksAddon(
   term: ITerminalLoadable,
   webLinksModule: {
@@ -143,9 +176,29 @@ function loadWebLinksAddon(
         else window.open(uri, "_blank", "noopener");
       }),
     );
-  } catch {
-    // optional addon — silently skip
-  }
+  } catch {}
+}
+
+function runTerminalAction(action: TerminalAction, refs: TerminalRefs): void {
+  const dispatch: Record<TerminalAction, () => void> = {
+    clearTerminal: () => refs.term?.clear(),
+    fontSizeUp: () => bumpTerminalFontSize(1),
+    fontSizeDown: () => bumpTerminalFontSize(-1),
+    fontSizeReset: () => resetTerminalFontSize(),
+  };
+  dispatch[action]();
+}
+
+function terminalKeyHandler(stateRef: RefObject<TerminalRefs>): (event: KeyboardEvent) => boolean {
+  return (event) => {
+    if (event.type !== "keydown") return true;
+    const action = matchTerminalAction(event, getTerminalKeybinds());
+    if (!action) return true;
+    event.preventDefault();
+    event.stopPropagation();
+    runTerminalAction(action, stateRef.current);
+    return false;
+  };
 }
 
 function useTerminalPanelEffects({
@@ -159,7 +212,7 @@ function useTerminalPanelEffects({
   ownerKey: string;
   stateRef: RefObject<TerminalRefs>;
 }): void {
-  const subscribeTerminal = useCallback(() => {
+  useMountSubscription(() => {
     const refs = stateRef.current;
     refs.disposed = false;
     refs.input = "";
@@ -169,10 +222,11 @@ function useTerminalPanelEffects({
     async function boot() {
       const element = containerRef.current;
       if (!element) return;
-      const [{ Terminal }, { FitAddon }, webLinksModule] = await Promise.all([
+      const [{ Terminal }, { FitAddon }, webLinksModule, webglModule] = await Promise.all([
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
         import("@xterm/addon-web-links").catch(() => null),
+        import("@xterm/addon-webgl").catch(() => null),
       ]);
       if (refs.disposed) return;
       const styles = getComputedStyle(element);
@@ -180,44 +234,47 @@ function useTerminalPanelEffects({
       const fontFamily = resolveTerminalFont(cssVar);
       const term = new Terminal({
         cursorBlink: true,
+        cursorStyle: "block",
         convertEol: false,
-        scrollback: 10_000,
+        scrollback: 50_000,
         allowProposedApi: true,
         macOptionIsMeta: true,
         rightClickSelectsWord: true,
+        smoothScrollDuration: 80,
+        minimumContrastRatio: 3,
         fontFamily,
-        fontSize: 12,
-        lineHeight: 1.0,
+        fontSize: getTerminalFontSize(),
+        fontWeightBold: "600",
+        lineHeight: 1.2,
+        letterSpacing: 0,
         theme: buildTerminalTheme(cssVar),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
       loadWebLinksAddon(term, webLinksModule);
+      loadWebglAddon(term, webglModule);
+      term.attachCustomKeyEventHandler(terminalKeyHandler(stateRef));
       term.open(element);
       fit.fit();
       refs.term = term;
       refs.fit = fit;
 
       const pty = getPtyBridge();
-      let useFallback = !pty;
       if (pty) {
-        const status = await pty.status().catch(() => ({ available: false, reason: "ipc error" }));
-        if (!status.available) {
-          term.writeln(`\x1b[33mPTY unavailable: ${status.reason ?? "unknown"}\x1b[0m`);
+        try {
+          cleanupTerminal = await bootPty({ pty, term, fit, refs, element, cwd, ownerKey });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "unknown";
+          term.writeln(`\x1b[33mPTY unavailable: ${reason}\x1b[0m`);
           term.writeln("\x1b[33mFalling back to non-interactive shell.\x1b[0m");
-          useFallback = true;
+          cleanupTerminal = bootFallback(term, fit, refs, element, cwd);
         }
       } else {
         term.writeln("\x1b[33mNo desktop PTY bridge — using web fallback (no TUI).\x1b[0m");
-      }
-
-      if (!useFallback && pty) {
-        cleanupTerminal = await bootPty({ pty, term, fit, refs, element, cwd, ownerKey });
-      } else {
         cleanupTerminal = bootFallback(term, fit, refs, element, cwd);
       }
 
-      window.setTimeout(() => {
+      effectTimeout(() => {
         if (!refs.disposed) term.focus();
       }, 0);
     }
@@ -230,10 +287,20 @@ function useTerminalPanelEffects({
       refs.term?.dispose();
       refs.term = null;
       refs.fit = null;
+      refs.applyResize = null;
     };
   }, [containerRef, cwd, ownerKey, stateRef]);
 
-  useSyncExternalStore(subscribeTerminal, getTerminalPanelSnapshot, getTerminalPanelSnapshot);
+  useMountSubscription(
+    () =>
+      subscribeTerminalStore(() => {
+        const term = stateRef.current.term;
+        if (!term) return;
+        term.options.fontSize = getTerminalFontSize();
+        stateRef.current.applyResize?.();
+      }),
+    [stateRef],
+  );
 }
 
 async function bootPty({
@@ -270,6 +337,11 @@ async function bootPty({
     );
   });
   const { id, replay } = await pty.open({ cwd: cwd ?? undefined, cols, rows, ownerKey });
+  if (refs.disposed) {
+    dataDisposer();
+    exitDisposer();
+    return () => {};
+  }
   currentId = id;
   if (replay) term.write(replay);
   for (const item of queuedData) {
@@ -285,37 +357,15 @@ async function bootPty({
   const dataSub = term.onData((data) => {
     void pty.write(id, data);
   });
-  const resizeObserver = new ResizeObserver(() => {
+  refs.applyResize = () => {
     if (refs.disposed) return;
     try {
       fit.fit();
       void pty.resize(id, term.cols, term.rows);
-    } catch {
-      // ignore
-    }
-  });
+    } catch {}
+  };
+  const resizeObserver = new ResizeObserver(() => refs.applyResize?.());
   resizeObserver.observe(element);
-  term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== "keydown") return true;
-    const meta = event.metaKey || event.ctrlKey;
-    if (meta && (event.key === "c" || event.key === "C")) {
-      const selection = term.getSelection();
-      if (selection) {
-        navigator.clipboard?.writeText(selection).catch(() => undefined);
-        return false;
-      }
-    }
-    if (meta && (event.key === "v" || event.key === "V")) {
-      navigator.clipboard
-        ?.readText()
-        .then((text) => {
-          if (text) void pty.write(id, text);
-        })
-        .catch(() => undefined);
-      return false;
-    }
-    return true;
-  });
   return () => {
     dataDisposer();
     exitDisposer();
@@ -334,9 +384,9 @@ function bootFallback(
   const session: FallbackSession = { input: "", running: false, cwd, previousCwd: null };
   writeIntro(term, session.cwd);
   const dataSub = term.onData((data) => handleTerminalData(data, refs, term, session));
-  const resizeObserver = new ResizeObserver(() => refs.fit?.fit());
+  refs.applyResize = () => fit.fit();
+  const resizeObserver = new ResizeObserver(() => refs.applyResize?.());
   resizeObserver.observe(element);
-  void fit;
   return () => {
     dataSub.dispose();
     resizeObserver.disconnect();

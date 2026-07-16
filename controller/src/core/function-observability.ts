@@ -16,7 +16,7 @@ function errorMessage(error: unknown): string {
 export async function observeControllerFunction<T>(
   context: AppContext,
   functionName: string,
-  call: () => T | Promise<T>
+  call: () => T | Promise<T>,
 ): Promise<T> {
   const start = performance.now();
   try {
@@ -38,3 +38,16 @@ export async function observeControllerFunction<T>(
     throw error;
   }
 }
+
+/**
+ * The most common observed call: locate the running inference process on the
+ * configured port. `label` prefixes the telemetry function name per call site
+ * (e.g. "status" -> "status.findInferenceProcess").
+ */
+export const findObservedInferenceProcess = (
+  context: AppContext,
+  label: string,
+): ReturnType<AppContext["processManager"]["findInferenceProcess"]> =>
+  observeControllerFunction(context, `${label}.findInferenceProcess`, () =>
+    context.processManager.findInferenceProcess(context.config.inference_port),
+  );

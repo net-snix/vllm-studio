@@ -1,16 +1,18 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { createConfig, type Config } from "./config/env";
-import { createEventManager, type EventManager } from "./modules/system/event-manager";
+import { EventManager } from "./modules/system/event-manager";
 import { createLaunchState, type LaunchState } from "./modules/engines/process/launch-state";
 import {
   createLaunchFailureBudget,
   type LaunchFailureBudget,
 } from "./modules/engines/process/launch-failure-budget";
-import { createMetrics, type ControllerMetrics, type MetricsRegistry } from "./modules/system/metrics";
-import { createProcessManager, type ProcessManager } from "./modules/engines/process/process-manager";
+import {
+  createProcessManager,
+  type ProcessManager,
+} from "./modules/engines/process/process-manager";
 import { DownloadManager } from "./modules/engines/downloads/download-manager";
-import { createEngineCoordinator, type EngineCoordinator } from "./modules/engines/engine-coordinator";
+import { EngineCoordinator } from "./modules/engines/engine-coordinator";
 import { createLogger, resolveLogLevel, type Logger } from "./core/logger";
 import { primaryLogPathFor } from "./core/log-files";
 import { DownloadStore } from "./modules/engines/downloads/download-store";
@@ -19,6 +21,14 @@ import { RecipeStore } from "./modules/models/recipes/recipe-store";
 import { InferenceRequestStore } from "./stores/inference-request-store";
 import { ControllerSettingsStore } from "./stores/controller-settings-store";
 import { ControllerRequestStore } from "./stores/controller-request-store";
+import { RigStore } from "./stores/rig-store";
+import {
+  createGpuLeaseRegistry,
+  perUserGpuLeaseLockDirectory,
+  type GpuLeaseRegistry,
+} from "./modules/system/gpu-leases";
+import { getGpuInfo } from "./modules/system/platform/gpu";
+import { SpeechService } from "./modules/speech/service";
 
 export interface AppContext {
   config: Config;
@@ -26,11 +36,11 @@ export interface AppContext {
   eventManager: EventManager;
   launchState: LaunchState;
   launchFailureBudget: LaunchFailureBudget;
-  metrics: ControllerMetrics;
-  metricsRegistry: MetricsRegistry;
   processManager: ProcessManager;
   downloadManager: DownloadManager;
   engineService: EngineCoordinator;
+  gpuLeaseRegistry: GpuLeaseRegistry;
+  speechService: SpeechService;
   stores: {
     recipeStore: RecipeStore;
     downloadStore: DownloadStore;
@@ -39,6 +49,7 @@ export interface AppContext {
     inferenceRequestStore: InferenceRequestStore;
     controllerSettingsStore: ControllerSettingsStore;
     controllerRequestStore: ControllerRequestStore;
+    rigStore: RigStore;
   };
 }
 
@@ -72,7 +83,8 @@ export const createAppContext = (): AppContext => {
   const inferenceRequestStore = new InferenceRequestStore(dbPath);
   const controllerSettingsStore = new ControllerSettingsStore(dbPath);
   const controllerRequestStore = new ControllerRequestStore(dbPath);
-  const eventManager = createEventManager();
+  const rigStore = new RigStore(dbPath);
+  const eventManager = new EventManager();
   const logger = createLogger(resolveLogLevel("info"), {
     filePath: primaryLogPathFor(config.data_dir, "controller"),
     onLine: (line) => eventManager.publishLogLine("controller", line),
@@ -80,25 +92,33 @@ export const createAppContext = (): AppContext => {
   modelsDirectoryState = ensureModelsDirectory(config.models_dir);
   if (modelsDirectoryState === "missing") {
     logger.warn(
-      `Models directory ${config.models_dir} does not exist and could not be created; set LOCAL_STUDIO_MODELS_DIR to a writable path`
+      `Models directory ${config.models_dir} does not exist and could not be created; set LOCAL_STUDIO_MODELS_DIR to a writable path`,
     );
   }
 
   const launchState = createLaunchState();
   const launchFailureBudget = createLaunchFailureBudget();
-  const { registry: metricsRegistry, metrics } = createMetrics();
   const processManager = createProcessManager(config, logger, eventManager);
   const downloadManager = new DownloadManager(config, downloadStore, eventManager, logger);
+  const gpuLeaseRegistry = createGpuLeaseRegistry({
+    lockDirectory: perUserGpuLeaseLockDirectory(),
+  });
 
-  const engineService = createEngineCoordinator({
+  const engineService = new EngineCoordinator({
     config,
-    logger,
     eventManager,
     processManager,
     recipeStore,
-    downloadManager,
-    abortRunsForModel: () => 0,
     launchFailureBudget,
+    gpuLeaseRegistry,
+    gpuInfo: getGpuInfo,
+  });
+  const speechService = new SpeechService({
+    dataDirectory: config.data_dir,
+    databasePath: dbPath,
+    engine: engineService,
+    gpuLeaseRegistry,
+    gpuInfo: getGpuInfo,
   });
 
   lifetimeMetricsStore.ensureFirstStarted();
@@ -109,11 +129,11 @@ export const createAppContext = (): AppContext => {
     eventManager,
     launchState,
     launchFailureBudget,
-    metrics,
-    metricsRegistry,
     processManager,
     downloadManager,
     engineService,
+    gpuLeaseRegistry,
+    speechService,
     stores: {
       recipeStore,
       downloadStore,
@@ -122,6 +142,7 @@ export const createAppContext = (): AppContext => {
       inferenceRequestStore,
       controllerSettingsStore,
       controllerRequestStore,
+      rigStore,
     },
   } satisfies AppContext;
 

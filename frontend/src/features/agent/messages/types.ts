@@ -1,10 +1,11 @@
-import type { ComposerPluginRef, ComposerSkillRef } from "@/features/agent/composer-context";
+import type { ComposerSkillRef } from "@/features/agent/composer-context";
 
 // Imperative handle exposed by ChatPane so the workspace can replay a past
 // pi session into the focused pane without prop-plumbing indirection. The
 // workspace calls this directly from event/click handlers so the control flow
 // is auditable in one place.
 export type ChatPaneHandle = {
+  sessionId: string;
   loadAndReplay: (piSessionId: string) => Promise<void>;
   compact: () => Promise<void>;
 };
@@ -79,10 +80,9 @@ export type QueuedMessage = {
 };
 
 export type SessionTab = {
+  // Pane/client identity AND the opaque runtime key sent to the server. One
+  // per tab so tabs run independent agent sessions.
   id: string;
-  // In-memory Pi runtime key. One per tab so tabs can run independent agent
-  // sessions instead of sharing a pane-level runtime.
-  runtimeSessionId: string;
   // Pi session UUID (null = unstarted, will be assigned by pi when the first
   // turn runs).
   piSessionId: string | null;
@@ -91,7 +91,7 @@ export type SessionTab = {
   modelId?: string;
   title: string;
   messages: ChatMessage[];
-  status: string;
+  status: import("@/features/agent/runtime/types").SessionStatus;
   error: string;
   startedAt?: string;
   input: string;
@@ -99,7 +99,9 @@ export type SessionTab = {
   contextUsage?: import("@/features/agent/runtime/runtime-schema").RuntimeContextUsage | null;
   activeAssistantId?: string;
   lastEventSeq?: number;
-  plugins?: ComposerPluginRef[];
+  // Byte-offset cursor into the canonical log for paging older history into
+  // view ("load earlier"); null/undefined once the whole log is loaded.
+  historyCursor?: number | null;
   skills?: ComposerSkillRef[];
   // Outgoing pending follow-up messages. Drawn as chips above the input until
   // Pi `queue_update` reconciles the canonical queue. Steering messages are
@@ -108,6 +110,6 @@ export type SessionTab = {
 };
 
 export type RuntimeLoggedEvent = {
-  seq?: number;
-  event?: Record<string, unknown>;
+  readonly seq?: number;
+  readonly event?: Record<string, unknown>;
 };

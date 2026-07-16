@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef } from "react";
+import { getStoredBackendUrl } from "@/lib/api/connection";
 import type { MetricSampleInput } from "./status-section-view";
 
 type MetricSample = {
@@ -18,6 +19,12 @@ type MetricPeak = {
   ttft: number;
 };
 
+const samplesByKey = new Map<string, MetricSample[]>();
+
+function scopedSampleKey(key: string): string {
+  return `${getStoredBackendUrl() || "default"}::${key}`;
+}
+
 export function useMetricSamples({
   key,
   generation,
@@ -32,6 +39,7 @@ export function useMetricSamples({
 }: MetricSampleInput) {
   const samplesRef = useRef<MetricSample[]>([]);
   const sampleKeyRef = useRef<string | null>(null);
+  const scopedKey = scopedSampleKey(key);
   const peaks: MetricPeak = {
     generation: finitePositive(generationPeak),
     prefill: finitePositive(prefillPeak),
@@ -39,9 +47,9 @@ export function useMetricSamples({
     ttft: finitePositive(ttftPeak),
   };
 
-  if (sampleKeyRef.current !== key) {
-    sampleKeyRef.current = key;
-    samplesRef.current = [];
+  if (sampleKeyRef.current !== scopedKey) {
+    sampleKeyRef.current = scopedKey;
+    samplesRef.current = samplesByKey.get(scopedKey) ?? [];
   }
   if (!active) return { samples: zeroSamples(), peaks };
 
@@ -61,7 +69,9 @@ export function useMetricSamples({
     previous.ttft !== next.ttft ||
     previous.requests !== next.requests
   ) {
-    samplesRef.current = [...current, next].slice(-56);
+    const nextSamples = [...current, next].slice(-56);
+    samplesRef.current = nextSamples;
+    samplesByKey.set(scopedKey, nextSamples);
   }
 
   return { samples: samplesRef.current.length > 0 ? samplesRef.current : zeroSamples(), peaks };
@@ -69,7 +79,7 @@ export function useMetricSamples({
 
 export function MetricTrends({ samples, peaks }: { samples: MetricSample[]; peaks: MetricPeak }) {
   return (
-    <div className="mt-6 border-t border-(--border)/40 pt-3">
+    <div className="mt-6 border-t border-(--separator) pt-3">
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(18rem,0.65fr)]">
         <TrendPanel
           label="Throughput (tok/s)"
@@ -114,12 +124,8 @@ function TrendPanel({
   return (
     <div className="min-w-0">
       <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <span className="font-mono text-[length:var(--fs-2xs)] uppercase tracking-[0.18em] text-(--dim)/75">
-          {label}
-        </span>
-        <span className="font-mono text-[length:var(--fs-2xs)] uppercase tracking-[0.14em] text-(--dim)/45">
-          {meta}
-        </span>
+        <span className="text-[length:var(--fs-sm)] font-medium text-(--hl2)">{label}</span>
+        <span className="text-[length:var(--fs-xs)] text-(--dim)/45">{meta}</span>
       </div>
       <div className="h-28">
         <Sparkline lines={lines} overlays={overlays} />

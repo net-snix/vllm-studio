@@ -2,29 +2,36 @@
 
 import { Effect } from "effect";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import api from "@/lib/api/client";
 import type {
   EngineBackend,
   EngineJob,
   ModelRecommendation,
   RuntimeTarget,
+  StarterPreset,
   StudioDiagnostics,
   StudioSettings,
 } from "@/lib/types";
 import { useDownloads } from "@/hooks/use-downloads";
-import { describeFailedEngineJob, isTerminalEngineJob } from "@/features/settings/runtime-targets";
-import { buildStarterRecipe } from "./setup-helpers";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
+import {
+  loadSecondarySetupDataEffect,
+  loadSetupDataEffect,
+  refreshRuntimeStateEffect,
+  type SetupLoadSetters,
+} from "./setup-load";
+import {
+  beginDownloadEffect,
+  configureAndLaunchEffect,
+  connectRemotePresetEffect,
+  markSetupComplete,
+  runRuntimeJobEffect,
+  saveSettingsEffect,
+} from "./setup-actions";
+import { useSetupBenchmark } from "./use-setup-benchmark";
 
 type ManagedSetupBackend = Extract<EngineBackend, "vllm" | "sglang" | "mlx">;
-
-interface SetupBenchmarkResult {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_time_s: number;
-  generation_tps: number;
-}
 
 export function useSetup() {
   const router = useRouter();
@@ -36,6 +43,11 @@ export function useSetup() {
   const [modelsDir, setModelsDir] = useState("");
   const [diagnostics, setDiagnostics] = useState<StudioDiagnostics | null>(null);
   const [recommendations, setRecommendations] = useState<ModelRecommendation[]>([]);
+  const [presets, setPresets] = useState<StarterPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState<StarterPreset | null>(null);
+  const [remoteApiKey, setRemoteApiKey] = useState("");
+  const [connectingRemote, setConnectingRemote] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
   const [runtimeTargets, setRuntimeTargets] = useState<RuntimeTarget[]>([]);
   const [runtimeJobs, setRuntimeJobs] = useState<EngineJob[]>([]);
   const [maxVram, setMaxVram] = useState(0);
@@ -47,9 +59,15 @@ export function useSetup() {
   const [configuringRecipe, setConfiguringRecipe] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [createdRecipeId, setCreatedRecipeId] = useState<string | null>(null);
-  const [benchmarking, setBenchmarking] = useState(false);
-  const [benchmarkResult, setBenchmarkResult] = useState<SetupBenchmarkResult | null>(null);
-  const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
+
+  const { benchmarking, benchmarkResult, benchmarkError, runSetupBenchmark, resetBenchmark } =
+    useSetupBenchmark();
+
+  const [lifecycle] = useState(() => ({ abort: new AbortController() }));
+  useMountSubscription(() => {
+    lifecycle.abort = new AbortController();
+    return () => lifecycle.abort.abort();
+  }, [lifecycle]);
 
   const downloadsState = useDownloads(2000);
 
@@ -58,300 +76,181 @@ export function useSetup() {
     return downloadsState.downloads.find((download) => download.model_id === selectedModel) ?? null;
   }, [downloadsState.downloads, selectedModel]);
 
-  const refreshRuntimeState = useCallback(async () => {
-    const [targetPayload, jobPayload] = await Promise.all([
-      api.getRuntimeTargets().catch(() => ({ targets: [] })),
-      api.getRuntimeJobs().catch(() => ({ jobs: [] })),
-    ]);
-    setRuntimeTargets(targetPayload.targets);
-    setRuntimeJobs(jobPayload.jobs);
+  const refreshRuntimeState = useCallback(() => {
+    return Effect.runPromise(refreshRuntimeStateEffect({ setRuntimeTargets, setRuntimeJobs }));
   }, []);
 
-  const loadSecondarySetupData = useCallback(async (initialWarnings: string[]) => {
-    const warnings = [...initialWarnings];
-    const [recommendationsResult, targetResult, jobResult] = await Promise.allSettled([
-      withSetupTimeout(api.getModelRecommendations(), "model recommendations"),
-      withSetupTimeout(api.getRuntimeTargets(), "runtime targets"),
-      withSetupTimeout(api.getRuntimeJobs(), "runtime jobs"),
-    ]);
-
-    if (recommendationsResult.status === "fulfilled") {
-      setRecommendations(recommendationsResult.value.recommendations || []);
-      setMaxVram(recommendationsResult.value.max_vram_gb ?? 0);
-    } else {
-      setRecommendations([]);
-      setMaxVram(0);
-      warnings.push(`model recommendations: ${setupErrorMessage(recommendationsResult.reason)}`);
-    }
-
-    if (targetResult.status === "fulfilled") {
-      setRuntimeTargets(targetResult.value.targets);
-    } else {
-      setRuntimeTargets([]);
-      warnings.push(`runtime targets: ${setupErrorMessage(targetResult.reason)}`);
-    }
-
-    if (jobResult.status === "fulfilled") {
-      setRuntimeJobs(jobResult.value.jobs);
-    } else {
-      setRuntimeJobs([]);
-      warnings.push(`runtime jobs: ${setupErrorMessage(jobResult.reason)}`);
-    }
-
-    setLoadWarning(formatLoadWarning(warnings));
-  }, []);
-
-  const loadSetupData = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setLoadWarning(null);
-      const warnings: string[] = [];
-      const [settingsResult, diagnosticsResult] = await Promise.allSettled([
-        withSetupTimeout(api.getStudioSettings(), "settings"),
-        withSetupTimeout(api.getStudioDiagnostics(), "controller diagnostics"),
-      ]);
-
-      if (settingsResult.status === "fulfilled") {
-        setSettings(settingsResult.value);
-        setModelsDir(settingsResult.value.effective.models_dir);
-      } else {
-        setSettings(null);
-        warnings.push(`settings: ${setupErrorMessage(settingsResult.reason)}`);
-      }
-
-      if (diagnosticsResult.status === "fulfilled") {
-        setDiagnostics(diagnosticsResult.value);
-        if (settingsResult.status === "rejected") {
-          setModelsDir(diagnosticsResult.value.config.models_dir || "");
-        }
-      } else {
-        setDiagnostics(null);
-        warnings.push(`controller diagnostics: ${setupErrorMessage(diagnosticsResult.reason)}`);
-      }
-
-      if (settingsResult.status === "rejected" && diagnosticsResult.status === "rejected") {
-        setError(CONTROLLER_UNREACHABLE_MESSAGE);
-        return;
-      }
-
-      setRecommendations([]);
-      setMaxVram(0);
-      setRuntimeTargets([]);
-      setRuntimeJobs([]);
-      setLoadWarning(formatLoadWarning(warnings));
-
-      void loadSecondarySetupData(warnings);
-    } finally {
-      setLoading(false);
-    }
-  }, [loadSecondarySetupData]);
-
-  const subscribeSetupData = useCallback(
-    (_notify: () => void) => {
-      void loadSetupData();
-      return () => {};
+  const loadSecondarySetupData = useCallback(
+    (initialWarnings: string[], loadSetters: SetupLoadSetters) => {
+      return Effect.runPromise(loadSecondarySetupDataEffect(initialWarnings, loadSetters));
     },
-    [loadSetupData],
+    [],
   );
 
-  useSyncExternalStore(subscribeSetupData, getSetupSnapshot, getSetupSnapshot);
+  const loadSetupData = useCallback(() => {
+    const loadSetters: SetupLoadSetters = {
+      setLoading,
+      setError,
+      setLoadWarning,
+      setSettings,
+      setModelsDir,
+      setDiagnostics,
+      setRecommendations,
+      setMaxVram,
+      setRuntimeTargets,
+      setRuntimeJobs,
+      setPresets,
+    };
+    return Effect.runPromise(
+      loadSetupDataEffect(loadSetters, (warnings) => loadSecondarySetupData(warnings, loadSetters)),
+    );
+  }, [loadSecondarySetupData]);
 
-  const saveSettings = useCallback(async () => {
+  useMountSubscription(() => {
+    void loadSetupData();
+  }, [loadSetupData]);
+
+  const saveSettings = useCallback(() => {
     if (!modelsDir.trim()) {
       setError("Models directory is required.");
-      return;
+      return Promise.resolve();
     }
     setSavingSettings(true);
-    try {
-      const result = await api.updateStudioSettings({ models_dir: modelsDir.trim() });
-      setSettings(result);
-      setModelsDir(result.effective.models_dir);
-      setHardwareConfirmed(false);
-      setStep(1);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update settings");
-    } finally {
-      setSavingSettings(false);
-    }
+    return Effect.runPromise(
+      saveSettingsEffect(modelsDir, {
+        setSettings,
+        setModelsDir,
+        setHardwareConfirmed,
+        setStep,
+        setError,
+        setSavingSettings,
+      }),
+    );
   }, [modelsDir]);
 
-  const finishRuntimeJob = useCallback(async (jobId: string): Promise<EngineJob> => {
-    const startedAt = Date.now();
-    let job = await fetchRuntimeJob(jobId);
-    while (!isTerminalEngineJob(job)) {
-      const elapsedMs = Date.now() - startedAt;
-      if (elapsedMs >= RUNTIME_JOB_POLL_CEILING_MS) {
-        throw new Error(
-          `The ${job.backend} ${job.type} is still running on the controller after ` +
-            `${Math.round(RUNTIME_JOB_POLL_CEILING_MS / 60_000)} minutes. It keeps running ` +
-            "server-side — watch it under Settings → Engines or in the controller logs, then " +
-            "reload this page once it finishes.",
-        );
-      }
-      const intervalMs =
-        elapsedMs < RUNTIME_JOB_FAST_POLL_WINDOW_MS
-          ? RUNTIME_JOB_FAST_POLL_MS
-          : RUNTIME_JOB_SLOW_POLL_MS;
-      await Effect.runPromise(Effect.sleep(intervalMs));
-      const next = await fetchRuntimeJob(jobId);
-      job = next;
-      setRuntimeJobs((current) => [
-        next,
-        ...current.filter((candidate) => candidate.id !== next.id),
-      ]);
-    }
-    return job;
-  }, []);
-
   const runRuntimeJob = useCallback(
-    async (payload: { backend: EngineBackend; targetId?: string; type: "install" | "update" }) => {
+    (payload: { backend: EngineBackend; targetId?: string; type: "install" | "update" }) => {
       setUpgrading(true);
       setError(null);
-      try {
-        const { job } = await api.createRuntimeJob(payload);
-        setRuntimeJobs((current) => [
-          job,
-          ...current.filter((candidate) => candidate.id !== job.id),
-        ]);
-        const finalJob = await finishRuntimeJob(job.id);
-        if (finalJob.status === "error") {
-          setError(describeFailedEngineJob(finalJob));
-        }
-        const refreshed = await api.getStudioDiagnostics();
-        setDiagnostics(refreshed);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Runtime job failed");
-      } finally {
-        // Always re-sync targets/jobs so a job that errored or vanished with a
-        // controller restart does not keep rendering as running.
-        await refreshRuntimeState();
-        setUpgrading(false);
-      }
+      return Effect.runPromise(
+        runRuntimeJobEffect(payload, {
+          setError,
+          setRuntimeJobs,
+          setDiagnostics,
+          setUpgrading,
+          refreshRuntimeState,
+        }),
+        { signal: lifecycle.abort.signal },
+      ).catch(() => undefined);
     },
-    [finishRuntimeJob, refreshRuntimeState],
+    [lifecycle, refreshRuntimeState],
   );
 
   const installRuntime = useCallback(
-    async (backend: ManagedSetupBackend) => {
-      await runRuntimeJob({ backend, type: "install" });
-    },
+    (backend: ManagedSetupBackend) => runRuntimeJob({ backend, type: "install" }),
     [runRuntimeJob],
   );
 
   const updateRuntimeTarget = useCallback(
-    async (target: RuntimeTarget) => {
-      await runRuntimeJob({
+    (target: RuntimeTarget) =>
+      runRuntimeJob({
         backend: target.backend,
         targetId: target.id,
         type: target.installed ? "update" : "install",
-      });
-    },
+      }),
     [runRuntimeJob],
   );
 
   const beginDownload = useCallback(
-    async (modelId: string) => {
-      if (!modelId) return;
+    (modelId: string, preset?: StarterPreset) => {
+      if (!modelId) return Promise.resolve();
       setSelectedModel(modelId);
+      setSelectedPreset(preset ?? null);
       setLaunchError(null);
       setCreatedRecipeId(null);
-      setBenchmarkResult(null);
-      setBenchmarkError(null);
-      try {
-        await downloadsState.startDownload({ model_id: modelId });
-        setStep(3);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to start download");
-      }
+      resetBenchmark();
+      return Effect.runPromise(
+        beginDownloadEffect(modelId, preset, {
+          startDownload: downloadsState.startDownload,
+          setStep,
+          setError,
+        }),
+      );
     },
-    [downloadsState],
+    [downloadsState, resetBenchmark],
   );
 
-  const submitManualModel = useCallback(async () => {
-    const trimmed = manualModelId.trim();
-    if (!trimmed) return;
-    await beginDownload(trimmed);
-  }, [manualModelId, beginDownload]);
+  const beginPresetSetup = useCallback(
+    (preset: StarterPreset) => {
+      if (preset.kind === "download" && preset.model_id) {
+        return beginDownload(preset.model_id, preset);
+      }
+      return Promise.resolve();
+    },
+    [beginDownload],
+  );
 
+  const connectRemotePreset = useCallback(
+    (preset: StarterPreset) => {
+      const remote = preset.remote;
+      if (preset.kind !== "remote" || !remote) return Promise.resolve();
+      const apiKey = remoteApiKey.trim();
+      if (!apiKey) {
+        setRemoteError("An API key is required to connect.");
+        return Promise.resolve();
+      }
+      setConnectingRemote(true);
+      setRemoteError(null);
+      return Effect.runPromise(
+        connectRemotePresetEffect(preset, remote, apiKey, {
+          setRemoteError,
+          setConnectingRemote,
+          openAgentChat: () => router.push("/agent?new=1"),
+        }),
+      );
+    },
+    [remoteApiKey, router],
+  );
+
+  const submitManualModel = useCallback(() => {
+    const trimmed = manualModelId.trim();
+    if (!trimmed) return Promise.resolve();
+    return beginDownload(trimmed);
+  }, [manualModelId, beginDownload]);
   const continueFromHardware = useCallback(() => {
     if (!hardwareConfirmed) return;
     setStep(2);
   }, [hardwareConfirmed]);
 
-  const configureAndLaunch = useCallback(async () => {
+  const configureAndLaunch = useCallback(() => {
     if (!activeDownload || activeDownload.status !== "completed") {
-      return;
+      return Promise.resolve();
     }
 
     setConfiguringRecipe(true);
     setLaunchError(null);
-    setBenchmarkResult(null);
-    setBenchmarkError(null);
+    resetBenchmark();
 
-    try {
-      let recipeId = createdRecipeId;
-      if (!recipeId) {
-        const existing = await api.getRecipes().catch(() => ({ recipes: [] }));
-        const recipe = buildStarterRecipe(activeDownload, existing.recipes);
-        await api.createRecipe(recipe);
-        recipeId = recipe.id;
-        setCreatedRecipeId(recipe.id);
-      }
-
-      await api.launch(recipeId);
-      const ready = await api.waitReady(300);
-      if (!ready.ready) {
-        throw new Error(ready.error || "The model did not become ready in time.");
-      }
-
-      localStorage.setItem("local-studio-setup-complete", "true");
-      setStep(5);
-    } catch (err) {
-      setLaunchError(err instanceof Error ? err.message : "Failed to configure and launch");
-    } finally {
-      setConfiguringRecipe(false);
-    }
-  }, [activeDownload, createdRecipeId]);
-
-  const runSetupBenchmark = useCallback(async () => {
-    setBenchmarking(true);
-    setBenchmarkError(null);
-    setBenchmarkResult(null);
-    try {
-      const result = await api.runBenchmark(1000, 100);
-      if (result.error) {
-        throw new Error(result.error);
-      }
-      if (!result.benchmark) {
-        throw new Error("Benchmark returned no metrics.");
-      }
-
-      setBenchmarkResult({
-        prompt_tokens: result.benchmark.prompt_tokens,
-        completion_tokens: result.benchmark.completion_tokens,
-        total_time_s: result.benchmark.total_time_s,
-        generation_tps: result.benchmark.generation_tps,
-      });
-    } catch (err) {
-      setBenchmarkError(err instanceof Error ? err.message : "Benchmark failed");
-    } finally {
-      setBenchmarking(false);
-    }
-  }, []);
+    return Effect.runPromise(
+      configureAndLaunchEffect(
+        { activeDownload, selectedPreset, createdRecipeId },
+        { setRuntimeJobs, setCreatedRecipeId, setStep, setLaunchError, setConfiguringRecipe },
+      ),
+    );
+  }, [activeDownload, createdRecipeId, resetBenchmark, selectedPreset, setRuntimeJobs]);
 
   const openChat = useCallback(() => {
-    localStorage.setItem("local-studio-setup-complete", "true");
-    router.push("/chat?new=1");
+    markSetupComplete();
+    router.push("/agent?new=1");
   }, [router]);
 
   const openDashboard = useCallback(() => {
-    localStorage.setItem("local-studio-setup-complete", "true");
+    markSetupComplete();
     router.push("/");
   }, [router]);
 
   const skipSetup = useCallback(() => {
-    localStorage.setItem("local-studio-setup-complete", "true");
+    markSetupComplete();
     router.push("/");
   }, [router]);
 
@@ -366,6 +265,14 @@ export function useSetup() {
     setModelsDir,
     diagnostics,
     recommendations,
+    presets,
+    selectedPreset,
+    beginPresetSetup,
+    remoteApiKey,
+    setRemoteApiKey,
+    connectingRemote,
+    remoteError,
+    connectRemotePreset,
     runtimeTargets,
     runtimeJobs,
     maxVram,
@@ -399,51 +306,4 @@ export function useSetup() {
     openDashboard,
     skipSetup,
   };
-}
-
-const getSetupSnapshot = (): number => 0;
-
-// Server-side installs can legitimately run for ~30 minutes; poll fast at
-// first, then back off, and only give up well past the server install timeout.
-const RUNTIME_JOB_POLL_CEILING_MS = 35 * 60_000;
-const RUNTIME_JOB_FAST_POLL_WINDOW_MS = 60_000;
-const RUNTIME_JOB_FAST_POLL_MS = 1_000;
-const RUNTIME_JOB_SLOW_POLL_MS = 3_000;
-
-const CONTROLLER_UNREACHABLE_MESSAGE =
-  "The controller is unreachable, so setup cannot start. Start it with " +
-  "`cd controller && bun src/main.ts` and reload this page.";
-
-async function fetchRuntimeJob(jobId: string): Promise<EngineJob> {
-  try {
-    return (await api.getRuntimeJob(jobId)).job;
-  } catch (err) {
-    if (isMissingRuntimeJobError(err)) {
-      // Runtime jobs live in controller memory, so a 404 mid-poll means the
-      // controller restarted and the install died with it.
-      throw new Error("The controller restarted and lost this install job. Re-run the install.");
-    }
-    throw err;
-  }
-}
-
-function isMissingRuntimeJobError(err: unknown): boolean {
-  return err instanceof Error && (err as Error & { status?: number }).status === 404;
-}
-
-function withSetupTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 8_000): Promise<T> {
-  return Effect.runPromise(
-    Effect.tryPromise(() => promise).pipe(
-      Effect.timeout(timeoutMs),
-      Effect.catchAll(() => Effect.fail(new Error(` timed out`))),
-    ),
-  );
-}
-
-function formatLoadWarning(warnings: string[]): string | null {
-  return warnings.length ? `Some setup data could not load: ${warnings.join("; ")}` : null;
-}
-
-function setupErrorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "unavailable";
 }

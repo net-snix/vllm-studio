@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve } from "node:path";
 
 export interface ProviderConfig {
@@ -12,7 +19,6 @@ export interface ProviderConfig {
 export interface PersistedConfig {
   models_dir?: string;
   providers?: ProviderConfig[];
-  ui_preferences?: Record<string, string>;
   selected_runtime_target_ids?: Partial<Record<"vllm" | "sglang" | "llamacpp" | "mlx", string>>;
 }
 
@@ -40,7 +46,7 @@ type PersistedConfigUpdates = {
 
 export const savePersistedConfig = (
   dataDirectory: string,
-  updates: PersistedConfigUpdates
+  updates: PersistedConfigUpdates,
 ): PersistedConfig => {
   const path = getPersistedConfigPath(dataDirectory);
   const current = loadPersistedConfig(dataDirectory);
@@ -60,7 +66,12 @@ export const savePersistedConfig = (
     }
   });
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify(next, null, 2));
+  // Write-then-rename so a crash mid-write can't truncate the file — a truncated
+  // read is swallowed by loadPersistedConfig, silently resetting models_dir /
+  // providers / selected_runtime_target_ids.
+  const temporaryPath = `${path}.tmp-${process.pid}`;
+  writeFileSync(temporaryPath, JSON.stringify(next, null, 2));
+  renameSync(temporaryPath, path);
   try {
     chmodSync(dataDirectory, 0o700);
     chmodSync(path, 0o600);

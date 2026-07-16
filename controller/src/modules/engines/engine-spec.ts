@@ -1,13 +1,31 @@
 /**
  * EngineSpec: a self-contained description of each inference backend, inspired
  * by exo-spark's EngineSpec pattern. Each backend owns its command building,
- * process detection, health endpoint, install spec, and binary probing, rather
- * than scattering these concerns across backend-builder, process-utilities,
- * runtime-targets, and runtime-info.
+ * process detection, health endpoint, install action, and binary probing,
+ * rather than scattering these concerns across backend-builder,
+ * process-utilities, runtime-targets, and runtime-info.
  */
+import type { ChildProcess } from "node:child_process";
 import type { Config } from "../../config/env";
 import type { Recipe, ProcessInfo } from "../models/types";
-import type { EngineBackend, RuntimeBackendInfo } from "../shared/system-types";
+import type {
+  EngineBackend,
+  RuntimeBackendInfo,
+  RuntimeUpgradeResult,
+} from "@local-studio/contracts/system";
+import type { InstallProgressUpdate } from "./runtimes/managed-venv";
+
+export type { InstallProgressUpdate };
+
+export interface InstallOptions {
+  config: Config;
+  version?: string | undefined;
+  pythonPath?: string | null | undefined;
+  preferBundled?: boolean | undefined;
+  createManagedVenv?: boolean | undefined;
+  onProgress?: ((update: InstallProgressUpdate) => void) | undefined;
+  onSpawn?: ((child: ChildProcess) => void) | undefined;
+}
 import { vllmSpec } from "./specs/vllm-spec";
 import { sglangSpec } from "./specs/sglang-spec";
 import { llamacppSpec } from "./specs/llamacpp-spec";
@@ -48,6 +66,14 @@ export interface EngineSpec {
   managedPackageSpec: (version?: string | null) => string;
 
   /**
+   * Idempotent install of this backend into a target Python (when pythonPath is
+   * given) or the controller-owned managed venv (when it is not). Short-circuits
+   * when the backend is already present. Replaces the per-backend upgrade
+   * branches in engine-jobs.ts and runtime-upgrade.ts.
+   */
+  install: (options: InstallOptions) => Promise<RuntimeUpgradeResult>;
+
+  /**
    * Detect whether a process's args represent this engine's serve invocation.
    * Replaces the per-backend checks in process-utilities.detectBackend.
    */
@@ -63,7 +89,7 @@ export interface EngineSpec {
   probeBinary?: (binary: string) => Promise<BinaryProbeResult>;
 
   /** Engine-specific Python path resolver for venv discovery. */
-  resolvePythonPath?: () => string | null;
+  resolvePythonPath?: (config: Config) => string | null;
 
   /** Get detailed runtime info (async). Replaces the sync functions in runtime-info.ts. */
   getRuntimeInfo?: (

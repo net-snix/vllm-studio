@@ -1,21 +1,14 @@
 "use client";
 
-import React, {
-  Children,
-  isValidElement,
-  memo,
-  useCallback,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import React, { Children, isValidElement, memo, useCallback, useMemo, type ReactNode } from "react";
+import { useCopiedFlag } from "@/features/agent/ui/use-copied-flag";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ExternalLink } from "@/ui/icon-registry";
 import { highlightFenced } from "@/features/agent/highlight-cache";
 import { normalizeBrowserInput } from "@/features/agent/tools/browser-url";
-import { useTools } from "@/features/agent/tools/context";
-import { CopyablePathChip } from "@/ui/copyable-path-chip";
+import { useToolsActions } from "@/features/agent/tools/context";
+import { CopyablePathChip } from "@/features/agent/ui/copyable-path-chip";
 
 const FILE_REF_PATTERN =
   /^(?:file:\/\/|~\/|\.{1,2}\/|\/|[\w.-]+\/)[^\s`'")]+(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)(?::\d+(?::\d+)?)?$/;
@@ -52,17 +45,11 @@ class MarkdownErrorBoundary extends React.Component<
 }
 
 function CodeBlockCopyButton({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, markCopied] = useCopiedFlag();
   const handleCopy = useCallback(() => {
     if (typeof navigator === "undefined" || !navigator.clipboard) return;
-    void navigator.clipboard.writeText(code).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
-      },
-      () => undefined,
-    );
-  }, [code]);
+    void navigator.clipboard.writeText(code).then(markCopied, () => undefined);
+  }, [code, markCopied]);
   return (
     <button
       type="button"
@@ -96,13 +83,18 @@ const FencedCodeBlock = memo(function FencedCodeBlock({
   language: string | null;
 }) {
   const highlightedHtml = useMemo(() => highlightFenced(language, code), [code, language]);
-  const codeClassName = ["hljs", language ? `language-${language}` : "", "font-mono"]
+  const codeClassName = [
+    "syntax-highlight",
+    "hljs",
+    language ? `language-${language}` : "",
+    "font-mono",
+  ]
     .filter(Boolean)
     .join(" ");
 
   return (
-    <div className="assistant-code-block group my-3 overflow-hidden rounded-xl border border-(--border)/40 bg-[#181818]">
-      <div className="flex h-8 items-center justify-between border-b border-(--border)/30 bg-(--surface)/40 px-3">
+    <div className="assistant-code-block group my-3 overflow-hidden rounded-xl border border-(--border) bg-(--color-surface)">
+      <div className="flex h-8 items-center justify-between border-b border-(--border) px-3">
         <span className="font-mono text-[length:var(--fs-xs)] font-medium uppercase tracking-[0.1em] text-(--dim)">
           {language ?? "code"}
         </span>
@@ -302,10 +294,12 @@ function buildComponentsWithAppLinks(tools: ToolHandlers): Components {
 }
 
 function AssistantMarkdownInner({ text }: { text: string }) {
-  const tools = useTools();
+  // Actions-only subscription: tools state churn (browser typing, canvas
+  // streaming, selections) never re-renders frozen markdown blocks.
+  const tools = useToolsActions();
   const normalizedText = useMemo(() => normalizeLooseMarkdownEmphasis(text), [text]);
-  // Stable `components` map: only changes when any of the four tool callbacks
-  // it captures changes identity (they're useCallback-stable in ToolsProvider).
+  // Stable `components` map: only changes when any of the tool callbacks it
+  // captures changes identity (they're useCallback-stable in ToolsProvider).
   const componentsWithAppLinks = useMemo<Components>(
     () =>
       buildComponentsWithAppLinks({

@@ -6,27 +6,25 @@ import type { RouteRegistrar } from "../../http/route-registrar";
 import type { SystemConfigResponse } from "../models/types";
 import { badRequest, notFound } from "../../core/errors";
 import { parseJsonObjectBody } from "../../core/validation";
-import { observeControllerFunction } from "../../core/function-observability";
+import { findObservedInferenceProcess } from "../../core/function-observability";
 import { estimateWeightsSizeBytes } from "../models/model-browser";
 import { getGpuInfo } from "./platform/gpu";
 import { getSystemRuntimeInfo } from "../engines/runtimes/runtime-info";
 import { buildCompatibilityReport } from "./platform/compatibility-report";
-import { fetchLocal } from "../../http/local-fetch";
 import { registerMonitoringRoutes } from "./metrics-routes";
 import { registerLogsRoutes } from "./logs-routes";
 import { registerUsageRoutes } from "./usage-routes";
-import {
-  SYSTEM_COMPAT_SERVICE_CHECK_TIMEOUT_MS,
-  SYSTEM_DEFAULT_SERVICE_CHECK_TIMEOUT_MS,
-  SYSTEM_SERVICE_CHECK_HOST,
-} from "./configs";
-import { registerLinuxDashboardRoutes } from "./linux-dashboard-routes";
+import { registerLinuxDashboardRoutes } from "./linux-dashboard/linux-dashboard-routes";
+
+const SYSTEM_SERVICE_CHECK_HOST = "127.0.0.1";
+const SYSTEM_COMPAT_SERVICE_CHECK_TIMEOUT_MS = 500;
+const SYSTEM_DEFAULT_SERVICE_CHECK_TIMEOUT_MS = 1_000;
 
 export const registerSystemRoutes: RouteRegistrar = (app, context) => {
   const checkService = (
     host: string,
     port: number,
-    timeoutMs = SYSTEM_DEFAULT_SERVICE_CHECK_TIMEOUT_MS
+    timeoutMs = SYSTEM_DEFAULT_SERVICE_CHECK_TIMEOUT_MS,
   ): Promise<boolean> => {
     return new Promise((resolve) => {
       const socket = connect({ port, host });
@@ -46,9 +44,7 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
   };
 
   app.get("/status", async (ctx) => {
-    const current = await observeControllerFunction(context, "status.findInferenceProcess", () =>
-      context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const current = await findObservedInferenceProcess(context, "status");
     return ctx.json({
       running: Boolean(current),
       process: current,
@@ -67,14 +63,12 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
   });
 
   app.get("/compat", async (ctx) => {
-    const known = await observeControllerFunction(context, "compat.findInferenceProcess", () =>
-      context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const known = await findObservedInferenceProcess(context, "compat");
     const runtime = await getSystemRuntimeInfo(context.config, known);
     const portOpen = await checkService(
       SYSTEM_SERVICE_CHECK_HOST,
       context.config.inference_port,
-      SYSTEM_COMPAT_SERVICE_CHECK_TIMEOUT_MS
+      SYSTEM_COMPAT_SERVICE_CHECK_TIMEOUT_MS,
     );
 
     const report = buildCompatibilityReport({
@@ -176,10 +170,7 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
     const gpus = getGpuInfo();
     let perGpuCapacityGb = 0;
     if (gpus.length >= tpSize && tpSize > 0) {
-      const candidates = gpus.slice(0, tpSize).map((gpu) => {
-        if (gpu.memory_total_mb) return gpu.memory_total_mb / 1024;
-        return gpu.memory_total / 1024 ** 3;
-      });
+      const candidates = gpus.slice(0, tpSize).map((gpu) => gpu.memory_total_mb / 1024);
       perGpuCapacityGb = Math.min(...candidates);
     }
 
@@ -222,9 +213,7 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
       description: "Controller service (Bun/Hono)",
     });
 
-    const current = await observeControllerFunction(context, "config.findInferenceProcess", () =>
-      context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const current = await findObservedInferenceProcess(context, "config");
     const inferenceStatus = current ? "running" : "stopped";
 
     services.push({
@@ -233,35 +222,7 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
       internal_port: context.config.inference_port,
       protocol: "http",
       status: inferenceStatus,
-      description: "Inference backend (vLLM, SGLang, llama.cpp, or MLX)",
-    });
-
-    const redisReachable = await checkService("localhost", 6379);
-    if (redisReachable) {
-      services.push({
-        name: "Redis",
-        port: 6379,
-        internal_port: 6379,
-        protocol: "tcp",
-        status: "running",
-        description: "Cache and rate limiting",
-      });
-    }
-
-    let prometheusStatus = "unknown";
-    try {
-      const response = await fetchLocal(9090, "/-/healthy", { timeoutMs: 2000 });
-      prometheusStatus = response.status === 200 ? "running" : "error";
-    } catch {
-      prometheusStatus = "stopped";
-    }
-    services.push({
-      name: "Prometheus",
-      port: 9090,
-      internal_port: 9090,
-      protocol: "http",
-      status: prometheusStatus,
-      description: "Metrics collection",
+      description: "Inference backend (vLLM, SGLang, llama.cpp, DS4, ExLlamaV3, or MLX)",
     });
 
     const frontendReachable = await checkService("localhost", 3000);
@@ -286,7 +247,6 @@ export const registerSystemRoutes: RouteRegistrar = (app, context) => {
         data_dir: context.config.data_dir,
         db_path: context.config.db_path,
         sglang_python: context.config.sglang_python ?? null,
-        tabby_api_dir: context.config.tabby_api_dir ?? null,
         llama_bin: context.config.llama_bin ?? null,
         mlx_python: context.config.mlx_python ?? null,
         exllamav3_command: context.config.exllamav3_command ?? null,

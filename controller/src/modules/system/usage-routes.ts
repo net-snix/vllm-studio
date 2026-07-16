@@ -1,47 +1,43 @@
+import type { UsageStats } from "@local-studio/contracts/usage";
 import { observeControllerFunction } from "../../core/function-observability";
 import type { RouteRegistrar } from "../../http/route-registrar";
 import type { AppContext } from "../../app-context";
 import { getUsageFromPiSessions } from "./usage/pi-sessions";
 import { emptyResponse } from "./usage/usage-utilities";
 
-const collectKnownModels = async (context: AppContext): Promise<Set<string>> => {
-  const knownModels = new Set<string>();
-  for (const recipe of context.stores.recipeStore.list()) {
-    if (recipe.served_model_name) knownModels.add(recipe.served_model_name);
-    knownModels.add(recipe.id);
-    if (recipe.name) knownModels.add(recipe.name);
-  }
-  const current = await context.processManager.findInferenceProcess(context.config.inference_port);
-  if (current?.served_model_name) knownModels.add(current.served_model_name);
-  if (current?.model_path) {
-    knownModels.add(current.model_path);
-    knownModels.add(current.model_path.split("/").pop() ?? current.model_path);
-  }
-  return knownModels;
-};
+// Analytics endpoints are not real-time; a short TTL collapses bursty
+// dashboard polling (and repeated aggregation passes) into one computation.
+const USAGE_CACHE_TTL_MS = 15_000;
+
+const withControllerUsage = (
+  context: AppContext,
+  body: UsageStats,
+  includeController: boolean,
+): UsageStats =>
+  includeController
+    ? { ...body, controller: context.stores.controllerRequestStore.aggregate() }
+    : body;
 
 export const registerUsageRoutes: RouteRegistrar = (app, context) => {
+  let usageCache: { at: number; body: UsageStats } | null = null;
+
   app.get("/usage", async (ctx) => {
+    const includeController = ctx.req.query("include_controller") === "true";
     try {
-      const knownModels = await observeControllerFunction(context, "usage.collectKnownModels", () =>
-        collectKnownModels(context)
-      );
+      if (usageCache && Date.now() - usageCache.at < USAGE_CACHE_TTL_MS) {
+        return ctx.json(withControllerUsage(context, usageCache.body, includeController));
+      }
       const usage = await observeControllerFunction(
         context,
         "usage.aggregateInferenceRequests",
-        () => context.stores.inferenceRequestStore.aggregate(knownModels)
+        () => context.stores.inferenceRequestStore.aggregate(),
       );
-      const response = usage ?? emptyResponse();
-      return ctx.json({
-        ...response,
-        controller: context.stores.controllerRequestStore.aggregate(),
-      });
+      const body: UsageStats = usage ?? emptyResponse();
+      usageCache = { at: Date.now(), body };
+      return ctx.json(withControllerUsage(context, body, includeController));
     } catch (error) {
       context.logger.error(`[Usage] Error fetching usage stats: ${(error as Error).message}`);
-      return ctx.json({
-        ...emptyResponse(),
-        controller: context.stores.controllerRequestStore.aggregate(),
-      });
+      return ctx.json(withControllerUsage(context, emptyResponse(), includeController));
     }
   });
 
@@ -51,10 +47,10 @@ export const registerUsageRoutes: RouteRegistrar = (app, context) => {
       // whether the model is one of our recipes (so users can see their
       // external model usage too).
       const usage = await observeControllerFunction(context, "usage.aggregatePiSessions", () =>
-        getUsageFromPiSessions(undefined, undefined, undefined)
+        getUsageFromPiSessions(),
       );
-      if (usage) return ctx.json(usage);
-      return ctx.json(emptyResponse());
+      const body: UsageStats = usage ?? emptyResponse();
+      return ctx.json(body);
     } catch (error) {
       context.logger.error(`[Usage] Error fetching pi-sessions usage: ${(error as Error).message}`);
       return ctx.json(emptyResponse());

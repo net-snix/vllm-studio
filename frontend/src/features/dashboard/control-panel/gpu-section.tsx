@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { GPU, Metrics, ProcessInfo } from "@/lib/types";
-import { toGB, toGBFromMB } from "@/lib/formatters";
+import { toGBFromMB } from "@/lib/formatters";
 
 interface GpuSectionProps {
   metrics: Metrics | null;
@@ -14,26 +14,25 @@ export function GpuSection({ gpus }: GpuSectionProps) {
   const sortedGpus = [...gpus].sort((a, b) => gpuMemoryTotal(b) - gpuMemoryTotal(a));
   const hasGpus = sortedGpus.length > 0;
   const [expanded, setExpanded] = useState(true);
+  const names = new Set(sortedGpus.map((gpu) => gpu.name).filter(Boolean));
+  const gpuModelLabel = names.size === 1 ? [...names][0].replace(/^NVIDIA\s+/, "") : null;
 
-  // Aggregates — one summary row beats N×4 individual bars.
   const totalUsed = sortedGpus.reduce((s, g) => s + gpuMemoryUsed(g), 0);
   const totalCap = sortedGpus.reduce((s, g) => s + gpuMemoryTotal(g), 0);
   const totalPower = sortedGpus.reduce((s, g) => s + (g.power_draw || 0), 0);
   const totalPowerLimit = sortedGpus.reduce((s, g) => s + (g.power_limit || 0), 0);
-  const utils = sortedGpus.map((g) => g.utilization_pct ?? g.utilization ?? 0);
+  const utils = sortedGpus.map((g) => g.utilization_pct);
   const avgUtil = utils.length > 0 ? utils.reduce((s, v) => s + v, 0) / utils.length : 0;
-  const temps = sortedGpus.map((g) => g.temp_c ?? g.temperature ?? 0).filter((t) => t > 0);
+  const temps = sortedGpus.map((g) => g.temp_c).filter((t) => t > 0);
   const maxTemp = temps.length > 0 ? Math.max(...temps) : 0;
   const memPct = totalCap > 0 ? clamp((totalUsed / totalCap) * 100, 0, 100) : 0;
 
   if (!hasGpus) {
     return (
-      <section className="mt-4 border-t border-(--border)/40 px-2 pt-3 pb-4">
+      <section className="mt-4 border-t border-(--separator) px-2 pt-3 pb-4">
         <div className="flex w-full items-center gap-4 text-left">
           <div className="flex shrink-0 items-baseline gap-2">
-            <span className="text-[length:var(--fs-xs)] font-medium uppercase tracking-[0.18em] text-(--dim)">
-              GPUs
-            </span>
+            <span className="text-[length:var(--fs-sm)] font-medium text-(--hl2)">GPUs</span>
             <span className="font-mono text-[length:var(--fs-xs)] tabular-nums text-(--dim)/65">
               0
             </span>
@@ -55,20 +54,23 @@ export function GpuSection({ gpus }: GpuSectionProps) {
   }
 
   return (
-    <section className="mt-4 border-t border-(--border)/40 px-2 pt-3 pb-5">
+    <section className="mt-4 border-t border-(--separator) px-2 pt-3 pb-5">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         className="group flex w-full items-center gap-4 text-left"
         aria-expanded={expanded}
       >
-        <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-[length:var(--fs-xs)] font-medium uppercase tracking-[0.18em] text-(--dim)">
-            GPUs
-          </span>
-          <span className="font-mono text-[length:var(--fs-xs)] tabular-nums text-(--dim)/65">
+        <div className="flex min-w-0 items-baseline gap-2">
+          <span className="shrink-0 text-[length:var(--fs-sm)] font-medium text-(--hl2)">GPUs</span>
+          <span className="shrink-0 font-mono text-[length:var(--fs-xs)] tabular-nums text-(--dim)/65">
             {sortedGpus.length}
           </span>
+          {gpuModelLabel ? (
+            <span className="hidden max-w-[14rem] truncate text-[length:var(--fs-xs)] text-(--dim)/60 md:inline">
+              {gpuModelLabel}
+            </span>
+          ) : null}
         </div>
 
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
@@ -130,8 +132,8 @@ function Aggregate({ label, value }: { label: string; value: string }) {
 function GpuRow({ gpu }: { gpu: GPU }) {
   const memUsed = gpuMemoryUsed(gpu);
   const memTotal = gpuMemoryTotal(gpu);
-  const temp = gpu.temp_c ?? gpu.temperature ?? 0;
-  const util = gpu.utilization_pct ?? gpu.utilization ?? 0;
+  const temp = gpu.temp_c;
+  const util = gpu.utilization_pct;
   const power = gpu.power_draw || 0;
   const powerLimit = gpu.power_limit || 0;
   const label = gpu.id ?? gpu.index ?? "gpu";
@@ -146,7 +148,7 @@ function GpuRow({ gpu }: { gpu: GPU }) {
       >
         {gpu.name}
       </span>
-      <div className="flex w-[8rem] shrink-0 items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         <div className="h-[2px] flex-1 overflow-hidden rounded-[var(--rad-2xs)] bg-(--dim)/15">
           <div className="h-full bg-(--fg)/45" style={{ width: `${memPct}%` }} />
         </div>
@@ -169,13 +171,11 @@ function GpuRow({ gpu }: { gpu: GPU }) {
 }
 
 function gpuMemoryUsed(gpu: GPU): number {
-  if (gpu.memory_used_mb != null) return toGBFromMB(gpu.memory_used_mb);
-  return toGB(gpu.memory_used ?? 0);
+  return toGBFromMB(gpu.memory_used_mb);
 }
 
 function gpuMemoryTotal(gpu: GPU): number {
-  if (gpu.memory_total_mb != null) return toGBFromMB(gpu.memory_total_mb);
-  return toGB(gpu.memory_total ?? 0);
+  return toGBFromMB(gpu.memory_total_mb);
 }
 
 function clamp(value: number, min: number, max: number): number {

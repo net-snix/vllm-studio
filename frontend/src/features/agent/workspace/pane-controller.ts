@@ -2,7 +2,7 @@ import {
   collectLeaves,
   removeLeaf,
   setSplitRatio as setLayoutSplitRatio,
-  splitLeaf,
+  splitLeafWithinLimits,
 } from "@/features/agent/workspace/layout";
 import type { Session, SessionId, SessionsMap } from "@/features/agent/runtime/types";
 import {
@@ -11,7 +11,11 @@ import {
   setSession as setSessionInMap,
   pruneSessions,
 } from "@/features/agent/runtime/store";
-import { findPaneByPiSessionId, referencedSessionIds } from "@/features/agent/runtime/selectors";
+import {
+  findPaneByPiSessionId,
+  paneSessionId,
+  referencedSessionIds,
+} from "@/features/agent/runtime/selectors";
 import type { Project } from "@/features/agent/projects/types";
 import type {
   PaneId,
@@ -21,13 +25,7 @@ import type {
 } from "@/features/agent/workspace/types";
 
 function isSession(value: Session | undefined): value is Session {
-  return Boolean(
-    value &&
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    typeof value.runtimeSessionId === "string" &&
-    value.runtimeSessionId.length > 0,
-  );
+  return Boolean(value && typeof value.id === "string" && value.id.length > 0);
 }
 
 function replaySessionTitle(sessionTitle?: string, fallback = "Loading session"): string {
@@ -52,10 +50,6 @@ function setPane(state: WorkspaceState, paneId: PaneId, pane: PaneState): Worksp
   return { ...state, panesById: next };
 }
 
-function paneWithSession(pane: PaneState, session: Session): PaneState {
-  return { ...pane, sessionId: session.id };
-}
-
 function withSessions(state: WorkspaceState, sessions: SessionsMap): WorkspaceState {
   return state.sessions === sessions ? state : { ...state, sessions };
 }
@@ -64,20 +58,14 @@ function pruneOrphanSessions(state: WorkspaceState): WorkspaceState {
   return withSessions(state, pruneSessions(state.sessions, referencedSessionIds(state)));
 }
 
-// Re-exported for back-compat: callers still use this predicate name.
-export { isEmptyStarterSession as isEmptyStarterTab };
-
 function focusExistingSession(
   state: WorkspaceState,
   paneId: PaneId,
   sessionId: SessionId,
 ): WorkspaceState {
   const pane = state.panesById.get(paneId);
-  if (!pane || pane.sessionId !== sessionId) return state;
-  return {
-    ...setPane(state, paneId, { ...pane, sessionId }),
-    focusedPaneId: paneId,
-  };
+  if (!pane || paneSessionId(pane) !== sessionId) return state;
+  return { ...state, focusedPaneId: paneId };
 }
 
 function replacePaneSession(
@@ -89,14 +77,46 @@ function replacePaneSession(
   if (!pane || !isSession(session)) return state;
   const sessions = setSessionInMap(state.sessions, session);
   const next = pruneOrphanSessions(
-    setPane(withSessions(state, sessions), paneId, paneWithSession(pane, session)),
+    setPane(withSessions(state, sessions), paneId, { sessionId: session.id }),
   );
   return { ...next, focusedPaneId: paneId };
 }
 
-function copySession(source: Session, fallback: Session | undefined): Session | null {
+function focusSessionAsOnlyPane(
+  state: WorkspaceState,
+  paneId: PaneId,
+  sessionId: SessionId,
+): WorkspaceState {
+  const pane = state.panesById.get(paneId);
+  if (!pane || paneSessionId(pane) !== sessionId) return state;
+  return pruneOrphanSessions({
+    ...state,
+    layout: { kind: "leaf", paneId },
+    panesById: new Map([[paneId, pane]]),
+    focusedPaneId: paneId,
+  });
+}
+
+function replaceWorkspaceSession(
+  state: WorkspaceState,
+  paneId: PaneId | undefined,
+  session: Session | undefined,
+): WorkspaceState {
+  if (!validPaneId(paneId) || !isSession(session)) return state;
+  return pruneOrphanSessions({
+    ...withSessions(state, setSessionInMap(state.sessions, session)),
+    layout: { kind: "leaf", paneId },
+    panesById: new Map([[paneId, { sessionId: session.id }]]),
+    focusedPaneId: paneId,
+  });
+}
+
+function copySessionWithFreshRuntimeId(
+  source: Session,
+  fallback: Session | undefined,
+): Session | null {
   if (!isSession(fallback)) return null;
-  return { ...source, id: fallback.id, runtimeSessionId: fallback.runtimeSessionId };
+  return { ...source, id: fallback.id };
 }
 
 function splitPaneWithSession(
@@ -112,20 +132,21 @@ function splitPaneWithSession(
   const { sourcePaneId, session, newPaneId, direction = "vertical", side = "b" } = payload;
   if (!validPaneId(newPaneId)) return null;
   if (!leafExists(state, sourcePaneId)) return null;
+  const layout = splitLeafWithinLimits(state.layout, sourcePaneId, newPaneId, direction, side);
+  if (!layout) return null;
   const nextPanes = new Map(state.panesById);
   nextPanes.set(newPaneId, { sessionId: session.id });
   return {
     ...state,
     sessions: setSessionInMap(state.sessions, session),
     panesById: nextPanes,
-    layout: splitLeaf(state.layout, sourcePaneId, newPaneId, direction, side),
+    layout,
     focusedPaneId: newPaneId,
   };
 }
 
 function siblingPaneId(state: WorkspaceState, sourcePaneId: PaneId): PaneId | null {
-  const leaves = collectLeaves(state.layout);
-  return leaves.find((id) => id !== sourcePaneId) ?? null;
+  return collectLeaves(state.layout).find((id) => id !== sourcePaneId) ?? null;
 }
 
 function openSessionAdjacentToFocusedPane(
@@ -152,13 +173,12 @@ export function setWorkspaceSplitRatio(
   return { ...state, layout: setLayoutSplitRatio(state.layout, payload.path, payload.ratio) };
 }
 
-// Internal: the only entry point is applyUrlNavigation (`?new=1`), which
-// always replaces the focused pane.
 function openNewSessionInFocusedPane(
   state: WorkspaceState,
   payload: OpenNewSessionPayload,
 ): WorkspaceState {
-  const pane = state.panesById.get(state.focusedPaneId);
+  const targetPaneId = state.focusedPaneId;
+  const pane = state.panesById.get(targetPaneId);
   if (!pane) return state;
   if (!isSession(payload.tab)) return state;
   const session: Session = {
@@ -167,49 +187,78 @@ function openNewSessionInFocusedPane(
     cwd: payload.project?.path,
     modelId: payload.tab.modelId || state.selectedModel || undefined,
   };
-  return replacePaneSession(state, state.focusedPaneId, session);
+  if (payload.replaceWorkspace) {
+    return replaceWorkspaceSession(state, payload.newPaneId ?? targetPaneId, session);
+  }
+  const activeId = paneSessionId(pane);
+  const active = activeId ? state.sessions.get(activeId) : undefined;
+  const focusedIsEmptyStarter = Boolean(active) && isEmptyStarterSession(active!);
+  if (focusedIsEmptyStarter || collectLeaves(state.layout).length >= 2) {
+    return replacePaneSession(state, targetPaneId, session);
+  }
+  return (
+    splitPaneWithSession(state, {
+      sourcePaneId: targetPaneId,
+      session,
+      newPaneId: payload.newPaneId,
+    }) ?? replacePaneSession(state, targetPaneId, session)
+  );
 }
 
-// Internal: reached via applyUrlNavigation (`?session=`).
 function replaySessionInFocusedPane(
   state: WorkspaceState,
   payload: ReplaySessionPayload,
 ): WorkspaceState {
   if (!payload.piSessionId) return state;
   const existing = findPaneByPiSessionId(state, payload.piSessionId);
-  if (existing) return focusExistingSession(state, existing.paneId, existing.session.id);
-  const pane = state.panesById.get(state.focusedPaneId);
-  if (!pane) return state;
-  const active = state.sessions.get(pane.sessionId) ?? null;
-  const targetSession = active && isEmptyStarterSession(active) ? active : null;
-  if (!targetSession && !isSession(payload.tab)) return state;
-
-  if (targetSession) {
-    const sessions = patchSessionInMap(state.sessions, targetSession.id, {
-      // Adopt project info from the incoming tab if the starter has none yet
-      // — replay carries the project context the workspace doesn't track.
-      projectId: targetSession.projectId ?? payload.tab?.projectId,
-      cwd: targetSession.cwd ?? payload.tab?.cwd,
-      modelId: targetSession.modelId ?? payload.tab?.modelId,
+  if (existing) {
+    return payload.replaceWorkspace
+      ? focusSessionAsOnlyPane(state, existing.paneId, existing.session.id)
+      : focusExistingSession(state, existing.paneId, existing.session.id);
+  }
+  const targetPaneId = state.focusedPaneId;
+  if (payload.replaceWorkspace) {
+    if (!isSession(payload.tab)) return state;
+    return replaceWorkspaceSession(state, payload.newPaneId ?? targetPaneId, {
+      ...payload.tab,
       piSessionId: payload.piSessionId,
-      title: replaySessionTitle(payload.sessionTitle, targetSession.title || "Loading session"),
-      startedAt: targetSession.startedAt ?? payload.tab?.startedAt,
-    });
-    return setPane(withSessions(state, sessions), state.focusedPaneId, {
-      ...pane,
-      sessionId: targetSession.id,
+      title: replaySessionTitle(payload.sessionTitle),
     });
   }
-
+  const pane = state.panesById.get(targetPaneId);
+  if (!pane) return state;
+  const activeId = paneSessionId(pane);
+  const active = activeId ? (state.sessions.get(activeId) ?? null) : null;
+  const targetSession = active && isEmptyStarterSession(active) ? active : null;
+  if (targetSession) {
+    return adoptReplaySession(state, targetPaneId, targetSession, payload);
+  }
+  if (!isSession(payload.tab)) return state;
   const session: Session = {
-    ...payload.tab!,
+    ...payload.tab,
     piSessionId: payload.piSessionId,
     title: replaySessionTitle(payload.sessionTitle),
   };
-  return replacePaneSession(state, state.focusedPaneId, session);
+  return replacePaneSession(state, targetPaneId, session);
 }
 
-// Internal: reached via applyUrlNavigation (`?session=&split=1`).
+function adoptReplaySession(
+  state: WorkspaceState,
+  paneId: PaneId,
+  target: Session,
+  payload: ReplaySessionPayload,
+): WorkspaceState {
+  const sessions = patchSessionInMap(state.sessions, target.id, {
+    projectId: target.projectId ?? payload.tab?.projectId,
+    cwd: target.cwd ?? payload.tab?.cwd,
+    modelId: target.modelId ?? payload.tab?.modelId,
+    piSessionId: payload.piSessionId,
+    title: replaySessionTitle(payload.sessionTitle, target.title || "Loading session"),
+    startedAt: target.startedAt ?? payload.tab?.startedAt,
+  });
+  return setPane(withSessions(state, sessions), paneId, { sessionId: target.id });
+}
+
 function replaySessionInSplitPane(
   state: WorkspaceState,
   payload: ReplaySessionInSplitPayload,
@@ -246,7 +295,7 @@ export function openSessionPayloadInPane(
   if (payload.payload.paneId && payload.payload.tabId) {
     const sourceSession = state.sessions.get(payload.payload.tabId);
     if (!sourceSession) return state;
-    const session = copySession(sourceSession, payload.tab);
+    const session = copySessionWithFreshRuntimeId(sourceSession, payload.tab);
     return session ? replacePaneSession(state, payload.paneId, session) : state;
   }
   return { ...state, focusedPaneId: payload.paneId };
@@ -274,7 +323,7 @@ export function splitPaneWithPayload(
   const sourceSession = payload.payload.tabId ? state.sessions.get(payload.payload.tabId) : null;
   const session =
     (!payload.payload.piSessionId && sourceSession
-      ? copySession(sourceSession, baseSession)
+      ? copySessionWithFreshRuntimeId(sourceSession, baseSession)
       : null) ?? baseSession;
   return (
     splitPaneWithSession(state, {
@@ -293,9 +342,11 @@ export function focusPane(state: WorkspaceState, payload: { paneId: PaneId }): W
 
 export function focusPaneSession(
   state: WorkspaceState,
-  payload: { paneId: PaneId; sessionId: SessionId },
+  payload: { paneId: PaneId; sessionId: SessionId; replaceWorkspace?: boolean },
 ): WorkspaceState {
-  return focusExistingSession(state, payload.paneId, payload.sessionId);
+  return payload.replaceWorkspace
+    ? focusSessionAsOnlyPane(state, payload.paneId, payload.sessionId)
+    : focusExistingSession(state, payload.paneId, payload.sessionId);
 }
 
 export function renameTab(
@@ -303,7 +354,7 @@ export function renameTab(
   payload: { paneId: PaneId; tabId: SessionId; title: string },
 ): WorkspaceState {
   const pane = state.panesById.get(payload.paneId);
-  if (!pane || pane.sessionId !== payload.tabId) return state;
+  if (!pane || paneSessionId(pane) !== payload.tabId) return state;
   const sessions = patchSessionInMap(state.sessions, payload.tabId, { title: payload.title });
   return withSessions(state, sessions);
 }
@@ -314,10 +365,10 @@ export function splitTabIntoNewPane(
 ): WorkspaceState {
   const leaves = collectLeaves(state.layout);
   const sourcePane = state.panesById.get(payload.sourcePaneId);
-  if (!sourcePane || sourcePane.sessionId !== payload.sourceTabId) return state;
+  if (!sourcePane || paneSessionId(sourcePane) !== payload.sourceTabId) return state;
   const sourceSession = state.sessions.get(payload.sourceTabId);
   if (!sourceSession || !isSession(payload.tab)) return state;
-  const session = copySession(sourceSession, payload.tab);
+  const session = copySessionWithFreshRuntimeId(sourceSession, payload.tab);
   if (!session) return state;
   const targetPaneId = leaves.length >= 2 ? siblingPaneId(state, state.focusedPaneId) : null;
   if (targetPaneId) return replacePaneSession(state, targetPaneId, session);
@@ -332,7 +383,8 @@ export function splitTabIntoNewPane(
 
 export function closePane(state: WorkspaceState, payload: { paneId: PaneId }): WorkspaceState {
   const leaves = collectLeaves(state.layout);
-  if (leaves.length <= 1 || !leaves.includes(payload.paneId)) return state;
+  if (!leaves.includes(payload.paneId)) return state;
+  if (leaves.length <= 1) return state;
   const nextPanes = new Map(state.panesById);
   nextPanes.delete(payload.paneId);
   const remaining = leaves.filter((id) => id !== payload.paneId);
@@ -358,9 +410,9 @@ export function patchActiveTab(
   state: WorkspaceState,
   payload: { paneId: PaneId; patch: Partial<Session> },
 ): WorkspaceState {
-  const pane = state.panesById.get(payload.paneId);
-  if (!pane) return state;
-  const sessions = patchSessionInMap(state.sessions, pane.sessionId, payload.patch);
+  const sessionId = paneSessionId(state.panesById.get(payload.paneId));
+  if (!sessionId) return state;
+  const sessions = patchSessionInMap(state.sessions, sessionId, payload.patch);
   return withSessions(state, sessions);
 }
 
@@ -369,17 +421,19 @@ export function applyUrlNavigation(
   payload: UrlNavigationPayload,
 ): WorkspaceState {
   if (state.lastHandledNavKey === payload.key) return state;
-  if (!payload.project && !payload.sessionId && !payload.newSession) return state;
+  if (!payload.project && !payload.sessionId && !payload.newSession) {
+    return state;
+  }
   const marked: WorkspaceState = { ...state, lastHandledNavKey: payload.key };
   const { paneId, tab, sessionTitle } = payload;
   const project = payload.project ?? undefined;
   if (payload.newSession && !payload.sessionId) {
-    // URL-driven `new=1` shares the dropdown's default "New session" intent:
-    // always replace the focused pane. The legacy "split when busy" heuristic
-    // made the same URL produce different results depending on what the
-    // focused pane currently held, which is the source of the "sometimes
-    // opens, sometimes doesn't" complaint about new chats.
-    return openNewSessionInFocusedPane(marked, { project, tab });
+    return openNewSessionInFocusedPane(marked, {
+      project,
+      tab,
+      newPaneId: payload.paneId,
+      replaceWorkspace: payload.replaceWorkspace,
+    });
   }
   if (payload.sessionId && payload.split) {
     return replaySessionInSplitPane(marked, {
@@ -394,6 +448,8 @@ export function applyUrlNavigation(
       piSessionId: payload.sessionId,
       sessionTitle,
       tab,
+      newPaneId: paneId,
+      replaceWorkspace: payload.replaceWorkspace,
     });
   }
   return marked;
@@ -401,8 +457,17 @@ export function applyUrlNavigation(
 
 type SessionPayload = { tab?: Session };
 
-type OpenNewSessionPayload = SessionPayload & { project?: Project };
-type ReplaySessionPayload = SessionPayload & { piSessionId: string; sessionTitle?: string };
+type OpenNewSessionPayload = SessionPayload & {
+  project?: Project;
+  newPaneId?: PaneId;
+  replaceWorkspace?: boolean;
+};
+type ReplaySessionPayload = SessionPayload & {
+  piSessionId: string;
+  sessionTitle?: string;
+  newPaneId?: PaneId;
+  replaceWorkspace?: boolean;
+};
 type ReplaySessionInSplitPayload = ReplaySessionPayload & { paneId?: PaneId };
 type OpenSessionPayloadInPanePayload = SessionPayload & {
   paneId: PaneId;
@@ -428,4 +493,5 @@ type UrlNavigationPayload = SessionPayload & {
   newSession?: boolean;
   split?: boolean;
   paneId?: PaneId;
+  replaceWorkspace?: boolean;
 };

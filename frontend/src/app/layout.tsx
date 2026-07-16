@@ -1,19 +1,9 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import { LeftSidebar } from "@/features/shell/left-sidebar";
 import { getThemeBootstrapScript } from "@/lib/theme-runtime";
 import { Providers } from "./providers";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -80,13 +70,13 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
         <link rel="icon" href="/mocks/logo-1.svg" type="image/svg+xml" />
         <meta name="mobile-web-app-capable" content="yes" />
-        <script
-          dangerouslySetInnerHTML={{
-            __html: bootScript,
-          }}
-        />
       </head>
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+      <body>
+        <Script
+          id="boot"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: bootScript }}
+        />
         <Providers>
           <LeftSidebar>{children}</LeftSidebar>
         </Providers>

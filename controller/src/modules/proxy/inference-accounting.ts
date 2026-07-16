@@ -71,8 +71,7 @@ const readUsageTotals = (usage: InferenceUsageInput): InferenceUsageTotals => {
   return {
     promptTokens: usage.prompt_tokens ?? 0,
     completionTokens: usage.completion_tokens ?? 0,
-    reasoningTokens:
-      usage.reasoning_tokens ?? completionDetails?.["reasoning_tokens"] ?? 0,
+    reasoningTokens: usage.reasoning_tokens ?? completionDetails?.["reasoning_tokens"] ?? 0,
     cacheReadTokens: promptDetails?.["cached_tokens"] ?? usage.cache_read_tokens ?? 0,
     cacheWriteTokens: usage.cache_write_tokens ?? 0,
   };
@@ -80,7 +79,7 @@ const readUsageTotals = (usage: InferenceUsageInput): InferenceUsageTotals => {
 
 const addLifetimeUsage = (
   stores: InferenceAccountingStores,
-  totals: InferenceUsageTotals
+  totals: InferenceUsageTotals,
 ): void => {
   if (totals.promptTokens > 0) {
     stores.lifetimeMetricsStore.addPromptTokens(totals.promptTokens);
@@ -97,7 +96,7 @@ const addLifetimeUsage = (
 
 const tryRecordInference = (
   options: InferenceAccountingOptions,
-  record: InferenceRequestRecord
+  record: InferenceRequestRecord,
 ): void => {
   try {
     options.stores.inferenceRequestStore.record(record);
@@ -108,27 +107,32 @@ const tryRecordInference = (
 
 export const recordNonStreamingInferenceUsage = (
   options: InferenceAccountingOptions,
-  input: NonStreamingInferenceRecordInput
+  input: NonStreamingInferenceRecordInput,
 ): InferenceUsageTotals | null => {
   if (!input.usage) return null;
 
   const totals = readUsageTotals(input.usage);
   addLifetimeUsage(options.stores, totals);
-  tryRecordInference(options, {
-    ...input.record,
-    prompt_tokens: totals.promptTokens,
-    completion_tokens: totals.completionTokens,
-    reasoning_tokens: totals.reasoningTokens,
-    cache_read_tokens: totals.cacheReadTokens,
-    cache_write_tokens: totals.cacheWriteTokens,
-    streamed: false,
-  });
+  // Match the streaming path: only write an inference_request row for a
+  // billable response. An upstream 4xx/5xx whose JSON body happens to carry a
+  // zero-token usage object would otherwise pollute the request table.
+  if (hasBillableTokens(totals)) {
+    tryRecordInference(options, {
+      ...input.record,
+      prompt_tokens: totals.promptTokens,
+      completion_tokens: totals.completionTokens,
+      reasoning_tokens: totals.reasoningTokens,
+      cache_read_tokens: totals.cacheReadTokens,
+      cache_write_tokens: totals.cacheWriteTokens,
+      streamed: false,
+    });
+  }
   return totals;
 };
 
 export const recordStreamingInferenceUsage = (
   options: InferenceAccountingOptions,
-  input: StreamingInferenceRecordInput
+  input: StreamingInferenceRecordInput,
 ): InferenceUsageTotals => {
   const totals = readUsageTotals(input.usage);
   addLifetimeUsage(options.stores, totals);

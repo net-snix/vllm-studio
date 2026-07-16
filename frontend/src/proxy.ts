@@ -19,11 +19,6 @@ function denyResponse(isApi: boolean, status: number, message: string): NextResp
   return new NextResponse(message, { status });
 }
 
-// Broad access gate. The frontend hosts an in-process agent with shell/filesystem
-// tools, so every route is privileged. See `@/lib/auth/access` for posture rules;
-// crown-jewel API routes additionally self-check via `@/lib/auth/guard`. Returns
-// a response when access is denied (or a cookie-setting redirect for the one-time
-// `?token=` bootstrap), or null when the request may proceed.
 function enforceAccess(request: NextRequest): NextResponse | null {
   const posture = resolveAccessPosture();
   if (posture.kind === "allow") return null;
@@ -31,8 +26,6 @@ function enforceAccess(request: NextRequest): NextResponse | null {
   const url = request.nextUrl;
   const isApi = url.pathname.startsWith("/api/");
 
-  // One-time bootstrap: `?token=<secret>` on a navigation sets an http-only
-  // cookie and redirects to the clean URL.
   const queryToken = url.searchParams.get("token");
   if (queryToken && timingSafeStringEqual(queryToken.trim(), posture.token)) {
     const clean = url.clone();
@@ -57,11 +50,6 @@ function enforceAccess(request: NextRequest): NextResponse | null {
   return denyResponse(isApi, 401, "Unauthorized");
 }
 
-/**
- * Access gate + logging proxy for security monitoring.
- * Enforces the token posture, then logs allowed requests with IP, path, user
- * agent, and auth status.
- */
 export function proxy(request: NextRequest) {
   const denied = enforceAccess(request);
   if (denied) return denied;
@@ -138,13 +126,19 @@ export default proxy;
 // Configure which paths the middleware runs on
 export const config = {
   matcher: [
+    // Every /api/* request, unconditionally. This MUST come first and carry no
+    // extension exclusion: the privileged API routes are the token gate's whole
+    // point, and dynamic segments (/api/proxy/[...path], /api/agent/sessions/[id])
+    // let a caller append a `.png`-style suffix. If the static-asset exclusion
+    // below also covered /api, that suffix would skip the gate entirely.
+    "/api/:path*",
     /*
-     * Match all request paths except:
+     * All non-API paths except:
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
-     * - public folder files
+     * - public folder files (icons/, image extensions)
      */
-    "/((?!_next/static|_next/image|favicon.ico|icons/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api/|_next/static|_next/image|favicon.ico|icons/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

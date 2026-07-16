@@ -1,35 +1,25 @@
 "use client";
-import {
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type Dispatch,
-  type MutableRefObject,
-  type SetStateAction,
-} from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   Code,
+  File,
+  FolderTree,
   Monitor,
   Minus,
   MessageSquarePlus,
-  PanelRightOpen,
   Plus,
   Save,
   SquarePen,
 } from "@/ui/icon-registry";
 import { useAppStore } from "@/store";
-import { useTools } from "@/features/agent/tools/context";
-import type { FileOpenRequest } from "@/features/agent/tools/types";
+import { useToolSelections, useToolsActions } from "@/features/agent/tools/context";
 import type { FileComment, FsEntry } from "@/features/agent/filesystem-types";
 import { FileViewer } from "@/features/agent/ui/filesystem-file-viewer";
 import { RenderedPreview, previewKindForOpenFile } from "@/features/agent/ui/filesystem-preview";
-import { Breadcrumb, TreeFileList } from "@/features/agent/ui/filesystem-tree";
+import { Breadcrumb, fileTone, TreeFileList } from "@/features/agent/ui/filesystem-tree";
+import { useFilesystemPanelEffects } from "@/features/agent/ui/filesystem-panel-effects";
 
 type Props = { cwd: string | null };
-// The file browser intentionally keeps navigation, preview, comments, and edit
-// state together so a selected file behaves as one pane.
 // eslint-disable-next-line complexity
 export function FilesystemPanel({ cwd }: Props) {
   const [relPath, setRelPath] = useState("");
@@ -50,17 +40,19 @@ export function FilesystemPanel({ cwd }: Props) {
   const [dirLoading, setDirLoading] = useState<Set<string>>(new Set());
   const [fileListOpen, setFileListOpen] = useState(true);
   const searchRef = useRef<HTMLInputElement>(null);
-  const tools = useTools();
+  const { fileOpenRequest } = useToolSelections();
+  const { requestContextAttach } = useToolsActions();
   const fontSize = useAppStore((s) => s.fileViewerFontSize);
   const setFontSize = useAppStore((s) => s.setFileViewerFontSize);
   const lastOpenFileByProject = useAppStore((s) => s.lastOpenFileByProject);
   const setLastOpenFileByProject = useAppStore((s) => s.setLastOpenFileByProject);
   const cwdRef = useRef(cwd);
+  const pendingEditRef = useRef<{ caret: number; insert: string | null } | null>(null);
   useFilesystemPanelEffects({
     cwd,
     relPath,
     openFile,
-    fileOpenRequest: tools.fileOpenRequest,
+    fileOpenRequest,
     lastOpenFileByProject,
     cwdRef,
     setRelPath,
@@ -135,6 +127,30 @@ export function FilesystemPanel({ cwd }: Props) {
   const lines = useMemo(() => fileContent.split("\n"), [fileContent]);
   const previewKind = useMemo(() => previewKindForOpenFile(openFile), [openFile]);
   const dirty = draftContent !== fileContent;
+  const enterEditMode = useCallback(
+    (line: number | null, insert: string | null) => {
+      pendingEditRef.current = {
+        caret: line === null ? 0 : lines.slice(0, line).join("\n").length,
+        insert: line === null ? null : insert,
+      };
+      setViewMode("edit");
+    },
+    [lines],
+  );
+  const focusEditor = useCallback((node: HTMLTextAreaElement | null) => {
+    if (!node) return;
+    node.focus();
+    const pending = pendingEditRef.current;
+    pendingEditRef.current = null;
+    if (!pending) return;
+    const caret = Math.min(pending.caret, node.value.length);
+    if (pending.insert) {
+      node.setRangeText(pending.insert, caret, caret, "end");
+      setDraftContent(node.value);
+    } else {
+      node.setSelectionRange(caret, caret);
+    }
+  }, []);
   const saveFile = useCallback(async () => {
     if (!cwd || !openFile || fileTruncated) return;
     setSavingFile(true);
@@ -176,11 +192,14 @@ export function FilesystemPanel({ cwd }: Props) {
         });
         const payload = (await response.json()) as { comment?: FileComment; error?: string };
         if (payload.comment) setComments((current) => [...current, payload.comment!]);
-      } catch {
-        // best-effort; comment store errors surface server-side
-      }
+      } catch {}
+      requestContextAttach({
+        label: `${openFile.split("/").pop() ?? openFile} · L${line}`,
+        path: openFile,
+        content: `Comment on ${openFile} line ${line}: ${body.trim()}`,
+      });
     },
-    [cwd, openFile],
+    [cwd, openFile, requestContextAttach],
   );
   const removeComment = useCallback(
     async (id: string) => {
@@ -191,9 +210,7 @@ export function FilesystemPanel({ cwd }: Props) {
           `/api/agent/comments?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(openFile)}&id=${encodeURIComponent(id)}`,
           { method: "DELETE" },
         );
-      } catch {
-        // best-effort
-      }
+      } catch {}
     },
     [cwd, openFile],
   );
@@ -201,12 +218,12 @@ export function FilesystemPanel({ cwd }: Props) {
     if (!openFile || comments.length === 0) return;
     const ordered = [...comments].sort((a, b) => a.line - b.line);
     const body = ordered.map((comment) => `- Line ${comment.line}: ${comment.body}`).join("\n");
-    tools.requestContextAttach({
+    requestContextAttach({
       label: `${openFile.split("/").pop() ?? openFile} · comments`,
       path: openFile,
       content: `Comments on ${openFile}:\n${body}`,
     });
-  }, [comments, openFile, tools]);
+  }, [comments, openFile, requestContextAttach]);
   if (!cwd) {
     return (
       <div className="flex h-full items-center justify-center text-center text-[length:var(--fs-sm)] text-(--dim)">
@@ -217,8 +234,8 @@ export function FilesystemPanel({ cwd }: Props) {
   return (
     <div className="relative flex h-full min-h-0 flex-row-reverse bg-(--color-panel)">
       {fileListOpen ? (
-        <div className="flex w-[236px] shrink-0 flex-col border-l border-(--border)/80 bg-(--sidebar-bg)">
-          <div className="flex h-9 shrink-0 items-center border-b border-(--border)/80">
+        <div className="flex w-[236px] shrink-0 flex-col border-l border-(--border) bg-(--sidebar-bg)">
+          <div className="flex h-9 shrink-0 items-center border-b border-(--border)">
             <div className="min-w-0 flex-1">
               <Breadcrumb relPath={relPath} onRoot={() => setRelPath("")} />
             </div>
@@ -232,14 +249,14 @@ export function FilesystemPanel({ cwd }: Props) {
               <Minus className="h-3.5 w-3.5" />
             </button>
           </div>
-          <div className="flex shrink-0 border-b border-(--border)/70 px-2 py-2">
+          <div className="flex shrink-0 border-b border-(--border) px-2 py-2">
             <input
               ref={searchRef}
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search files…"
-              className="h-7 w-full rounded-md border border-(--border)/80 bg-(--color-input) px-2 text-[length:var(--fs-sm)] text-(--fg) outline-none placeholder:text-(--dim)/75 focus:border-(--border-hover)"
+              className="h-7 w-full rounded-md border border-(--border) bg-(--color-input) px-2 text-[length:var(--fs-sm)] text-(--fg) outline-none placeholder:text-(--dim)/75 focus:border-(--border-hover)"
               spellCheck={false}
             />
             {searchQuery && (
@@ -271,21 +288,20 @@ export function FilesystemPanel({ cwd }: Props) {
           </div>
         </div>
       ) : null}
-      {!fileListOpen ? (
-        <button
-          type="button"
-          onClick={() => setFileListOpen(true)}
-          className="absolute right-2 top-2 z-20 inline-flex h-7 w-7 items-center justify-center rounded-md border border-(--border) bg-(--color-input) text-(--fg) shadow-[0_4px_16px_rgba(0,0,0,0.35)] hover:bg-(--hover)"
-          title="Show file list"
-          aria-label="Show file list"
-        >
-          <PanelRightOpen className="h-3.5 w-3.5" />
-        </button>
-      ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         {!openFile ? (
-          <div className="flex h-full items-center justify-center text-[length:var(--fs-sm)] text-(--dim)">
-            Select a file to view.
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-[length:var(--fs-sm)] text-(--dim)">
+            <span>Select a file to view.</span>
+            {!fileListOpen ? (
+              <button
+                type="button"
+                onClick={() => setFileListOpen(true)}
+                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-(--border) bg-(--color-input) px-2 text-[length:var(--fs-xs)] text-(--dim) hover:text-(--fg)"
+              >
+                <FolderTree className="h-3.5 w-3.5" />
+                Show files
+              </button>
+            ) : null}
           </div>
         ) : fileTruncated ? (
           <div className="flex h-full flex-col items-center justify-center gap-1 text-center text-[length:var(--fs-sm)] text-(--dim)">
@@ -298,19 +314,20 @@ export function FilesystemPanel({ cwd }: Props) {
           </div>
         ) : (
           <>
-            {/* Toolbar: file name + view toggle + font size */}
-            <div
-              className={`flex h-9 shrink-0 items-center justify-between gap-1 border-b border-(--border)/80 bg-(--color-header) px-2 ${fileListOpen ? "" : "pr-10"}`}
-            >
-              <div className="min-w-0 flex-1 truncate font-mono text-[length:var(--fs-sm)] text-(--dim)">
-                {openFile}
+            <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b border-(--border) bg-(--color-header) pr-2">
+              <div
+                className="relative flex h-full min-w-0 max-w-[55%] items-center gap-1.5 border-r border-(--border) bg-(--color-panel) px-3 text-[length:var(--fs-sm)] text-(--fg) after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-(--link)"
+                title={openFile}
+              >
+                <File className={`h-3.5 w-3.5 shrink-0 ${fileTone(openFile)}`} />
+                <span className="truncate font-mono">{openFile.split("/").pop() ?? openFile}</span>
               </div>
               <div className="flex shrink-0 items-center gap-0.5">
                 {comments.length > 0 && (
                   <button
                     type="button"
                     onClick={attachCommentsToChat}
-                    className="mr-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border)/80 bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] text-(--dim) hover:text-(--fg)"
+                    className="mr-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border) bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] text-(--dim) hover:text-(--fg)"
                     title="Attach this file's comments to the chat as context"
                   >
                     <MessageSquarePlus className="h-3 w-3" />
@@ -320,7 +337,7 @@ export function FilesystemPanel({ cwd }: Props) {
                 <button
                   type="button"
                   onClick={() => setViewMode("edit")}
-                  className={`mr-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border)/80 bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] ${viewMode === "edit" ? "text-(--fg)" : "text-(--dim) hover:text-(--fg)"}`}
+                  className={`mr-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border) bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] ${viewMode === "edit" ? "text-(--fg)" : "text-(--dim) hover:text-(--fg)"}`}
                   title="Edit file"
                 >
                   <SquarePen className="h-3 w-3" />
@@ -329,14 +346,14 @@ export function FilesystemPanel({ cwd }: Props) {
                   type="button"
                   onClick={() => void saveFile()}
                   disabled={!dirty || savingFile || fileTruncated}
-                  className="mr-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border)/80 bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] text-(--dim) hover:text-(--fg) disabled:cursor-not-allowed disabled:opacity-40"
+                  className="mr-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border) bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] text-(--dim) hover:text-(--fg) disabled:cursor-not-allowed disabled:opacity-40"
                   title={dirty ? "Save file" : "No changes to save"}
                 >
                   <Save className="h-3 w-3" />
                   {savingFile ? "Saving" : "Save"}
                 </button>
                 {previewKind && (
-                  <div className="mr-1 flex items-center gap-0.5 rounded-md border border-(--border)/80 bg-(--color-input) p-0.5">
+                  <div className="mr-1 flex items-center gap-0.5 rounded-md border border-(--border) bg-(--color-input) p-0.5">
                     <button
                       type="button"
                       onClick={() => setViewMode("preview")}
@@ -353,7 +370,7 @@ export function FilesystemPanel({ cwd }: Props) {
                     </button>
                   </div>
                 )}
-                <div className="flex items-center gap-0.5 rounded-md border border-(--border)/80 bg-(--color-input) p-0.5">
+                <div className="flex items-center gap-0.5 rounded-md border border-(--border) bg-(--color-input) p-0.5">
                   <button
                     type="button"
                     onClick={() => setFontSize(Math.max(8, fontSize - 1))}
@@ -374,6 +391,17 @@ export function FilesystemPanel({ cwd }: Props) {
                     <Plus className="h-3 w-3" />
                   </button>
                 </div>
+                {!fileListOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setFileListOpen(true)}
+                    className="ml-1 inline-flex h-6 items-center gap-1 rounded-md border border-(--border) bg-(--color-input) px-1.5 text-[length:var(--fs-xs)] text-(--dim) hover:text-(--fg)"
+                    title="Show file list"
+                    aria-label="Show file list"
+                  >
+                    <FolderTree className="h-3 w-3" />
+                  </button>
+                ) : null}
               </div>
             </div>
             {saveError ? (
@@ -383,6 +411,7 @@ export function FilesystemPanel({ cwd }: Props) {
             ) : null}
             {viewMode === "edit" ? (
               <textarea
+                ref={focusEditor}
                 value={draftContent}
                 onChange={(event) => setDraftContent(event.target.value)}
                 spellCheck={false}
@@ -400,6 +429,7 @@ export function FilesystemPanel({ cwd }: Props) {
                 comments={comments}
                 onAddComment={addComment}
                 onRemoveComment={removeComment}
+                onRequestEdit={enterEditMode}
               />
             )}
           </>
@@ -407,236 +437,4 @@ export function FilesystemPanel({ cwd }: Props) {
       </div>
     </div>
   );
-}
-
-type UseFilesystemPanelEffectsParams = {
-  cwd: string | null;
-  relPath: string;
-  openFile: string | null;
-  fileOpenRequest: FileOpenRequest | null;
-  lastOpenFileByProject: Record<string, string>;
-  cwdRef: MutableRefObject<string | null>;
-  setRelPath: Dispatch<SetStateAction<string>>;
-  setEntries: Dispatch<SetStateAction<FsEntry[]>>;
-  setOpenFile: Dispatch<SetStateAction<string | null>>;
-  setFileContent: Dispatch<SetStateAction<string>>;
-  setDraftContent: Dispatch<SetStateAction<string>>;
-  setFileTruncated: Dispatch<SetStateAction<boolean>>;
-  setFileSize: Dispatch<SetStateAction<number>>;
-  setLoadingFile: Dispatch<SetStateAction<boolean>>;
-  setSaveError: Dispatch<SetStateAction<string | null>>;
-  setComments: Dispatch<SetStateAction<FileComment[]>>;
-  setSearchQuery: Dispatch<SetStateAction<string>>;
-  setExpandedDirs: Dispatch<SetStateAction<Set<string>>>;
-  setDirChildren: Dispatch<SetStateAction<Map<string, FsEntry[]>>>;
-  setDirLoading: Dispatch<SetStateAction<Set<string>>>;
-  setLastOpenFileByProject: (projectPath: string, relPath: string) => void;
-};
-
-const getFilesystemPanelSnapshot = (): number => 0;
-
-function useFilesystemPanelEffects({
-  cwd,
-  relPath,
-  openFile,
-  fileOpenRequest,
-  lastOpenFileByProject,
-  cwdRef,
-  setRelPath,
-  setEntries,
-  setOpenFile,
-  setFileContent,
-  setDraftContent,
-  setFileTruncated,
-  setFileSize,
-  setLoadingFile,
-  setSaveError,
-  setComments,
-  setSearchQuery,
-  setExpandedDirs,
-  setDirChildren,
-  setDirLoading,
-  setLastOpenFileByProject,
-}: UseFilesystemPanelEffectsParams): void {
-  const handledFileOpenRequest = useRef(0);
-
-  const subscribeCwdRef = useCallback(() => {
-    cwdRef.current = cwd;
-    return () => undefined;
-  }, [cwd, cwdRef]);
-
-  const subscribeProjectReset = useCallback(() => {
-    setRelPath("");
-    setOpenFile(null);
-    setFileContent("");
-    setDraftContent("");
-    setFileTruncated(false);
-    setFileSize(0);
-    setSaveError(null);
-    setComments([]);
-    setSearchQuery("");
-    setExpandedDirs(new Set());
-    setDirChildren(new Map());
-    setDirLoading(new Set());
-    return () => undefined;
-  }, [
-    cwd,
-    setComments,
-    setDirChildren,
-    setDirLoading,
-    setDraftContent,
-    setExpandedDirs,
-    setFileContent,
-    setFileSize,
-    setFileTruncated,
-    setSaveError,
-    setOpenFile,
-    setRelPath,
-    setSearchQuery,
-  ]);
-
-  const subscribeEntries = useCallback(() => {
-    if (!cwd) {
-      setEntries([]);
-      return () => undefined;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetch(
-          `/api/agent/fs?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(relPath)}`,
-          { cache: "no-store" },
-        );
-        const payload = (await response.json()) as { entries?: FsEntry[]; error?: string };
-        if (!cancelled) setEntries(payload.entries ?? []);
-      } catch {
-        if (!cancelled) setEntries([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [cwd, relPath, setEntries]);
-
-  const subscribeRememberedFile = useCallback(() => {
-    if (!cwd) return () => undefined;
-    const remembered = lastOpenFileByProject[cwd];
-    if (remembered) setOpenFile(remembered);
-    return () => undefined;
-  }, [cwd, lastOpenFileByProject, setOpenFile]);
-
-  const subscribeFileOpenRequest = useCallback(() => {
-    if (!fileOpenRequest || handledFileOpenRequest.current === fileOpenRequest.id) {
-      return () => undefined;
-    }
-    handledFileOpenRequest.current = fileOpenRequest.id;
-    const rel = relativePathForRequest(fileOpenRequest.path, cwd);
-    if (!rel) return () => undefined;
-    setOpenFile(rel);
-    if (cwd) setLastOpenFileByProject(cwd, rel);
-    return () => undefined;
-  }, [cwd, fileOpenRequest, setLastOpenFileByProject, setOpenFile]);
-
-  const subscribeOpenFile = useCallback(() => {
-    if (!cwd || !openFile) {
-      setFileContent("");
-      setDraftContent("");
-      setFileTruncated(false);
-      setFileSize(0);
-      setSaveError(null);
-      setComments([]);
-      return () => undefined;
-    }
-    let cancelled = false;
-    setLoadingFile(true);
-    setSaveError(null);
-    (async () => {
-      try {
-        const [fileResponse, commentsResponse] = await Promise.all([
-          fetch(
-            `/api/agent/fs/file?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(openFile)}`,
-            { cache: "no-store" },
-          ),
-          fetch(
-            `/api/agent/comments?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(openFile)}`,
-            { cache: "no-store" },
-          ),
-        ]);
-        const fileBody = (await fileResponse.json()) as {
-          content?: string;
-          truncated?: boolean;
-          size?: number;
-          error?: string;
-        };
-        const commentsBody = (await commentsResponse.json()) as { comments?: FileComment[] };
-        if (cancelled) return;
-        const nextContent = fileBody.content ?? "";
-        setFileContent(nextContent);
-        setDraftContent(nextContent);
-        setFileTruncated(fileBody.truncated ?? false);
-        setFileSize(fileBody.size ?? 0);
-        setComments(commentsBody.comments ?? []);
-      } catch {
-        if (!cancelled) {
-          setFileContent("");
-          setDraftContent("");
-          setComments([]);
-        }
-      } finally {
-        if (!cancelled) setLoadingFile(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    cwd,
-    openFile,
-    setComments,
-    setDraftContent,
-    setFileContent,
-    setFileSize,
-    setFileTruncated,
-    setLoadingFile,
-    setSaveError,
-  ]);
-
-  useSyncExternalStore(subscribeCwdRef, getFilesystemPanelSnapshot, getFilesystemPanelSnapshot);
-  useSyncExternalStore(
-    subscribeProjectReset,
-    getFilesystemPanelSnapshot,
-    getFilesystemPanelSnapshot,
-  );
-  useSyncExternalStore(subscribeEntries, getFilesystemPanelSnapshot, getFilesystemPanelSnapshot);
-  useSyncExternalStore(
-    subscribeRememberedFile,
-    getFilesystemPanelSnapshot,
-    getFilesystemPanelSnapshot,
-  );
-  useSyncExternalStore(
-    subscribeFileOpenRequest,
-    getFilesystemPanelSnapshot,
-    getFilesystemPanelSnapshot,
-  );
-  useSyncExternalStore(subscribeOpenFile, getFilesystemPanelSnapshot, getFilesystemPanelSnapshot);
-}
-
-function relativePathForRequest(path: string, cwd: string | null): string | null {
-  let raw = path.trim();
-  if (!raw) return null;
-  if (/^file:\/\//i.test(raw)) {
-    try {
-      raw = decodeURIComponent(new URL(raw).pathname);
-    } catch {
-      return null;
-    }
-  }
-  raw = raw.replace(/^`|`$/g, "").replace(/:\d+(?::\d+)?$/, "");
-  if (!raw || raw.includes("\0")) return null;
-  if (cwd && raw.startsWith(`${cwd.replace(/\/+$/, "")}/`)) {
-    return raw.slice(cwd.replace(/\/+$/, "").length + 1);
-  }
-  if (raw.startsWith("./")) return raw.slice(2);
-  if (!raw.startsWith("/") && !raw.startsWith("../")) return raw;
-  return null;
 }

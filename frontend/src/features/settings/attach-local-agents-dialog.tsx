@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useState } from "react";
 import { Button, Checkbox, UiModal, UiModalHeader } from "@/ui";
-import { getSettingsViewSnapshot } from "@/features/settings/settings-view-snapshot";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import type {
   AttachResult,
   LocalAgentId,
@@ -22,7 +22,7 @@ export function AttachLocalAgentsDialog({ modelId, modelName, onClose }: Props) 
   const [results, setResults] = useState<AttachResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const subscribeAgents = useCallback((_notify: () => void) => {
+  useMountSubscription(() => {
     void fetch("/api/local-agents", { cache: "no-store" })
       .then((res) => res.json() as Promise<{ agents?: LocalAgentTarget[] }>)
       .then((payload) => {
@@ -31,9 +31,7 @@ export function AttachLocalAgentsDialog({ modelId, modelName, onClose }: Props) 
         setSelected(new Set(detected.map((agent) => agent.agent)));
       })
       .catch(() => setAgents([]));
-    return () => {};
   }, []);
-  useSyncExternalStore(subscribeAgents, getSettingsViewSnapshot, getSettingsViewSnapshot);
 
   const toggleAgent = useCallback((agent: LocalAgentId, checked: boolean) => {
     setSelected((current) => {
@@ -80,7 +78,7 @@ export function AttachLocalAgentsDialog({ modelId, modelName, onClose }: Props) 
           <p className="text-sm text-(--ui-muted)">Detecting local agents…</p>
         ) : agents.length === 0 ? (
           <p className="text-sm text-(--ui-muted)">
-            No local agents detected (looked for pi, opencode, droid, and hermes config
+            No local agents detected (looked for pi, opencode, droid, Hermes, and omp config
             directories).
           </p>
         ) : (
@@ -114,6 +112,14 @@ export function AttachLocalAgentsDialog({ modelId, modelName, onClose }: Props) 
                     backup: {result.backupPath}
                   </div>
                 ) : null}
+                {result.ok
+                  ? result.extraUpdates?.map((update) => (
+                      <div key={update.configPath} className="mt-0.5 font-mono text-(--ui-muted)">
+                        also updated: {update.configPath}
+                        {update.backupPath ? ` (backup: ${update.backupPath})` : ""}
+                      </div>
+                    ))
+                  : null}
                 {!result.ok && result.error ? (
                   <div className="mt-0.5 text-(--ui-danger)">{result.error}</div>
                 ) : null}

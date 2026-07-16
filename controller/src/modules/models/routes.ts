@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import type { RouteRegistrar } from "../../http/route-registrar";
 import type { Recipe } from "../models/types";
+import { resolveModelVision } from "@local-studio/contracts/model-capabilities";
 
 /**
  * OpenAI-compatible model info.
@@ -14,7 +15,7 @@ interface OpenAIModelInfo {
   owned_by: string;
   active: boolean;
   max_model_len?: number | null;
-  metadata?: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 }
 
 /**
@@ -26,30 +27,39 @@ interface OpenAIModelList {
 }
 import { buildModelInfo, discoverModelDirectories } from "./model-browser";
 import { notFound } from "../../core/errors";
-import { observeControllerFunction } from "../../core/function-observability";
+import { findObservedInferenceProcess } from "../../core/function-observability";
 import { parseBooleanFlag } from "../../core/validation";
-import { fetchInference } from "../../services/inference-client";
+import { fetchInference } from "../../http/local-fetch";
 
 function isMockInferenceEnabled(): boolean {
   return parseBooleanFlag(process.env["LOCAL_STUDIO_MOCK_INFERENCE"]);
 }
 
-function recipeMetadata(recipe: Recipe): Record<string, unknown> | undefined {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function recipeMetadata(recipe: Recipe): Record<string, unknown> {
   const metadata = recipe.extra_args?.["metadata"];
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return undefined;
-  }
-  return metadata as Record<string, unknown>;
+  return isRecord(metadata) ? metadata : {};
+}
+
+function resolvedRecipeMetadata(recipe: Recipe, modelId: string): Record<string, unknown> {
+  const metadata = recipeMetadata(recipe);
+  return {
+    ...metadata,
+    vision: resolveModelVision({
+      identifiers: [modelId, recipe.id, recipe.name, recipe.model_path],
+      recipeOverride: recipe.vision,
+      metadata,
+    }),
+  };
 }
 
 export const registerModelsRoutes: RouteRegistrar = (app, context) => {
   app.get("/v1/models", async (ctx) => {
     const recipes = context.stores.recipeStore.list();
-    const current = await observeControllerFunction(
-      context,
-      "models.list.findInferenceProcess",
-      () => context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const current = await findObservedInferenceProcess(context, "models.list");
     let activeModelData: { data?: Array<{ max_model_len?: number }> } | null = null;
     if (current) {
       try {
@@ -85,7 +95,6 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
         }
       }
       const modelId = recipe.served_model_name ?? recipe.id;
-      const metadata = recipeMetadata(recipe);
       models.push({
         id: modelId,
         object: "model",
@@ -93,7 +102,7 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
         owned_by: "local-studio",
         active: isActive,
         max_model_len: maxModelLength,
-        ...(metadata ? { metadata } : {}),
+        metadata: resolvedRecipeMetadata(recipe, modelId),
       });
     }
 
@@ -112,6 +121,9 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
         owned_by: "local-studio",
         active: true,
         max_model_len: activeModelData?.data?.[0]?.max_model_len ?? 32768,
+        metadata: {
+          vision: resolveModelVision({ identifiers: [inferredId] }),
+        },
       });
     }
 
@@ -136,11 +148,7 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
       throw notFound("Model not found");
     }
 
-    const current = await observeControllerFunction(
-      context,
-      "models.detail.findInferenceProcess",
-      () => context.processManager.findInferenceProcess(context.config.inference_port)
-    );
+    const current = await findObservedInferenceProcess(context, "models.detail");
     let isActive = false;
     let maxModelLength = recipe.max_model_len;
     if (
@@ -170,6 +178,7 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
       owned_by: "local-studio",
       active: isActive,
       max_model_len: maxModelLength,
+      metadata: resolvedRecipeMetadata(recipe, recipe.served_model_name ?? recipe.id),
     };
 
     return ctx.json(payload);
@@ -239,7 +248,7 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
     }
 
     const roots = Array.from(rootIndex.values()).sort((left, right) =>
-      left.path.localeCompare(right.path)
+      left.path.localeCompare(right.path),
     );
     const scanRoots = roots.filter((root) => root.exists).map((root) => root.path);
 
@@ -258,7 +267,7 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
       models.push(info);
     }
     models.sort((left, right) =>
-      String(left.name).toLowerCase().localeCompare(String(right.name).toLowerCase())
+      String(left.name).toLowerCase().localeCompare(String(right.name).toLowerCase()),
     );
 
     const rootsPayload = roots.map((root) => ({
@@ -325,14 +334,14 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
         fetch(url),
         search && search.includes("/")
           ? fetch(
-              `https://huggingface.co/api/models/${search.split("/").map(encodeURIComponent).join("/")}`
+              `https://huggingface.co/api/models/${search.split("/").map(encodeURIComponent).join("/")}`,
             )
           : Promise.resolve(null),
       ]);
       if (!listResponse.ok) {
         return ctx.json(
           { detail: `HuggingFace API error: ${listResponse.status}` },
-          { status: listResponse.status }
+          { status: listResponse.status },
         );
       }
       const data = ((await listResponse.json()) as Record<string, unknown>[]).map(normalize);
@@ -353,7 +362,7 @@ export const registerModelsRoutes: RouteRegistrar = (app, context) => {
     } catch (error) {
       return ctx.json(
         { detail: `Failed to reach HuggingFace API: ${String(error)}` },
-        { status: 503 }
+        { status: 503 },
       );
     }
   });

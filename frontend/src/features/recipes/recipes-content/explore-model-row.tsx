@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -10,11 +10,14 @@ import {
   Play,
 } from "@/ui/icon-registry";
 import type { HuggingFaceModel, ModelDownload } from "@/lib/types";
-import { formatBytes, formatNumber } from "@/lib/formatters";
-import { ModelButton, ModelLogo, ModelRow, ModelStatus, type ModelStatusTone } from "@/ui";
+import { formatBytes } from "@/lib/formatters";
+import { ModelLogo } from "@/ui/model-logo";
+import { ModelButton, ModelRow, ModelStatus, type ModelStatusTone } from "./model-page";
 import { extractProvider } from "@/lib/huggingface";
-import { extractQuantizations } from "@/features/discover/utils";
+import { extractQuantizations } from "@/features/recipes/model-quantizations";
 import type { ModelFit } from "./hardware-profile";
+import { effectTimeout } from "@/lib/effect-timers";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 
 function ExploreVramCell({
   needGb,
@@ -36,7 +39,7 @@ function ExploreVramCell({
   if (poolGb <= 0) {
     return (
       <span
-        className="text-xs text-(--dim)"
+        className="font-mono text-[length:var(--fs-sm)] tabular-nums text-(--dim)"
         title={fit?.reason ?? "Rough weight estimate from name and tags"}
       >
         ~{label} GB
@@ -44,12 +47,14 @@ function ExploreVramCell({
     );
   }
   const over = needGb > poolGb;
+  const poolPercent = Math.round((needGb / poolGb) * 100);
   return (
     <span
-      className={`text-xs ${over ? "text-(--err)" : "text-(--dim)"}`}
+      className="flex shrink-0 items-baseline gap-1.5 font-mono text-[length:var(--fs-sm)] tabular-nums"
       title={fit?.reason ?? "Estimated footprint vs pooled GPU VRAM"}
     >
-      ~{label} / {Math.round(poolGb)} GB
+      <span className={over ? "text-(--err)" : "text-(--fg)"}>~{label} GB</span>
+      <span className={over ? "text-(--err)/80" : "text-(--dim)"}>{poolPercent}% pool</span>
     </span>
   );
 }
@@ -66,11 +71,10 @@ export const ExploreModelRow = memo(function ExploreModelRow({
   expanded,
   onToggleExpand,
   child,
-  displayDownloads,
-  displayLikes,
   weightEstimateGb,
   pooledVramGb,
   fit,
+  variants,
   onOpenModelCard,
 }: {
   model: HuggingFaceModel;
@@ -84,22 +88,24 @@ export const ExploreModelRow = memo(function ExploreModelRow({
   expanded: boolean;
   onToggleExpand?: () => void;
   child?: boolean;
-  /** When set (e.g. grouped explore row), overrides per-variant HF stats. */
-  displayDownloads?: number;
-  displayLikes?: number;
   weightEstimateGb?: number | null;
   pooledVramGb: number;
   fit?: ModelFit;
-  onOpenModelCard?: () => void;
+  variants: HuggingFaceModel[];
+  onOpenModelCard?: (model: HuggingFaceModel, variants: HuggingFaceModel[], fit?: ModelFit) => void;
 }) {
   const provider = useMemo(() => extractProvider(model.modelId), [model.modelId]);
   const quants = useMemo(() => extractQuantizations(model.tags), [model.tags]);
   const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof effectTimeout> | null>(null);
+
+  useMountSubscription(() => () => copiedTimer.current?.cancel(), []);
 
   const copyId = useCallback(() => {
-    navigator.clipboard.writeText(model.modelId);
+    void navigator.clipboard.writeText(model.modelId);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    copiedTimer.current?.cancel();
+    copiedTimer.current = effectTimeout(() => setCopied(false), 2000);
   }, [model.modelId]);
 
   const download = downloadStatus(isLocal, isStarting, activeDownload);
@@ -108,23 +114,20 @@ export const ExploreModelRow = memo(function ExploreModelRow({
     <ModelRow
       label={rowLabel(model.modelId, child)}
       description={rowDescription(provider, variantCount, child)}
-      onClick={onOpenModelCard}
-      highlight={
-        fit && !child && (fit.status === "best" || fit.status === "fits") ? "success" : "none"
+      leading={
+        <ModelLogo modelId={model.modelId} author={model.author} size={child ? "sm" : "md"} />
       }
+      onClick={onOpenModelCard ? () => onOpenModelCard(model, variants, fit) : undefined}
+      variant="catalog"
+      className={child ? "md:pl-8" : undefined}
       value={
-        <div className="flex min-w-0 items-center gap-3">
-          <ModelLogo modelId={model.modelId} author={model.author} size={child ? "sm" : "md"} />
-          <div className="min-w-0">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[length:var(--fs-md)] text-(--dim)">
-              <span className="font-mono text-(--fg)">
-                {quants.length ? quants.join(", ") : child ? "derivative" : "original"}
-              </span>
-              <ExploreVramCell needGb={weightEstimateGb ?? null} poolGb={pooledVramGb} fit={fit} />
-              <span>{formatNumber(displayDownloads ?? model.downloads)} downloads</span>
-              <span>{formatNumber(displayLikes ?? model.likes)} likes</span>
-            </div>
-          </div>
+        <div className="flex min-w-0 items-center justify-end gap-3">
+          {quants.length ? (
+            <span className="min-w-0 truncate font-mono text-[length:var(--fs-xs)] uppercase tracking-[0.08em] text-(--ui-muted)">
+              {quants.slice(0, 2).join(" · ")}
+            </span>
+          ) : null}
+          <ExploreVramCell needGb={weightEstimateGb ?? null} poolGb={pooledVramGb} fit={fit} />
         </div>
       }
       status={

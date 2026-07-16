@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState } from "react";
 import api from "@/lib/api/client";
 import type { GPU, HuggingFaceModel, ModelRecommendation } from "@/lib/types";
-import { useHuggingFaceModelSearch } from "@/hooks/use-huggingface-model-search";
+import { useHuggingFaceModelSearch } from "@/features/recipes/use-huggingface-model-search";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import {
   engagementTier,
   isDerivativeModel,
@@ -71,7 +72,6 @@ export function useExplore() {
   const [gpus, setGpus] = useState<GPU[]>([]);
   const [apiMaxVramGb, setApiMaxVramGb] = useState(0);
   const [search, setSearch] = useState("");
-  const [task, setTask] = useState("text-generation");
   const [library, setLibrary] = useState("");
   const [sort, setSort] = useState("");
   const [poolOverrideGb, setPoolOverrideGbState] = useState<number | null>(null);
@@ -79,13 +79,11 @@ export function useExplore() {
 
   const configureExploreParams = useCallback(
     (params: URLSearchParams, isBrowsing: boolean) => {
-      // HF `filter` is repeatable (AND logic). task defaults to text-generation
-      // so the browse list stays relevant; clearing it shows all task types.
-      if (task) params.append("filter", task);
+      // HF `filter` is repeatable (AND logic).
       if (library) params.append("filter", library);
       params.set("sort", isBrowsing ? RECENT_HF_MODEL_SORT : sort || "downloads");
     },
-    [task, library, sort],
+    [library, sort],
   );
 
   const { models, loading, error, hasMore, loadMore, fetchModels } = useHuggingFaceModelSearch(
@@ -93,12 +91,9 @@ export function useExplore() {
     configureExploreParams,
   );
 
-  const subscribePoolOverride = useCallback((_notify: () => void) => {
+  useMountSubscription(() => {
     setPoolOverrideGbState(readExplorePoolOverrideGb());
-    return () => {};
   }, []);
-
-  useSyncExternalStore(subscribePoolOverride, getExploreSnapshot, getExploreSnapshot);
 
   const setPoolOverrideGb = useCallback((value: number | null) => {
     writeExplorePoolOverrideGb(value);
@@ -144,15 +139,9 @@ export function useExplore() {
     }
   }, []);
 
-  const subscribeRecommendations = useCallback(
-    (_notify: () => void) => {
-      void loadRecommendationsAndGpus();
-      return () => {};
-    },
-    [loadRecommendationsAndGpus],
-  );
-
-  useSyncExternalStore(subscribeRecommendations, getExploreSnapshot, getExploreSnapshot);
+  useMountSubscription(() => {
+    void loadRecommendationsAndGpus();
+  }, [loadRecommendationsAndGpus]);
 
   const recByKey = useMemo(() => {
     const m = new Map<string, ModelRecommendation>();
@@ -300,13 +289,11 @@ export function useExplore() {
     loading,
     error,
     search,
-    task,
     library,
     sort,
     hasMore,
     recommendations,
     setSearch,
-    setTask,
     setLibrary,
     setSort,
     loadMore,
@@ -321,7 +308,5 @@ function leadPreferenceScore(model: HuggingFaceModel, search: string): number {
   if (model.likes >= 250) score -= 4;
   return score;
 }
-
-const getExploreSnapshot = (): number => 0;
 
 export type { HardwareProfile };

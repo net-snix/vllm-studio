@@ -11,21 +11,24 @@ import {
 } from "node:fs";
 import { basename, resolve, sep } from "node:path";
 import { badRequest, notFound } from "../../core/errors";
+import { parseJsonObjectBody } from "../../core/validation";
 import type { RouteRegistrar } from "../../http/route-registrar";
 import { registerStudioProviderRoutes } from "./provider-routes";
+import { registerStudioRigRoutes } from "./rig-routes";
 import { getGpuInfo } from "../system/platform/gpu";
 import type { GpuInfo } from "../models/types";
 import { discoverModelDirectories, estimateWeightsSizeBytes } from "../models/model-browser";
-import { STUDIO_MODEL_RECOMMENDATIONS } from "./configs";
+import { STUDIO_MODEL_RECOMMENDATIONS, STUDIO_STARTER_PRESETS } from "./configs";
 import {
   getPersistedConfigPath,
   loadPersistedConfig,
   savePersistedConfig,
+  type PersistedConfig,
 } from "../../config/persisted-config";
 import { getVllmRuntimeInfo } from "../engines/runtimes/vllm-runtime";
 
 const getDiskInfo = (
-  path: string
+  path: string,
 ): {
   path: string;
   total_bytes: number | null;
@@ -70,18 +73,25 @@ const copyDirectory = (source: string, target: string): void => {
   }
 };
 
-export const deriveRecommendationVramGb = (gpus: GpuInfo[]): number => {
-  if (gpus.length === 0) return 0;
-  return gpus.reduce((sum, gpu) => {
-    const gb =
-      gpu.memory_total_mb > 0
-        ? gpu.memory_total_mb / 1024
-        : gpu.memory_total > 0
-          ? gpu.memory_total / 1024 ** 3
-          : 0;
-    return sum + gb;
-  }, 0);
+// Resolve a caller-supplied path and confirm it is inside models_dir, defeating
+// `../` traversal. `allowRoot` permits the models_dir itself (move targets).
+const resolveInsideModelsRoot = (
+  modelsDirectory: string,
+  target: string,
+  label: string,
+  allowRoot = false,
+): string => {
+  const resolved = resolve(target);
+  const modelsRoot = resolve(modelsDirectory);
+  const rootPrefix = modelsRoot.endsWith(sep) ? modelsRoot : modelsRoot + sep;
+  if (!resolved.startsWith(rootPrefix) && !(allowRoot && resolved === modelsRoot)) {
+    throw badRequest(`${label} must be inside models_dir`);
+  }
+  return resolved;
 };
+
+export const deriveRecommendationVramGb = (gpus: GpuInfo[]): number =>
+  gpus.reduce((sum, gpu) => sum + gpu.memory_total_mb / 1024, 0);
 
 const parseOptionalStringUpdate = (value: unknown): string | null | undefined => {
   if (value === undefined) return undefined;
@@ -122,12 +132,15 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
     };
   } => {
     const persisted = loadPersistedConfig(context.config.data_dir);
+    const legacyUiPreferences = (
+      persisted as PersistedConfig & { ui_preferences?: Record<string, string> }
+    ).ui_preferences;
     const dbUiPreferences = context.stores.controllerSettingsStore.getUiPreferences();
     const uiPreferences =
       Object.keys(dbUiPreferences).length > 0
         ? dbUiPreferences
-        : persisted.ui_preferences && typeof persisted.ui_preferences === "object"
-          ? persisted.ui_preferences
+        : legacyUiPreferences && typeof legacyUiPreferences === "object"
+          ? legacyUiPreferences
           : {};
     if (Object.keys(dbUiPreferences).length === 0 && Object.keys(uiPreferences).length > 0) {
       context.stores.controllerSettingsStore.saveUiPreferences(uiPreferences);
@@ -149,13 +162,10 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
   });
 
   app.post("/studio/settings", async (ctx) => {
-    const body = await ctx.req.json().catch(() => ({}));
-    if (body && typeof body !== "object") {
-      throw badRequest("Invalid payload");
-    }
+    const body = await parseJsonObjectBody(ctx);
 
-    const modelsDirectory = parseOptionalStringUpdate(body?.models_dir);
-    const uiPreferences = parseUiPreferencesUpdate(body?.ui_preferences);
+    const modelsDirectory = parseOptionalStringUpdate(body["models_dir"]);
+    const uiPreferences = parseUiPreferencesUpdate(body["ui_preferences"]);
 
     const hasAnyUpdate = modelsDirectory !== undefined || uiPreferences !== undefined;
 
@@ -163,10 +173,10 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
       throw badRequest("No supported settings provided");
     }
 
-    const saved = savePersistedConfig(context.config.data_dir, {
-      ...(modelsDirectory !== undefined ? { models_dir: modelsDirectory } : {}),
-      ...(uiPreferences !== undefined ? { ui_preferences: uiPreferences } : {}),
-    });
+    const saved =
+      modelsDirectory !== undefined
+        ? savePersistedConfig(context.config.data_dir, { models_dir: modelsDirectory })
+        : loadPersistedConfig(context.config.data_dir);
 
     if (uiPreferences !== undefined) {
       context.stores.controllerSettingsStore.saveUiPreferences(uiPreferences ?? {});
@@ -215,7 +225,6 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
         data_dir: context.config.data_dir,
         db_path: context.config.db_path,
         sglang_python: context.config.sglang_python ?? null,
-        tabby_api_dir: context.config.tabby_api_dir ?? null,
         llama_bin: context.config.llama_bin ?? null,
         mlx_python: context.config.mlx_python ?? null,
         exllamav3_command: context.config.exllamav3_command ?? null,
@@ -249,21 +258,23 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
     return ctx.json({ recommendations, max_vram_gb: maxVramGb });
   });
 
+  app.get("/studio/presets", async (ctx) => {
+    const gpus = getGpuInfo();
+    const maxVramGb = deriveRecommendationVramGb(gpus);
+    const presets = STUDIO_STARTER_PRESETS.map((preset) => ({
+      ...preset,
+      fits: preset.min_vram_gb === null || maxVramGb === 0 || preset.min_vram_gb <= maxVramGb,
+    }));
+    return ctx.json({ presets, max_vram_gb: maxVramGb });
+  });
+
   app.post("/studio/models/delete", async (ctx) => {
-    const body = await ctx.req.json().catch(() => ({}));
-    if (body && typeof body !== "object") {
-      throw badRequest("Invalid payload");
-    }
-    const target = typeof body?.path === "string" ? body.path : "";
+    const body = await parseJsonObjectBody(ctx);
+    const target = typeof body["path"] === "string" ? body["path"] : "";
     if (!target) {
       throw badRequest("path is required");
     }
-    const resolved = resolve(target);
-    const modelsRoot = resolve(context.config.models_dir);
-    const rootPrefix = modelsRoot.endsWith(sep) ? modelsRoot : modelsRoot + sep;
-    if (!resolved.startsWith(rootPrefix)) {
-      throw badRequest("path must be inside models_dir");
-    }
+    const resolved = resolveInsideModelsRoot(context.config.models_dir, target, "path");
     if (!existsSync(resolved)) {
       throw notFound("Model path not found");
     }
@@ -272,25 +283,23 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
   });
 
   app.post("/studio/models/move", async (ctx) => {
-    const body = await ctx.req.json().catch(() => ({}));
-    if (body && typeof body !== "object") {
-      throw badRequest("Invalid payload");
-    }
-    const source = typeof body?.source_path === "string" ? body.source_path : "";
-    const targetRoot = typeof body?.target_root === "string" ? body.target_root : "";
+    const body = await parseJsonObjectBody(ctx);
+    const source = typeof body["source_path"] === "string" ? body["source_path"] : "";
+    const targetRoot = typeof body["target_root"] === "string" ? body["target_root"] : "";
     if (!source || !targetRoot) {
       throw badRequest("source_path and target_root are required");
     }
-    const resolvedSource = resolve(source);
-    const resolvedTargetRoot = resolve(targetRoot);
-    const modelsRoot = resolve(context.config.models_dir);
-    const rootPrefix = modelsRoot.endsWith(sep) ? modelsRoot : modelsRoot + sep;
-    if (!resolvedSource.startsWith(rootPrefix)) {
-      throw badRequest("source_path must be inside models_dir");
-    }
-    if (!resolvedTargetRoot.startsWith(rootPrefix) && resolvedTargetRoot !== modelsRoot) {
-      throw badRequest("target_root must be inside models_dir");
-    }
+    const resolvedSource = resolveInsideModelsRoot(
+      context.config.models_dir,
+      source,
+      "source_path",
+    );
+    const resolvedTargetRoot = resolveInsideModelsRoot(
+      context.config.models_dir,
+      targetRoot,
+      "target_root",
+      true,
+    );
     if (!existsSync(resolvedSource)) {
       throw notFound("source_path not found");
     }
@@ -319,4 +328,5 @@ export const registerStudioRoutes: RouteRegistrar = (app, context) => {
   });
 
   registerStudioProviderRoutes(app, context);
+  registerStudioRigRoutes(app, context);
 };

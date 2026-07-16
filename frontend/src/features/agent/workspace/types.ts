@@ -1,4 +1,3 @@
-import type { ActiveAgentSessionSnapshot } from "@/features/agent/active-sessions";
 import type { AgentModel } from "@/features/agent/models";
 import type { Project } from "@/features/agent/projects/types";
 import type { Session, SessionId, SessionsMap } from "@/features/agent/runtime/types";
@@ -12,17 +11,14 @@ export type WorkspaceLayout = Layout;
 
 export type { GitSummary } from "@/features/agent/projects/types";
 
-/**
- * A pane is a layout slot pointing at one visible session — it carries no
- * session content. Runtime identity (`runtimeSessionId`) lives on the Session
- * only.
- */
-export type PaneState = {
+export type ChatPaneState = {
+  kind?: "chat";
   sessionId: SessionId;
 };
 
+export type PaneState = ChatPaneState;
+
 export type WorkspaceState = {
-  /** Flat collection of all sessions referenced by any pane. */
   sessions: SessionsMap;
   models: AgentModel[];
   selectedModel: string;
@@ -49,7 +45,6 @@ export type WorkspaceHydration = Partial<WorkspaceState>;
 
 export type WorkspaceAction =
   | { type: "hydrate"; state: WorkspaceHydration; hydrated?: boolean }
-  | { type: "workspaceUnmounted" }
   | { type: "setModelsLoading"; loading: boolean }
   | { type: "setModels"; models: AgentModel[]; preferredModelId?: string }
   | { type: "setSelectedModel"; modelId: string }
@@ -72,7 +67,12 @@ export type WorkspaceAction =
       tab: Session;
     }
   | { type: "focusPane"; paneId: PaneId }
-  | { type: "focusPaneSession"; paneId: PaneId; sessionId: SessionId }
+  | {
+      type: "focusPaneSession";
+      paneId: PaneId;
+      sessionId: SessionId;
+      replaceWorkspace?: boolean;
+    }
   | { type: "renameTab"; paneId: PaneId; tabId: SessionId; title: string }
   | {
       type: "splitTab";
@@ -82,10 +82,9 @@ export type WorkspaceAction =
       tab: Session;
     }
   | { type: "closePane"; paneId: PaneId }
-  /**
-   * Replace the visible session of a pane and write it into the flat sessions map.
-   */
   | { type: "setPaneSession"; paneId: PaneId; session: Session }
+  | { type: "setDetachedSession"; session: Session }
+  | { type: "removeDetachedSession"; sessionId: SessionId }
   | {
       type: "patchSession";
       sessionId: SessionId;
@@ -102,11 +101,6 @@ export type WorkspaceAction =
       newSession?: boolean;
       split?: boolean;
       paneId: PaneId;
+      replaceWorkspace?: boolean;
       tab: Session;
-    }
-  | {
-      type: "hydrateActiveSessions";
-      snapshots: ActiveAgentSessionSnapshot[];
-      projects: Project[];
-      hasExplicitSessionNav?: boolean;
     };

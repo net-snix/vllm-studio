@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState } from "react";
 import api from "@/lib/api/client";
 import type { ProcessInfo, RecipeWithStatus } from "@/lib/types";
-import { useRealtimeStatus } from "@/hooks/use-realtime-status";
+import { useRealtimeStatusStore } from "@/hooks/realtime-status-store";
+import { isActiveLaunchStage } from "@/hooks/realtime-status-types";
 
 type ModelLifecycleStatus = "idle" | "starting" | "ready" | "error";
 
@@ -15,8 +16,6 @@ interface ModelLifecycle {
   stop: () => Promise<void>;
 }
 
-const STARTING_STAGES = new Set(["preempting", "evicting", "launching", "waiting"]);
-
 const matchesProcess = (recipe: RecipeWithStatus, process: ProcessInfo): boolean => {
   if (recipe.served_model_name && process.served_model_name) {
     return recipe.served_model_name === process.served_model_name;
@@ -27,27 +26,9 @@ const matchesProcess = (recipe: RecipeWithStatus, process: ProcessInfo): boolean
   return false;
 };
 
-export function useModelLifecycle(): ModelLifecycle {
-  const realtime = useRealtimeStatus();
-  const [recipes, setRecipes] = useState<RecipeWithStatus[]>([]);
+export function useModelLifecycle(recipes: RecipeWithStatus[] = []): ModelLifecycle {
+  const realtime = useRealtimeStatusStore();
   const [error, setError] = useState<string | null>(null);
-
-  const subscribeRecipes = useCallback((_notify: () => void) => {
-    let cancelled = false;
-    api
-      .getRecipes()
-      .then((data) => {
-        if (!cancelled) setRecipes(data.recipes || []);
-      })
-      .catch(() => {
-        if (!cancelled) setRecipes([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useSyncExternalStore(subscribeRecipes, getModelLifecycleSnapshot, getModelLifecycleSnapshot);
 
   const activeRecipeId = useMemo(() => {
     const process = realtime.status?.process;
@@ -58,7 +39,7 @@ export function useModelLifecycle(): ModelLifecycle {
   const status = useMemo<ModelLifecycleStatus>(() => {
     const stage = realtime.launchProgress?.stage;
     if (realtime.status?.process) return "ready";
-    if (stage && STARTING_STAGES.has(stage)) {
+    if (isActiveLaunchStage(stage)) {
       return realtime.status?.launching ? "starting" : "idle";
     }
     if (stage === "error") return "error";
@@ -96,5 +77,3 @@ export function useModelLifecycle(): ModelLifecycle {
     stop,
   };
 }
-
-const getModelLifecycleSnapshot = (): number => 0;

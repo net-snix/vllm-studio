@@ -1,15 +1,8 @@
 "use client";
 
-import {
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type Dispatch,
-  type SetStateAction,
-} from "react";
+import { useCallback, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { effectInterval } from "@/lib/effect-timers";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import {
   CheckCircle2,
   Circle,
@@ -82,6 +75,13 @@ export function PlanPanel({
   const editing = view === "raw";
 
   usePlanDocument({ sessionId, editing, setMarkdown, setLoading });
+
+  // Cancel a pending debounced save on unmount so it can't fire a post-unmount POST.
+  useMountSubscription(() => {
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+  }, []);
 
   const persist = useCallback(
     (value: string) => {
@@ -244,7 +244,7 @@ function PlanTodoRow({
         <button
           type="button"
           onClick={() => onCycle(todo)}
-          className="mt-0.5 rounded p-0.5 hover:bg-(--surface)"
+          className="mt-0.5 rounded p-0.5 hover:bg-(--hover)"
           title={`${meta.label} — click to change`}
           aria-label={`${meta.label} — click to change`}
         >
@@ -277,7 +277,7 @@ function PlanTodoRow({
           type="button"
           onClick={() => onOpenSideChat?.(todo)}
           disabled={!onOpenSideChat}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-(--dim) opacity-0 transition-opacity hover:border-(--border) hover:bg-(--surface) hover:text-(--fg) disabled:pointer-events-none group-hover:opacity-100 focus:opacity-100"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-(--dim) opacity-0 transition-opacity hover:border-(--border) hover:bg-(--hover) hover:text-(--fg) disabled:pointer-events-none group-hover:opacity-100 focus:opacity-100"
           title="Open this task in a new side chat"
           aria-label="Open this task in a new side chat"
         >
@@ -288,9 +288,7 @@ function PlanTodoRow({
   );
 }
 
-// Fetch the per-session plan document whenever the session changes. Modeled on
-// `useCanvasEffects` in tools/context.tsx: the codebase bans `useEffect`, so the
-// fetch lifecycle is expressed as a `useSyncExternalStore` subscription.
+// Fetch the per-session plan document whenever the session changes.
 function usePlanDocument({
   sessionId,
   editing,
@@ -302,37 +300,31 @@ function usePlanDocument({
   setMarkdown: Dispatch<SetStateAction<string>>;
   setLoading: Dispatch<SetStateAction<boolean>>;
 }): void {
-  const subscribe = useCallback(
-    (_notify: () => void) => {
-      let cancelled = false;
-      const load = (showLoading: boolean) => {
-        if (showLoading) setLoading(true);
-        fetch(`/api/agent/plan${planQuery(sessionId)}`, { cache: "no-store" })
-          .then((res) =>
-            res.ok
-              ? (res.json() as Promise<{ markdown?: string }>)
-              : Promise.reject(new Error("Plan fetch failed")),
-          )
-          .then((payload) => {
-            if (cancelled || editing) return;
-            const next = typeof payload.markdown === "string" ? payload.markdown : "";
-            setMarkdown((current) => (current === next ? current : next));
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            if (!cancelled && showLoading) setLoading(false);
-          });
-      };
-      load(true);
-      const poll = editing ? null : effectInterval(() => load(false), 1500);
-      return () => {
-        cancelled = true;
-        poll?.cancel();
-      };
-    },
-    [editing, sessionId, setMarkdown, setLoading],
-  );
-  useSyncExternalStore(subscribe, getPlanSnapshot, getPlanSnapshot);
+  useMountSubscription(() => {
+    let cancelled = false;
+    const load = (showLoading: boolean) => {
+      if (showLoading) setLoading(true);
+      fetch(`/api/agent/plan${planQuery(sessionId)}`, { cache: "no-store" })
+        .then((res) =>
+          res.ok
+            ? (res.json() as Promise<{ markdown?: string }>)
+            : Promise.reject(new Error("Plan fetch failed")),
+        )
+        .then((payload) => {
+          if (cancelled || editing) return;
+          const next = typeof payload.markdown === "string" ? payload.markdown : "";
+          setMarkdown((current) => (current === next ? current : next));
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (!cancelled && showLoading) setLoading(false);
+        });
+    };
+    load(true);
+    const poll = editing ? null : effectInterval(() => load(false), 1500);
+    return () => {
+      cancelled = true;
+      poll?.cancel();
+    };
+  }, [editing, sessionId, setMarkdown, setLoading]);
 }
-
-const getPlanSnapshot = (): number => 0;

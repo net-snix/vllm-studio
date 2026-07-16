@@ -1,12 +1,10 @@
+import { CONTROLLERS_CHANGED_EVENT, CONTROLLERS_STORAGE_KEY } from "@/lib/api/controllers";
+import { BACKEND_URL_CHANGED_EVENT, BACKEND_URL_STORAGE_KEY } from "@/lib/api/connection";
+
 type DesktopUiPreferencesBridge = {
   loadUiPreferences?: () => Promise<Record<string, string>>;
   saveUiPreferences?: (prefs: Record<string, string>) => Promise<void>;
 };
-
-const CONTROLLERS_STORAGE_KEY = "local-studio.controllers";
-const BACKEND_URL_STORAGE_KEY = "localstudio_backend_url";
-const CONTROLLERS_CHANGED_EVENT = "vllm:controllers-changed";
-const BACKEND_URL_CHANGED_EVENT = "vllm:backend-url-changed";
 
 const DURABLE_EXACT_KEYS = new Set([
   "local-studio-state",
@@ -18,7 +16,21 @@ const DURABLE_EXACT_KEYS = new Set([
 
 const DURABLE_KEY_PREFIXES = ["local-studio.", "local-studio-", "localstudio_", "local_studio_"];
 
+const EXCLUDED_DURABLE_KEYS = new Set([
+  "local-studio.agent.transcripts.v1",
+  "local-studio.agent.activeSessions.snapshot",
+]);
+
+const EXCLUDED_DURABLE_PREFIXES = ["local-studio.agent.transcript."];
+const UI_PREFERENCES_TIMEOUT_MS = 1_500;
+
 let saveTimer: number | null = null;
+
+type StudioSettingsPayload = {
+  persisted?: {
+    ui_preferences?: Record<string, string>;
+  };
+};
 
 function bridge(): DesktopUiPreferencesBridge | null {
   if (typeof window === "undefined") return null;
@@ -32,6 +44,8 @@ function bridge(): DesktopUiPreferencesBridge | null {
 }
 
 function isDurableUiPreferenceKey(key: string): boolean {
+  if (EXCLUDED_DURABLE_KEYS.has(key)) return false;
+  if (EXCLUDED_DURABLE_PREFIXES.some((prefix) => key.startsWith(prefix))) return false;
   return (
     DURABLE_EXACT_KEYS.has(key) || DURABLE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))
   );
@@ -49,11 +63,21 @@ function collectDurableUiPreferences(): Record<string, string> {
   return out;
 }
 
+function withoutControllerCredentials(prefs: Record<string, string>): Record<string, string> {
+  const { ...rest } = prefs;
+  delete rest[CONTROLLERS_STORAGE_KEY];
+  return rest;
+}
+
 async function loadControllerUiPreferences(): Promise<Record<string, string>> {
   try {
-    const { default: api } = await import("@/lib/api/client");
-    const settings = await api.getStudioSettings();
-    return settings.persisted.ui_preferences ?? {};
+    const response = await fetch("/api/settings", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(UI_PREFERENCES_TIMEOUT_MS),
+    });
+    if (!response.ok) return {};
+    const settings = (await response.json()) as StudioSettingsPayload;
+    return withoutControllerCredentials(settings.persisted?.ui_preferences ?? {});
   } catch {
     return {};
   }
@@ -61,8 +85,12 @@ async function loadControllerUiPreferences(): Promise<Record<string, string>> {
 
 async function saveControllerUiPreferences(prefs: Record<string, string>): Promise<void> {
   try {
-    const { default: api } = await import("@/lib/api/client");
-    await api.updateStudioSettings({ ui_preferences: prefs });
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ui_preferences: withoutControllerCredentials(prefs) }),
+      signal: AbortSignal.timeout(UI_PREFERENCES_TIMEOUT_MS),
+    });
   } catch {
     // The controller can be unavailable during first boot/offline desktop use.
     // The desktop bridge remains a local fallback and the next UI change retries.

@@ -3,25 +3,29 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { addProjectToStore, listProjectsFromStore, removeProjectFromStore } from "./projects-store";
+import {
+  addProjectToStore,
+  listProjectsFromStore,
+  removeProjectFromStore,
+} from "@local-studio/agent-runtime/projects-store";
 
-const originalProjectsFile = process.env.VLLM_STUDIO_PROJECTS_FILE;
+const originalProjectsFile = process.env.LOCAL_STUDIO_PROJECTS_FILE;
 const tempRoots: string[] = [];
 
 function setupStore(): { root: string; file: string } {
   const root = mkdtempSync(path.join(tmpdir(), "vllm-projects-"));
   const file = path.join(root, "projects.json");
   tempRoots.push(root);
-  process.env.VLLM_STUDIO_PROJECTS_FILE = file;
+  process.env.LOCAL_STUDIO_PROJECTS_FILE = file;
   return { root, file };
 }
 
 function restoreProjectsFile(): void {
   if (originalProjectsFile === undefined) {
-    delete process.env.VLLM_STUDIO_PROJECTS_FILE;
+    delete process.env.LOCAL_STUDIO_PROJECTS_FILE;
     return;
   }
-  process.env.VLLM_STUDIO_PROJECTS_FILE = originalProjectsFile;
+  process.env.LOCAL_STUDIO_PROJECTS_FILE = originalProjectsFile;
 }
 
 afterEach(() => {
@@ -33,7 +37,7 @@ afterEach(() => {
 
 test("listProjectsFromStore hides persisted projects that duplicate the built-in Chats folder", () => {
   const { file } = setupStore();
-  const chatsPath = path.join(process.env.HOME ?? "", ".vllm-studio");
+  const chatsPath = path.join(process.env.HOME ?? "", ".local-studio");
   writeFileSync(
     file,
     `${JSON.stringify(
@@ -62,7 +66,7 @@ test("listProjectsFromStore hides persisted projects that duplicate the built-in
 
 test("addProjectToStore returns the built-in Chats project instead of storing a duplicate", () => {
   setupStore();
-  const chatsPath = path.join(process.env.HOME ?? "", ".vllm-studio");
+  const chatsPath = path.join(process.env.HOME ?? "", ".local-studio");
 
   const project = addProjectToStore(`${chatsPath}/`);
   const projects = listProjectsFromStore();

@@ -4,23 +4,40 @@
 // GPUs, metrics, launch progress, runtime summary. Fed by the controller SSE
 // (vllm:controller-event, dispatched by use-controller-events) with a 5s
 // poll+backoff fallback. Views derive from the snapshot via
-// realtime-status-store/derive.ts — nothing else may poll getStatus or listen
-// to controller events for status.
+// realtime-status-types.ts — nothing else may poll getStatus or listen to
+// controller events for status.
 
 import { useSyncExternalStore } from "react";
-import { Effect, Fiber, Schedule } from "effect";
+import { Effect, Result } from "effect";
+import { effectInterval, effectTimeout, type EffectTimer } from "@/lib/effect-timers";
 import type {
   GPU,
   LaunchProgressData,
   Metrics,
   ProcessInfo,
-  RuntimePlatformKind,
-  RuntimeGpuMonitoringInfo,
   RuntimeBackendInfo,
 } from "@/lib/types";
 
 import api from "@/lib/api/client";
 import { BACKEND_URL_CHANGED_EVENT, getStoredBackendUrl } from "@/lib/api/connection";
+import { normalizeGpuAliases } from "@/lib/api/system";
+import {
+  areGpusEqual,
+  areLaunchProgressEqual,
+  areLeasesEqual,
+  areMetricsEqual,
+  arePlatformKindsEqual,
+  areRuntimeSummariesEqual,
+  areServicesEqual,
+  areStatusEqual,
+} from "./realtime-status-equality";
+import {
+  isActiveLaunchStage,
+  type LeaseInfo,
+  type RealtimeStatusSnapshot,
+  type RuntimeSummaryData,
+  type ServiceEntry,
+} from "./realtime-status-types";
 
 const FAST_STATUS_REQUEST = { timeout: 5_000, retries: 0 } as const;
 const FAST_COMPAT_REQUEST = { timeout: 5_000, retries: 0 } as const;
@@ -71,8 +88,7 @@ let snapshot: RealtimeStatusSnapshot = initialSnapshot;
 const snapshotsByController = new Map<string, RealtimeStatusSnapshot>();
 const listeners = new Set<() => void>();
 let started = false;
-let pollFiber: Fiber.RuntimeFiber<void, unknown> | null = null;
-let clearLaunchTimer: ReturnType<typeof setTimeout> | null = null;
+let clearLaunchTimer: EffectTimer | null = null;
 let pollFailureStreak = 0;
 let pollBackoffUntil = 0;
 let activeControllerKey = currentControllerKey();
@@ -146,12 +162,10 @@ function reconcileLaunchProgress(
 }
 
 function scheduleLaunchClear(stage: LaunchProgressData["stage"]) {
-  if (clearLaunchTimer) {
-    clearTimeout(clearLaunchTimer);
-    clearLaunchTimer = null;
-  }
+  clearLaunchTimer?.cancel();
+  clearLaunchTimer = null;
   if (stage === "ready" || stage === "error" || stage === "cancelled") {
-    clearLaunchTimer = setTimeout(() => {
+    clearLaunchTimer = effectTimeout(() => {
       emitIfChanged({
         ...snapshot,
         launchProgress: null,
@@ -170,29 +184,35 @@ function emitStatusLoading() {
   });
 }
 
-async function fetchPollResults(): Promise<PollResults> {
-  const [statusResult, compatibilityResult, gpuResult, metricsResult] = await Promise.allSettled([
-    api.getStatus(FAST_STATUS_REQUEST),
-    api.getCompatibility(FAST_COMPAT_REQUEST),
-    api.getGPUs(FAST_GPU_REQUEST),
-    api.getMetrics().catch(() => null),
-  ]);
-  const status = statusResult.status === "fulfilled" ? statusResult.value : null;
-  return {
-    compatibility: compatibilityResult.status === "fulfilled" ? compatibilityResult.value : null,
-    gpus:
-      gpuResult.status === "fulfilled" ? (gpuResult.value.gpus ?? snapshot.gpus) : snapshot.gpus,
-    metrics: pollMetrics(metricsResult, status),
-    status,
-    statusConnected: statusResult.status === "fulfilled",
-  };
+const requestEffect = <T>(load: () => Promise<T>): Effect.Effect<T, unknown> =>
+  Effect.tryPromise({ try: load, catch: (error) => error });
+
+function fetchPollResultsEffect(): Effect.Effect<PollResults> {
+  return Effect.gen(function* () {
+    const [statusResult, compatibilityResult, gpuResult, metricsResult] = yield* Effect.all([
+      Effect.result(requestEffect(() => api.getStatus(FAST_STATUS_REQUEST))),
+      Effect.result(requestEffect(() => api.getCompatibility(FAST_COMPAT_REQUEST))),
+      Effect.result(requestEffect(() => api.getGPUs(FAST_GPU_REQUEST))),
+      Effect.result(
+        requestEffect(() => api.getMetrics()).pipe(Effect.catch(() => Effect.succeed(null))),
+      ),
+    ] as const);
+    const status = Result.isSuccess(statusResult) ? statusResult.success : null;
+    return {
+      compatibility: Result.isSuccess(compatibilityResult) ? compatibilityResult.success : null,
+      gpus: Result.isSuccess(gpuResult) ? (gpuResult.success.gpus ?? snapshot.gpus) : snapshot.gpus,
+      metrics: pollMetrics(metricsResult, status),
+      status,
+      statusConnected: Result.isSuccess(statusResult),
+    };
+  });
 }
 
 function pollMetrics(
-  result: PromiseSettledResult<Metrics | null>,
+  result: Result.Result<Metrics | null, unknown>,
   status: PolledStatus | null,
 ): Metrics | null {
-  if (result.status === "fulfilled" && result.value) return result.value;
+  if (Result.isSuccess(result) && result.success) return result.success;
   return processKey(snapshot.status?.process) === processKey(status?.process)
     ? snapshot.metrics
     : null;
@@ -229,7 +249,7 @@ function emitNoPolledStatus() {
   emitIfChanged({
     ...snapshot,
     statusLoading: false,
-    connected: hasCachedStatus && pollFailureStreak <= 1 ? snapshot.connected : false,
+    connected: hasCachedStatus && pollFailureStreak <= 3 ? snapshot.connected : false,
     lastEventAt: Date.now(),
   });
 }
@@ -293,10 +313,9 @@ function handleStatusEvent(data: Record<string, unknown>, now: number) {
 }
 
 function handleGpuEvent(data: Record<string, unknown>, now: number) {
-  const list = (data["gpus"] ?? []) as GPU[];
   emitIfChanged({
     ...snapshot,
-    gpus: Array.isArray(list) ? list : [],
+    gpus: normalizeGpuAliases(data["gpus"]),
     lastEventAt: now,
   });
 }
@@ -376,14 +395,20 @@ function handleControllerEvent(detail: ControllerEventDetail | undefined) {
   controllerEventHandlers[detail?.type ?? ""]?.(detail?.data ?? {}, Date.now());
 }
 
-async function fetchStatusNow(controllerKey = activeControllerKey) {
-  const requestSeq = ++statusRequestSeq;
-  if (controllerKey !== activeControllerKey) return;
-  emitStatusLoading();
-  const results = await fetchPollResults();
-  if (controllerKey !== activeControllerKey || requestSeq !== statusRequestSeq) return;
-  notePollOutcome(results.statusConnected);
-  emitPolledStatus(results);
+function fetchStatusNow(controllerKey = activeControllerKey): Promise<void> {
+  return Effect.runPromise(fetchStatusNowEffect(controllerKey));
+}
+
+function fetchStatusNowEffect(controllerKey = activeControllerKey): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const requestSeq = ++statusRequestSeq;
+    if (controllerKey !== activeControllerKey) return;
+    emitStatusLoading();
+    const results = yield* fetchPollResultsEffect();
+    if (controllerKey !== activeControllerKey || requestSeq !== statusRequestSeq) return;
+    notePollOutcome(results.statusConnected);
+    emitPolledStatus(results);
+  });
 }
 
 function resetForControllerSwitch() {
@@ -413,17 +438,15 @@ function start() {
   window.addEventListener("vllm:controller-event", onControllerEvent as EventListener);
   window.addEventListener(BACKEND_URL_CHANGED_EVENT, resetForControllerSwitch);
 
-  // Initial fetch + polling fallback in case SSE is blocked. Runs as an Effect
-  // fiber on a fixed schedule — the poll body checks the SSE freshness window
-  // and backoff gate before firing, same logic as the old setInterval.
+  // Initial fetch + polling fallback in case SSE is blocked. The poll body
+  // checks the SSE freshness window and backoff gate before firing.
   void fetchStatusNow();
-  const pollProgram = Effect.sync(() => {
+  effectInterval(() => {
     const now = Date.now();
     if (now - snapshot.lastEventAt < 10_000) return;
     if (now < pollBackoffUntil) return;
     void fetchStatusNow();
-  }).pipe(Effect.repeat(Schedule.spaced(POLL_BASE_INTERVAL_MS)));
-  pollFiber = Effect.runFork(pollProgram) as never;
+  }, POLL_BASE_INTERVAL_MS);
 
   const onVisibility = () => {
     if (document.visibilityState === "visible") {
@@ -448,215 +471,4 @@ export function useRealtimeStatusStore(): RealtimeStatusSnapshot {
     () => snapshot,
     () => initialSnapshot,
   );
-}
-
-export interface StatusData {
-  running: boolean;
-  process: ProcessInfo | null;
-  inference_port: number;
-  launching: string | null;
-}
-
-export interface RuntimeSummaryData {
-  platform: { kind: RuntimePlatformKind; vendor: "nvidia" | "amd" | null };
-  gpu_monitoring: RuntimeGpuMonitoringInfo;
-  backends: {
-    vllm: RuntimeBackendInfo;
-    sglang: RuntimeBackendInfo;
-    llamacpp: RuntimeBackendInfo;
-    mlx?: RuntimeBackendInfo;
-  };
-}
-
-export interface ServiceEntry {
-  id: string;
-  kind: string;
-  status: string;
-  last_error?: string | null;
-}
-
-export interface LeaseInfo {
-  holder: string | null;
-  since: string | null;
-}
-
-export interface RealtimeStatusSnapshot {
-  status: StatusData | null;
-  statusLoading: boolean;
-  /** Controller reachability: the last poll succeeded or a live event arrived. */
-  connected: boolean;
-  gpus: GPU[];
-  metrics: Metrics | null;
-  launchProgress: LaunchProgressData | null;
-  platformKind: RuntimePlatformKind | null;
-  runtimeSummary: RuntimeSummaryData | null;
-  services: ServiceEntry[];
-  lease: LeaseInfo | null;
-  lastEventAt: number;
-}
-
-// Pure derivations over the realtime status snapshot. No state, no IO — the
-// realtime-status-store owns the data; consumers derive their views here.
-
-export function isActiveLaunchStage(
-  stage: LaunchProgressData["stage"] | null | undefined,
-): boolean {
-  return (
-    stage === "preempting" || stage === "evicting" || stage === "launching" || stage === "waiting"
-  );
-}
-
-export type SidebarStatusSnapshot = {
-  online: boolean;
-  inferenceOnline: boolean;
-  model: string | null;
-  activityLine: string;
-};
-
-function computeModelName(process: ProcessInfo | null | undefined): string | null {
-  if (!process) return null;
-  const served = process.served_model_name;
-  if (typeof served === "string" && served.trim()) return served.trim();
-  const modelPath = process.model_path;
-  if (typeof modelPath === "string" && modelPath.trim())
-    return modelPath.split("/").pop() ?? modelPath;
-  return null;
-}
-
-export function sidebarStatusFromSnapshot(
-  snapshot: Pick<RealtimeStatusSnapshot, "connected" | "status" | "launchProgress">,
-): SidebarStatusSnapshot {
-  const { connected, status, launchProgress } = snapshot;
-  const inferenceOnline = Boolean(status?.running || status?.process);
-  const model = computeModelName(status?.process);
-  const launchMessage =
-    launchProgress && isActiveLaunchStage(launchProgress.stage) ? launchProgress.message : null;
-
-  const activityLine = launchMessage
-    ? launchMessage
-    : inferenceOnline
-      ? model || "Ready"
-      : connected
-        ? "No model"
-        : "Offline";
-
-  return { online: connected, inferenceOnline, model, activityLine };
-}
-
-function areProcessInfosEqual(a: ProcessInfo | null, b: ProcessInfo | null) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.pid === b.pid &&
-    a.backend === b.backend &&
-    a.model_path === b.model_path &&
-    a.port === b.port &&
-    (a.served_model_name ?? null) === (b.served_model_name ?? null)
-  );
-}
-
-export function areStatusEqual(a: StatusData | null, b: StatusData | null) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.running === b.running &&
-    a.inference_port === b.inference_port &&
-    areProcessInfosEqual(a.process, b.process)
-  );
-}
-
-const GPU_STABLE_KEYS = [
-  "index",
-  "name",
-  "memory_total",
-  "memory_used",
-  "memory_free",
-  "utilization",
-] as const satisfies ReadonlyArray<keyof GPU>;
-
-const GPU_NULLABLE_KEYS = [
-  "temperature",
-  "power_draw",
-  "power_limit",
-] as const satisfies ReadonlyArray<keyof GPU>;
-
-function areGpuEntriesEqual(left: GPU, right: GPU): boolean {
-  return (
-    GPU_STABLE_KEYS.every((key) => left[key] === right[key]) &&
-    GPU_NULLABLE_KEYS.every((key) => (left[key] ?? null) === (right[key] ?? null))
-  );
-}
-
-export function areGpusEqual(a: GPU[], b: GPU[]) {
-  if (a === b) return true;
-  return a.length === b.length && a.every((left, index) => areGpuEntriesEqual(left, b[index]!));
-}
-
-export function arePlatformKindsEqual(
-  a: RuntimePlatformKind | null,
-  b: RuntimePlatformKind | null,
-) {
-  return a === b;
-}
-
-export function areMetricsEqual(a: Metrics | null, b: Metrics | null) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  if (aKeys.length !== bKeys.length) return false;
-
-  for (const key of aKeys) {
-    if (!(key in b)) return false;
-    if ((a as Record<string, unknown>)[key] !== (b as Record<string, unknown>)[key]) return false;
-  }
-
-  return true;
-}
-
-export function areLaunchProgressEqual(a: LaunchProgressData | null, b: LaunchProgressData | null) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.recipe_id === b.recipe_id &&
-    a.stage === b.stage &&
-    a.message === b.message &&
-    (a.progress ?? null) === (b.progress ?? null)
-  );
-}
-
-export function areRuntimeSummariesEqual(
-  a: RuntimeSummaryData | null,
-  b: RuntimeSummaryData | null,
-) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.platform.kind !== b.platform.kind) return false;
-  if (a.gpu_monitoring.available !== b.gpu_monitoring.available) return false;
-  if (a.gpu_monitoring.tool !== b.gpu_monitoring.tool) return false;
-  for (const key of ["vllm", "sglang", "llamacpp", "mlx"] as const) {
-    if (!a.backends[key] && !b.backends[key]) continue;
-    if (!a.backends[key] || !b.backends[key]) return false;
-    if (a.backends[key].installed !== b.backends[key].installed) return false;
-    if (a.backends[key].version !== b.backends[key].version) return false;
-  }
-  return true;
-}
-
-export function areServicesEqual(a: ServiceEntry[], b: ServiceEntry[]) {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const l = a[i]!;
-    const r = b[i]!;
-    if (l.id !== r.id || l.kind !== r.kind || l.status !== r.status) return false;
-  }
-  return true;
-}
-
-export function areLeasesEqual(a: LeaseInfo | null, b: LeaseInfo | null) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return a.holder === b.holder;
 }

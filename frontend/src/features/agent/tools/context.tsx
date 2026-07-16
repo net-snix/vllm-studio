@@ -7,13 +7,14 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
+  type ComponentType,
+  type Context,
   type Dispatch,
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { usePathname } from "next/navigation";
 import type {
-  ComposerPluginRef,
   ComposerPromptTemplateRef,
   ComposerSkillRef,
 } from "@/features/agent/composer-context";
@@ -43,16 +44,14 @@ import {
   writeComputerTabs,
   writeComputerWidth,
 } from "@/features/agent/tools/persistence";
+import { useMountSubscription } from "@/hooks/use-mount-subscription";
 
-export type ToolsContextValue = {
-  browser: BrowserState;
-  computer: ComputerState;
-  fileOpenRequest: FileOpenRequest | null;
-  contextAttachRequest: ContextAttachRequest | null;
-  pluginCatalogue: ComposerPluginRef[];
-  skillCatalogue: ComposerSkillRef[];
-  promptTemplateCatalogue: ComposerPromptTemplateRef[];
-  selectionFor: (sessionId: SessionId | null | undefined) => ToolSelection;
+// The tools surface is provided as four narrow contexts (actions / computer /
+// browser / selections) so a state change in one slice never re-renders
+// consumers of the others — e.g. typing in the browser URL bar must not churn
+// every assistant-markdown block. `useTools()` composes all four for the
+// pass-through consumers whose downstream prop contracts take the full value.
+type ToolsActions = {
   setBrowserEnabled: (enabled: boolean) => void;
   setBrowserBackend: (backend: BrowserBackend) => void;
   toggleBrowserBackend: () => void;
@@ -79,7 +78,78 @@ export type ToolsContextValue = {
   hydrateSelections: (entries: Iterable<[SessionId, ToolSelection]>) => void;
 };
 
-const ToolsContext = createContext<ToolsContextValue | null>(null);
+type ToolSelectionsValue = {
+  fileOpenRequest: FileOpenRequest | null;
+  contextAttachRequest: ContextAttachRequest | null;
+  skillCatalogue: ComposerSkillRef[];
+  promptTemplateCatalogue: ComposerPromptTemplateRef[];
+  selectionFor: (sessionId: SessionId | null | undefined) => ToolSelection;
+};
+
+export type ToolsContextValue = ToolsActions &
+  ToolSelectionsValue & {
+    browser: BrowserState;
+    computer: ComputerState;
+  };
+
+const ToolsActionsContext = createContext<ToolsActions | null>(null);
+const ComputerToolsContext = createContext<ComputerState | null>(null);
+const BrowserToolsContext = createContext<BrowserState | null>(null);
+const ToolSelectionsContext = createContext<ToolSelectionsValue | null>(null);
+// Stable ref to the composed value for imperative (event-time) readers that
+// must not re-render on tools churn — see `useToolsRef`.
+const ToolsRefContext = createContext<{ current: ToolsContextValue } | null>(null);
+
+type ToolsEffectsBridgeProps = {
+  catalogueEnabled: boolean;
+  canvasEffectsEnabled: boolean;
+  setComputer: Dispatch<SetStateAction<ComputerState>>;
+  activeCanvasSessionId: SessionId | null;
+  onCatalogueLoaded: (payload: {
+    skills: ComposerSkillRef[];
+    promptTemplates: ComposerPromptTemplateRef[];
+  }) => void;
+};
+
+type ToolsEffectsBridgeComponent = ComponentType<ToolsEffectsBridgeProps>;
+
+let toolsEffectsBridgePromise: Promise<ToolsEffectsBridgeComponent> | null = null;
+
+function loadToolsEffectsBridge(): Promise<ToolsEffectsBridgeComponent> {
+  toolsEffectsBridgePromise ??= import("@/features/agent/tools/effects-bridge").then(
+    (mod) => mod.ToolsEffectsBridge,
+  );
+  return toolsEffectsBridgePromise;
+}
+
+function syncCanvasInBackground(
+  sessionId: SessionId | null,
+  payload: { enabled: boolean; text?: string },
+): void {
+  void import("@/features/agent/tools/canvas-effects").then((mod) => {
+    mod.runSyncCanvasEffect(sessionId, payload);
+  });
+}
+
+function LazyToolsEffectsBridge(props: ToolsEffectsBridgeProps) {
+  const enabled = props.catalogueEnabled || props.canvasEffectsEnabled;
+  const [ToolsEffectsBridge, setToolsEffectsBridge] = useState<ToolsEffectsBridgeComponent | null>(
+    null,
+  );
+
+  useMountSubscription(() => {
+    if (!enabled || ToolsEffectsBridge) return;
+    let cancelled = false;
+    void loadToolsEffectsBridge().then((Component) => {
+      if (!cancelled) setToolsEffectsBridge(() => Component);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ToolsEffectsBridge, enabled]);
+
+  return enabled && ToolsEffectsBridge ? <ToolsEffectsBridge {...props} /> : null;
+}
 
 function buildInitialBrowser(): BrowserState {
   if (typeof window === "undefined") {
@@ -104,35 +174,36 @@ function buildInitialComputer(): ComputerState {
 }
 
 export function ToolsProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const catalogueEnabled = pathname === "/agent" || pathname === "/quick";
+  const canvasEffectsEnabled = pathname === "/agent" || pathname === "/quick";
   const [browser, setBrowser] = useState<BrowserState>(() => buildInitialBrowser());
   const [computer, setComputer] = useState<ComputerState>(() => buildInitialComputer());
   const [fileOpenRequest, setFileOpenRequest] = useState<FileOpenRequest | null>(null);
   const [contextAttachRequest, setContextAttachRequest] = useState<ContextAttachRequest | null>(
     null,
   );
-  const [pluginCatalogue, setPluginCatalogue] = useState<ComposerPluginRef[]>([]);
   const [skillCatalogue, setSkillCatalogue] = useState<ComposerSkillRef[]>([]);
   const [promptTemplateCatalogue, setPromptTemplateCatalogue] = useState<
     ComposerPromptTemplateRef[]
   >([]);
   const selectionsRef = useRef<Map<SessionId, ToolSelection>>(new Map());
-  // Bump on every selection mutation so consumers re-render.
   const [selectionVersion, setSelectionVersion] = useState(0);
   const activeCanvasSessionRef = useRef<SessionId | null>(null);
   const [activeCanvasSessionId, setActiveCanvasSessionIdState] = useState<SessionId | null>(null);
-  const canvasQuery = (sessionId: SessionId | null) =>
-    sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
-
-  // Discover the workspace-global plugin / skill catalogue once on mount.
-  // The lifecycle bridge lives in `use-tools-catalogue-effects.ts`.
-  useToolsCatalogueEffects({
-    onLoaded: ({ plugins, skills, promptTemplates }) => {
-      setPluginCatalogue(plugins);
+  const handleCatalogueLoaded = useCallback(
+    ({
+      skills,
+      promptTemplates,
+    }: {
+      skills: ComposerSkillRef[];
+      promptTemplates: ComposerPromptTemplateRef[];
+    }) => {
       setSkillCatalogue(skills);
       setPromptTemplateCatalogue(promptTemplates);
     },
-  });
-  useCanvasEffects({ setComputer, sessionId: activeCanvasSessionId });
+    [],
+  );
 
   const setActiveCanvasSession = useCallback((sessionId: SessionId | null) => {
     activeCanvasSessionRef.current = sessionId;
@@ -287,14 +358,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       current.canvasEnabled === enabled ? current : { ...current, canvasEnabled: enabled },
     );
     writeComputerCanvasEnabled(enabled);
-    // Best-effort server sync; the use-canvas-effects hook owns full hydration
-    // and reconciliation. Failures here are harmless because the next mount
-    // will re-read the server-side document.
-    void fetch(`/api/agent/canvas${canvasQuery(activeCanvasSessionRef.current)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    }).catch(() => undefined);
+    syncCanvasInBackground(activeCanvasSessionRef.current, { enabled });
   }, []);
 
   const toggleCanvas = useCallback(() => {
@@ -303,16 +367,11 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       const tabs = next ? uniqueComputerTabs([...current.tabs, "canvas"]) : current.tabs;
       writeComputerCanvasEnabled(next);
       if (next) writeComputerTabs(tabs);
-      void fetch(`/api/agent/canvas${canvasQuery(activeCanvasSessionRef.current)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
-      }).catch(() => undefined);
+      syncCanvasInBackground(activeCanvasSessionRef.current, { enabled: next });
       return {
         ...current,
         canvasEnabled: next,
         tabs,
-        // When enabling the canvas, focus it; when disabling, fall back to status.
         tab: next ? "canvas" : current.tab === "canvas" ? "status" : current.tab,
         open: next ? true : current.open,
       };
@@ -324,11 +383,7 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       current.canvasText === text ? current : { ...current, canvasText: text },
     );
     writeComputerCanvasText(text);
-    void fetch(`/api/agent/canvas${canvasQuery(activeCanvasSessionRef.current)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: true, text }),
-    }).catch(() => undefined);
+    syncCanvasInBackground(activeCanvasSessionRef.current, { enabled: true, text });
   }, []);
 
   const requestFileOpen = useCallback((path: string) => {
@@ -374,7 +429,6 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       const current = map.get(sessionId);
       if (
         current &&
-        current.plugins === selection.plugins &&
         current.skills === selection.skills &&
         current.promptTemplates === selection.promptTemplates
       ) {
@@ -393,7 +447,6 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       const existing = map.get(id);
       if (
         existing &&
-        existing.plugins === selection.plugins &&
         existing.skills === selection.skills &&
         existing.promptTemplates === selection.promptTemplates
       ) {
@@ -405,16 +458,11 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
     if (changed) setSelectionVersion((v) => v + 1);
   }, []);
 
-  const value = useMemo<ToolsContextValue>(
+  // Every callback above is useCallback-stable except toggleComputerOpen
+  // (depends on computer.open), so this value only changes identity when the
+  // panel opens/closes — action-only consumers stay untouched by state churn.
+  const actions = useMemo<ToolsActions>(
     () => ({
-      browser,
-      computer,
-      fileOpenRequest,
-      contextAttachRequest,
-      pluginCatalogue,
-      skillCatalogue,
-      promptTemplateCatalogue,
-      selectionFor,
       setBrowserEnabled,
       setBrowserBackend,
       toggleBrowserBackend,
@@ -437,14 +485,6 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
       hydrateSelections,
     }),
     [
-      browser,
-      computer,
-      fileOpenRequest,
-      contextAttachRequest,
-      pluginCatalogue,
-      skillCatalogue,
-      promptTemplateCatalogue,
-      selectionFor,
       setBrowserEnabled,
       setBrowserBackend,
       toggleBrowserBackend,
@@ -468,13 +508,98 @@ export function ToolsProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <ToolsContext.Provider value={value}>{children}</ToolsContext.Provider>;
+  const selections = useMemo<ToolSelectionsValue>(
+    () => ({
+      fileOpenRequest,
+      contextAttachRequest,
+      skillCatalogue,
+      promptTemplateCatalogue,
+      selectionFor,
+    }),
+    [fileOpenRequest, contextAttachRequest, skillCatalogue, promptTemplateCatalogue, selectionFor],
+  );
+
+  // Latest-value ref for imperative readers (use-workspace's event handlers).
+  // Refreshed post-render, which is always before any event-time read.
+  const value = useMemo<ToolsContextValue>(
+    () => ({ browser, computer, ...selections, ...actions }),
+    [browser, computer, selections, actions],
+  );
+  const valueRef = useRef(value);
+  useMountSubscription(() => {
+    valueRef.current = value;
+  }, [value]);
+
+  return (
+    <ToolsActionsContext.Provider value={actions}>
+      <ComputerToolsContext.Provider value={computer}>
+        <BrowserToolsContext.Provider value={browser}>
+          <ToolSelectionsContext.Provider value={selections}>
+            <ToolsRefContext.Provider value={valueRef}>
+              <LazyToolsEffectsBridge
+                catalogueEnabled={catalogueEnabled}
+                canvasEffectsEnabled={canvasEffectsEnabled}
+                setComputer={setComputer}
+                activeCanvasSessionId={activeCanvasSessionId}
+                onCatalogueLoaded={handleCatalogueLoaded}
+              />
+              {children}
+            </ToolsRefContext.Provider>
+          </ToolSelectionsContext.Provider>
+        </BrowserToolsContext.Provider>
+      </ComputerToolsContext.Provider>
+    </ToolsActionsContext.Provider>
+  );
 }
 
-export function useTools(): ToolsContextValue {
-  const value = useContext(ToolsContext);
-  if (!value) throw new Error("useTools must be used within a ToolsProvider");
+function useToolsSlice<T>(context: Context<T | null>, hook: string): T {
+  const value = useContext(context);
+  if (value === null) throw new Error(`${hook} must be used within a ToolsProvider`);
   return value;
+}
+
+/** Stable tool callbacks only — never re-renders consumers on tools state churn. */
+export function useToolsActions(): ToolsActions {
+  return useToolsSlice(ToolsActionsContext, "useToolsActions");
+}
+
+/** Computer panel state (open/tab/tabs/width/canvas). */
+export function useComputerTools(): ComputerState {
+  return useToolsSlice(ComputerToolsContext, "useComputerTools");
+}
+
+/** Browser pane state (enabled/backend/url/input). */
+export function useBrowserTools(): BrowserState {
+  return useToolsSlice(BrowserToolsContext, "useBrowserTools");
+}
+
+/** Per-session skill/template selections, catalogues, and open/attach requests. */
+export function useToolSelections(): ToolSelectionsValue {
+  return useToolsSlice(ToolSelectionsContext, "useToolSelections");
+}
+
+/**
+ * Ref to the full composed tools value for imperative event-time reads. Unlike
+ * `useTools()`, subscribing components never re-render when tools state moves.
+ */
+export function useToolsRef(): { current: ToolsContextValue } {
+  return useToolsSlice(ToolsRefContext, "useToolsRef");
+}
+
+/**
+ * Composed compatibility view over all four tool contexts. Re-renders on any
+ * tools state change, so prefer the narrow hooks; this exists for consumers
+ * that hand the full value to prop contracts typed as `ToolsContextValue`.
+ */
+export function useTools(): ToolsContextValue {
+  const actions = useToolsActions();
+  const computer = useComputerTools();
+  const browser = useBrowserTools();
+  const selections = useToolSelections();
+  return useMemo(
+    () => ({ browser, computer, ...selections, ...actions }),
+    [browser, computer, selections, actions],
+  );
 }
 
 export type {
@@ -485,91 +610,3 @@ export type {
   ComputerState,
   ComputerTab,
 };
-
-function useCanvasEffects({
-  setComputer,
-  sessionId,
-}: {
-  setComputer: Dispatch<SetStateAction<ComputerState>>;
-  sessionId?: SessionId | null;
-}): void {
-  const subscribe = useCallback(
-    (_notify: () => void) => {
-      let cancelled = false;
-      const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
-      fetch(`/api/agent/canvas${query}`, { cache: "no-store" })
-        .then((res) =>
-          res.ok
-            ? (res.json() as Promise<{ enabled?: boolean; text?: string }>)
-            : Promise.reject(new Error("Canvas fetch failed")),
-        )
-        .then((payload) => {
-          if (cancelled) return;
-          setComputer((current) => ({
-            ...current,
-            canvasEnabled: payload.enabled ?? current.canvasEnabled,
-            canvasText: typeof payload.text === "string" ? payload.text : current.canvasText,
-          }));
-        })
-        .catch(() => undefined);
-      return () => {
-        cancelled = true;
-      };
-    },
-    [setComputer, sessionId],
-  );
-
-  useSyncExternalStore(subscribe, getCanvasSnapshot, getCanvasSnapshot);
-}
-
-const getCanvasSnapshot = (): number => 0;
-
-// One-shot fetch of the workspace-global plugin and skill catalogues.
-
-type UseToolsCatalogueEffectsOptions = {
-  onLoaded: (payload: {
-    plugins: ComposerPluginRef[];
-    skills: ComposerSkillRef[];
-    promptTemplates: ComposerPromptTemplateRef[];
-  }) => void;
-};
-
-function useToolsCatalogueEffects({ onLoaded }: UseToolsCatalogueEffectsOptions): void {
-  const onLoadedRef = useRef(onLoaded);
-  const subscribe = useCallback((_notify: () => void) => {
-    let cancelled = false;
-    void loadToolsCatalogue().then((payload) => {
-      if (!cancelled) onLoadedRef.current(payload);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useSyncExternalStore(subscribe, getToolsCatalogueSnapshot, getToolsCatalogueSnapshot);
-}
-
-async function loadToolsCatalogue(): Promise<{
-  plugins: ComposerPluginRef[];
-  skills: ComposerSkillRef[];
-  promptTemplates: ComposerPromptTemplateRef[];
-}> {
-  const [plugins, skills, promptTemplates] = await Promise.all([
-    fetch("/api/mcp/servers?includeDisabled=1", { cache: "no-store" })
-      .then((res) => res.json() as Promise<{ servers?: ComposerPluginRef[] }>)
-      .then((payload) => payload.servers ?? [])
-      .catch(() => [] as ComposerPluginRef[]),
-    fetch("/api/agent/skills", { cache: "no-store" })
-      .then((res) => res.json() as Promise<{ skills?: ComposerSkillRef[] }>)
-      .then((payload) => payload.skills ?? [])
-      .catch(() => [] as ComposerSkillRef[]),
-    fetch("/api/agent/prompt-templates", { cache: "no-store" })
-      .then((res) => res.json() as Promise<{ templates?: ComposerPromptTemplateRef[] }>)
-      .then((payload) => payload.templates ?? [])
-      .catch(() => [] as ComposerPromptTemplateRef[]),
-  ]);
-
-  return { plugins, skills, promptTemplates };
-}
-
-const getToolsCatalogueSnapshot = (): number => 0;
