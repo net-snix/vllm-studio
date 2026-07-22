@@ -16,6 +16,13 @@ import {
 } from "./core";
 
 const MB = 1024 * 1024;
+const GPU_BOOLEAN_KEYS = [
+  "memory_shared",
+  "memory_usage_available",
+  "utilization_available",
+  "temperature_available",
+  "power_available",
+] as const;
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -24,6 +31,18 @@ function finiteNumber(value: unknown): number | null {
 function legacyMb(value: unknown): number | null {
   const bytes = finiteNumber(value);
   return bytes !== null && bytes > 0 ? bytes / MB : null;
+}
+
+function assignGpuMetadata(gpu: GPU, raw: Record<string, unknown>): void {
+  if (typeof raw["id"] === "string") gpu.id = raw["id"];
+  const powerDraw = finiteNumber(raw["power_draw"]);
+  if (powerDraw !== null) gpu.power_draw = powerDraw;
+  const powerLimit = finiteNumber(raw["power_limit"]);
+  if (powerLimit !== null) gpu.power_limit = powerLimit;
+  for (const key of GPU_BOOLEAN_KEYS) {
+    const value = raw[key];
+    if (typeof value === "boolean") gpu[key] = value;
+  }
 }
 
 export function normalizeGpuAliases(list: unknown): GPU[] {
@@ -42,11 +61,7 @@ export function normalizeGpuAliases(list: unknown): GPU[] {
         finiteNumber(raw["utilization_pct"]) ?? finiteNumber(raw["utilization"]) ?? 0,
       temp_c: finiteNumber(raw["temp_c"]) ?? finiteNumber(raw["temperature"]) ?? 0,
     };
-    if (typeof raw["id"] === "string") gpu.id = raw["id"];
-    const powerDraw = finiteNumber(raw["power_draw"]);
-    if (powerDraw !== null) gpu.power_draw = powerDraw;
-    const powerLimit = finiteNumber(raw["power_limit"]);
-    if (powerLimit !== null) gpu.power_limit = powerLimit;
+    assignGpuMetadata(gpu, raw);
     gpus.push(gpu);
   }
   return gpus;
@@ -57,17 +72,13 @@ export function createSystemApi(core: ApiCore) {
     launch: (recipeId: string): Promise<{ success: boolean; pid?: number; message: string }> =>
       core.request(`/launch/${encodePathSegments(recipeId)}`, {
         method: "POST",
-        timeout: 30_000,
+        timeout: 360_000,
         retries: 0,
       }),
 
     evict: (): Promise<{ success: boolean; evicted_pid?: number }> =>
       core.request("/evict", { method: "POST" }),
 
-    // The controller long-polls up to `timeout` seconds; the client-side fetch
-    // timeout must outlive it or a real model load (>30s) surfaces as a
-    // spurious launch error. No retries: re-entering the long poll after a
-    // timeout would silently double the wait.
     waitReady: (timeout = 300): Promise<{ ready: boolean; elapsed: number; error?: string }> =>
       core.request(`/wait-ready?timeout=${timeout}`, {
         timeout: (timeout + 15) * 1000,
@@ -108,7 +119,6 @@ export function createSystemApi(core: ApiCore) {
 
     runBenchmark: (
       promptTokens = 1000,
-      maxTokens = 100,
     ): Promise<{
       success?: boolean;
       error?: string;
@@ -129,7 +139,7 @@ export function createSystemApi(core: ApiCore) {
         total_requests: number;
       };
     }> =>
-      core.request(`/benchmark?prompt_tokens=${promptTokens}&max_tokens=${maxTokens}`, {
+      core.request(`/benchmark?prompt_tokens=${promptTokens}`, {
         method: "POST",
       }),
 

@@ -2,9 +2,10 @@
 
 import type { ReactNode, RefObject } from "react";
 import { Spinner } from "@/ui";
-import { ArrowUp, Code2, Plus } from "@/ui/icon-registry";
+import { ArrowUp, CircleAlert, Code2, Plus } from "@/ui/icon-registry";
 import type { BrowserBackend } from "@/features/agent/tools/types";
 import { GlobeIcon, PanelIcon, SitegeistIcon, StopIcon } from "@/ui/icons";
+import { ComposerDictationButton } from "./composer-dictation-button";
 
 export function AgentComposerActions({
   fileInputRef,
@@ -21,6 +22,8 @@ export function AgentComposerActions({
   canvasEnabled,
   onToggleCanvas,
   onAbortTurn,
+  onTranscript,
+  onOpenStatus,
   modelSelector,
 }: {
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -37,6 +40,8 @@ export function AgentComposerActions({
   canvasEnabled: boolean;
   onToggleCanvas: () => void;
   onAbortTurn: () => void;
+  onTranscript: (text: string) => void;
+  onOpenStatus?: () => void;
   modelSelector?: ReactNode;
 }) {
   const inputHasText = Boolean(input.trim());
@@ -48,7 +53,7 @@ export function AgentComposerActions({
   const activeIconClass = "bg-(--active) text-(--fg)";
 
   return (
-    <div className="agent-composer-actions-row flex min-h-8 items-center gap-1 bg-transparent px-2.5 pb-2 pt-0.5 text-xs">
+    <div className="agent-composer-actions-row flex min-h-9 items-center gap-1 bg-transparent px-3 pb-2.5 pt-0.5 text-xs">
       <input
         ref={fileInputRef}
         type="file"
@@ -66,6 +71,19 @@ export function AgentComposerActions({
       >
         <Plus className="h-4 w-4" strokeWidth={1.75} />
       </button>
+      {onOpenStatus ? (
+        // Codex access chip: the agent runs with full access; the chip opens
+        // the status panel. Orange-200 from the Codex ramp.
+        <button
+          type="button"
+          onClick={onOpenStatus}
+          className="inline-flex !h-[30px] !min-h-[30px] shrink-0 items-center gap-1.5 rounded-full px-2 text-[length:var(--codex-chat-font-size)] text-(--orange-200) transition-colors hover:bg-(--hover)"
+          title="Full access — the agent can read, write, and run commands. Opens status."
+        >
+          <CircleAlert className="h-4 w-4" strokeWidth={1.75} />
+          Full access
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={onToggleBrowserTool}
@@ -113,6 +131,11 @@ export function AgentComposerActions({
       </button>
       <div className="ml-auto flex shrink-0 items-center gap-1">
         {modelSelector}
+        <ComposerDictationButton
+          disabled={running}
+          inactiveClassName={inactiveIconClass}
+          onTranscript={onTranscript}
+        />
         {running ? (
           <>
             {starting ? (
@@ -126,33 +149,33 @@ export function AgentComposerActions({
             ) : inputHasText ? (
               <button
                 type="submit"
-                className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-full bg-(--fg) text-(--bg) transition-opacity hover:opacity-85"
+                className="inline-flex !h-[30px] !min-h-[30px] !w-[30px] !min-w-[30px] shrink-0 items-center justify-center rounded-full bg-(--fg) text-(--bg) transition-opacity hover:opacity-85"
                 aria-label="Steer current task"
                 title="Steer current task (Enter) · Queue instead (Tab)"
               >
-                <ArrowUp className="h-3.5 w-3.5 stroke-[2.25]" />
+                <ArrowUp className="h-4 w-4 stroke-[2.25]" />
               </button>
             ) : null}
             <button
               type="button"
               onClick={onAbortTurn}
               disabled={starting}
-              className={`inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-full transition-opacity hover:opacity-85 disabled:opacity-30 ${inputHasText ? "bg-(--hover) text-(--fg)" : "bg-(--fg) text-(--bg)"}`}
+              className={`inline-flex shrink-0 items-center justify-center rounded-full bg-(--fg) text-(--bg) transition-opacity hover:opacity-85 disabled:opacity-30 ${inputHasText ? "!h-6 !min-h-6 !w-6 !min-w-6" : "!h-[30px] !min-h-[30px] !w-[30px] !min-w-[30px]"}`}
               aria-label="Stop"
               title="Stop (Esc)"
             >
-              <StopIcon className="h-3 w-3" />
+              <StopIcon className="h-2.5 w-2.5" />
             </button>
           </>
         ) : (
           <button
             type="submit"
             disabled={(!inputHasText && attachmentsCount === 0) || readingAttachments}
-            className="inline-flex !h-7 !min-h-7 !w-7 !min-w-7 shrink-0 items-center justify-center rounded-full bg-(--fg) text-(--bg) transition-opacity hover:opacity-85 disabled:opacity-25"
+            className="inline-flex !h-[30px] !min-h-[30px] !w-[30px] !min-w-[30px] shrink-0 items-center justify-center rounded-full bg-(--fg) text-(--bg) transition-opacity hover:opacity-85 disabled:bg-(--hl3) disabled:opacity-100"
             aria-label="Send"
             title="Send (Enter) · Queue (Tab)"
           >
-            {starting ? <Spinner size="sm" /> : <ArrowUp className="h-3.5 w-3.5 stroke-[2.25]" />}
+            {starting ? <Spinner size="sm" /> : <ArrowUp className="h-4 w-4 stroke-[2.25]" />}
           </button>
         )}
       </div>

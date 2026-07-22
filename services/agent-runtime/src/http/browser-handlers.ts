@@ -1,32 +1,8 @@
-// Transport-neutral HTTP handlers for the browser-host endpoints:
-//
-//   POST /api/agent/browser/:verb      handleBrowserVerb
-//   GET  /api/agent/browser/fetch      handleBrowserFetch
-//   GET  /api/agent/browser/frame      handleBrowserFrame
-//   POST /api/agent/browser/input      handleBrowserInput
-//   GET  /api/agent/browser/localhosts handleBrowserLocalhosts
-//   GET  /api/agent/browser/state      handleBrowserState
-//   POST /api/agent/browser/viewport   handleBrowserViewport
-//
-// Same hosting story as handlers.ts: the Next routes call these in-process by
-// default; the standalone :8081 server serves them when
-// LOCAL_STUDIO_AGENT_RUNTIME_URL points the Next proxies here. Bodies are
-// verbatim ports of the former Next route bodies.
-
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { sanitizeBrowserPaneUrl } from "../../../../shared/agent/sanitize-embedded-browser-url";
 import { browserHost, type KeyInput, type MouseInput } from "../browser-host/browser-host";
 import { fetchReadable } from "../browser-host/reader";
-
-// ─── POST /api/agent/browser/:verb ────────────────────────────────────────
-//
-// Embedded browser verb dispatch for the pi agent's browser_* tools. Verbs are
-// driven by the server-side CDP browser host (a real headless Chromium). The
-// response contract the pi tools expect is preserved byte-for-byte:
-//   { ok: true, data: <verb-shaped> }  /  { ok: false, error }
-// When Chromium is unavailable, navigate/get-text fall back to reading mode
-// (browser-host/reader.ts); interactive verbs return a clear error.
 
 const ALLOWED_VERBS = new Set([
   "navigate",
@@ -184,12 +160,6 @@ async function fallbackVerb(verb: string, payload: Record<string, unknown>): Pro
   return { ok: false, error: UNAVAILABLE_ERROR };
 }
 
-// ─── GET /api/agent/browser/fetch ─────────────────────────────────────────
-//
-// Reading-mode endpoint: always offers sanitized text + markdown even when the
-// CDP host is unavailable. The fetch+sanitize core lives in
-// browser-host/reader.ts so we never SSRF into private nets.
-
 export async function handleBrowserFetch(request: Request): Promise<Response> {
   const raw = new URL(request.url).searchParams.get("url");
   if (!raw) return Response.json({ error: "url is required" }, { status: 400 });
@@ -234,11 +204,6 @@ export async function handleBrowserFrame(): Promise<Response> {
     });
   }
 }
-
-// ─── POST /api/agent/browser/input ────────────────────────────────────────
-//
-// Input forwarding for the visible browser panel; replays pointer/key events
-// into the headless Chromium over CDP.
 
 type InputBody =
   | ({ kind: "mouse" } & Omit<MouseInput, "type"> & { type: MouseInput["type"] })

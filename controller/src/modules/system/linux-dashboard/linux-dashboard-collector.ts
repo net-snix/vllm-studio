@@ -2,8 +2,9 @@ import { connect } from "node:net";
 import { arch, cpus, hostname, loadavg, platform, release, totalmem, uptime } from "node:os";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { Effect } from "effect";
 import type { AppContext } from "../../../app-context";
-import { runCommand } from "../../../core/command";
+import { realProcessRunner, type CommandResult } from "../../../core/command";
 import { getGpuInfo } from "../platform/gpu";
 import { resolveNvidiaSmiBinary } from "../platform/smi-tools";
 import { collectDisks } from "./linux-dashboard-disks";
@@ -43,7 +44,10 @@ const clampPercent = (value: number): number => Math.max(0, Math.min(100, value)
 
 const roundOne = (value: number): number => Math.round(value * 10) / 10;
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+type DashboardCommandRunner = (command: string, args: string[], timeoutMs: number) => CommandResult;
+
+const runDashboardCommand: DashboardCommandRunner = (command, args, timeoutMs) =>
+  realProcessRunner.runSync(command, args, { timeoutMs });
 
 const SLOW_SNAPSHOT_TTL_MS = 30_000;
 const DEFAULT_CPU_POWER_SAMPLE_TTL_MS = 60_000;
@@ -54,7 +58,7 @@ export const parseCpuPowerSampleTtl = (value: string | undefined, fallback: numb
 };
 const CPU_POWER_SAMPLE_TTL_MS = parseCpuPowerSampleTtl(
   process.env["VLLM_STUDIO_CPU_POWER_SAMPLE_TTL_MS"],
-  DEFAULT_CPU_POWER_SAMPLE_TTL_MS
+  DEFAULT_CPU_POWER_SAMPLE_TTL_MS,
 );
 const CPU_ENERGY_HELPER =
   process.env["VLLM_STUDIO_CPU_ENERGY_HELPER"] ?? "/usr/local/libexec/vllm-studio/read-cpu-energy";
@@ -78,15 +82,15 @@ type CpuIdentity = {
 export const parseCpuInfoIdentity = (
   cpuinfo: string,
   fallbackModel: string | null,
-  threads: number
+  threads: number,
 ): CpuIdentity => {
   const entries = cpuinfo.split(/\n\s*\n/).map((entry) =>
     Object.fromEntries(
       entry
         .split("\n")
         .map((line) => line.split(":", 2).map((part) => part.trim()))
-        .filter((parts): parts is [string, string] => Boolean(parts[0]) && parts[1] !== undefined)
-    )
+        .filter((parts): parts is [string, string] => Boolean(parts[0]) && parts[1] !== undefined),
+    ),
   );
   const model =
     entries.find((entry) => entry["model name"])?.["model name"] ||
@@ -185,7 +189,7 @@ const readCpuEnergySample = (): CpuEnergySample | null => {
 };
 
 export const readCpuEnergyHelperSample = (
-  commandRunner: typeof runCommand = runCommand,
+  commandRunner: DashboardCommandRunner = runDashboardCommand,
   helperPath: string = CPU_ENERGY_HELPER,
 ): CpuEnergySample | null => {
   if (!existsSync(helperPath)) return null;
@@ -211,7 +215,7 @@ export const parseCpuEnergyHelperOutput = (output: string): CpuEnergySample | nu
 const calculateCpuPowerWatts = (
   first: CpuEnergySample | null,
   second: CpuEnergySample | null,
-  elapsedMs: number
+  elapsedMs: number,
 ): number | null => {
   if (!first || !second || elapsedMs <= 0) return null;
   let delta = second.energyMicrojoules - first.energyMicrojoules;
@@ -249,30 +253,31 @@ const collectCpuPowerWatts = (): number | null => {
   return powerDrawWatts;
 };
 
-const collectCpu = async (): Promise<LinuxDashboardSnapshot["cpu"]> => {
-  const cores = cpus().length || 1;
-  const first = readCpuSample();
-  let usage: number | null = null;
-  if (first) {
-    await sleep(250);
-    const second = readCpuSample();
-    if (second) {
-      const idleDelta = second.idle - first.idle;
-      const totalDelta = second.total - first.total;
-      if (totalDelta > 0) {
-        usage = roundOne(clampPercent(((totalDelta - idleDelta) / totalDelta) * 100));
+const collectCpu = (): Effect.Effect<LinuxDashboardSnapshot["cpu"]> =>
+  Effect.gen(function* () {
+    const cores = cpus().length || 1;
+    const first = readCpuSample();
+    let usage: number | null = null;
+    if (first) {
+      yield* Effect.sleep(250);
+      const second = readCpuSample();
+      if (second) {
+        const idleDelta = second.idle - first.idle;
+        const totalDelta = second.total - first.total;
+        if (totalDelta > 0) {
+          usage = roundOne(clampPercent(((totalDelta - idleDelta) / totalDelta) * 100));
+        }
       }
     }
-  }
 
-  const load1 = loadavg()[0] ?? 0;
-  return {
-    usage_percent: usage,
-    cores,
-    load_percent_1m: cores > 0 ? roundOne((load1 / cores) * 100) : null,
-    power_draw_watts: collectCpuPowerWatts(),
-  };
-};
+    const load1 = loadavg()[0] ?? 0;
+    return {
+      usage_percent: usage,
+      cores,
+      load_percent_1m: cores > 0 ? roundOne((load1 / cores) * 100) : null,
+      power_draw_watts: collectCpuPowerWatts(),
+    };
+  });
 
 const parseMemInfo = (): LinuxDashboardSnapshot["memory"] => {
   const meminfo = readText("/proc/meminfo");
@@ -326,10 +331,10 @@ const collectNvidiaGpus = (): DashboardGpu[] => {
     "power.draw",
     "power.limit",
   ].join(",");
-  const result = runCommand(
+  const result = runDashboardCommand(
     nvidiaSmi,
     [`--query-gpu=${query}`, "--format=csv,noheader,nounits"],
-    5_000
+    5_000,
   );
   if (result.status !== 0 || !result.stdout) return [];
 
@@ -391,38 +396,40 @@ const collectNvidiaGpus = (): DashboardGpu[] => {
   });
 };
 
-const collectGpus = (): DashboardGpu[] => {
-  const nvidia = collectNvidiaGpus();
-  if (nvidia.length > 0) return nvidia;
+const collectGpus = (): Effect.Effect<DashboardGpu[]> =>
+  Effect.gen(function* () {
+    const nvidia = collectNvidiaGpus();
+    if (nvidia.length > 0) return nvidia;
 
-  return getGpuInfo().map((gpu) => {
-    const total = gpu.memory_total_mb * 1024 * 1024;
-    const used = gpu.memory_used_mb * 1024 * 1024;
-    const memoryPercent = total > 0 ? roundOne((used / total) * 100) : null;
-    let status: LinuxDashboardHealth = "ok";
-    if (gpu.temp_c >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
-    else if (gpu.temp_c >= 82 || (memoryPercent ?? 0) >= 95) status = "warning";
+    const gpuInfo = yield* getGpuInfo();
+    return gpuInfo.map((gpu) => {
+      const total = gpu.memory_total_mb * 1024 * 1024;
+      const used = gpu.memory_used_mb * 1024 * 1024;
+      const memoryPercent = total > 0 ? roundOne((used / total) * 100) : null;
+      let status: LinuxDashboardHealth = "ok";
+      if (gpu.temp_c >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
+      else if (gpu.temp_c >= 82 || (memoryPercent ?? 0) >= 95) status = "warning";
 
-    return {
-      index: gpu.index,
-      name: gpu.name,
-      uuid: null,
-      pci_bus_id: null,
-      utilization_percent: gpu.utilization_pct,
-      memory_total_bytes: total,
-      memory_used_bytes: used,
-      memory_used_percent: memoryPercent,
-      temperature_c: gpu.temp_c,
-      memory_temperature_c: null,
-      memory_temperature_unavailable_reason:
-        "NVIDIA SMI was unavailable and this GPU source does not report VRAM temperature.",
-      fan_percent: null,
-      power_draw_watts: gpu.power_draw,
-      power_limit_watts: gpu.power_limit,
-      status,
-    };
+      return {
+        index: gpu.index,
+        name: gpu.name,
+        uuid: null,
+        pci_bus_id: null,
+        utilization_percent: gpu.utilization_pct,
+        memory_total_bytes: total,
+        memory_used_bytes: used,
+        memory_used_percent: memoryPercent,
+        temperature_c: gpu.temp_c,
+        memory_temperature_c: null,
+        memory_temperature_unavailable_reason:
+          "NVIDIA SMI was unavailable and this GPU source does not report VRAM temperature.",
+        fan_percent: null,
+        power_draw_watts: gpu.power_draw,
+        power_limit_watts: gpu.power_limit,
+        status,
+      };
+    });
   });
-};
 
 const readHwmon = (): { fans: DashboardFan[]; thermals: DashboardThermal[] } => {
   const root = "/sys/class/hwmon";
@@ -469,87 +476,107 @@ const readHwmon = (): { fans: DashboardFan[]; thermals: DashboardThermal[] } => 
   };
 };
 
-const checkPort = (port: number, timeoutMs = 600): Promise<boolean> =>
-  new Promise((resolve) => {
+const checkPort = (port: number, timeoutMs = 600): Effect.Effect<boolean> =>
+  Effect.callback<boolean>((resume) => {
     const socket = connect({ host: "127.0.0.1", port });
     let settled = false;
+    const cleanup = (): void => {
+      socket.removeListener("connect", onConnect);
+      socket.removeListener("timeout", onTimeout);
+      socket.removeListener("error", onError);
+      socket.destroy();
+    };
     const done = (result: boolean): void => {
       if (settled) return;
       settled = true;
-      socket.destroy();
-      resolve(result);
+      cleanup();
+      resume(Effect.succeed(result));
     };
+    const onConnect = (): void => done(true);
+    const onTimeout = (): void => done(false);
+    const onError = (): void => done(false);
     socket.setTimeout(timeoutMs);
-    socket.once("connect", () => done(true));
-    socket.once("timeout", () => done(false));
-    socket.once("error", () => done(false));
+    socket.once("connect", onConnect);
+    socket.once("timeout", onTimeout);
+    socket.once("error", onError);
+    return Effect.sync(cleanup);
   });
 
 const checkSystemdService = (serviceName: string): boolean =>
-  runCommand("systemctl", ["is-active", "--quiet", serviceName], 1_000).status === 0;
+  runDashboardCommand("systemctl", ["is-active", "--quiet", serviceName], 1_000).status === 0;
 
-const collectServices = async (inferencePort: number): Promise<DashboardService[]> => {
-  const portServices = [
-    {
-      id: "model",
-      name: "Model API",
-      port: inferencePort,
-      endpoint: `:${inferencePort}`,
-      description: "active inference endpoint",
-    },
-    {
-      id: "studio",
-      name: "vLLM Studio",
-      port: 3000,
-      endpoint: ":3000",
-      description: "remote frontend",
-    },
-    { id: "grafana", name: "Grafana", port: 3030, endpoint: ":3030", description: "monitoring UI" },
-    {
-      id: "prometheus",
-      name: "Prometheus",
-      port: 9090,
-      endpoint: ":9090",
-      description: "metrics store",
-    },
-    {
-      id: "searxng",
-      name: "SearXNG",
-      port: 8081,
-      endpoint: ":8081",
-      description: "private search",
-    },
-    {
-      id: "infisical",
-      name: "Infisical",
-      port: 8082,
-      endpoint: ":8082",
-      description: "secrets UI",
-    },
-  ];
+const collectServices = (inferencePort: number): Effect.Effect<DashboardService[]> =>
+  Effect.gen(function* () {
+    const portServices = [
+      {
+        id: "model",
+        name: "Model API",
+        port: inferencePort,
+        endpoint: `:${inferencePort}`,
+        description: "active inference endpoint",
+      },
+      {
+        id: "studio",
+        name: "vLLM Studio",
+        port: 3000,
+        endpoint: ":3000",
+        description: "remote frontend",
+      },
+      {
+        id: "grafana",
+        name: "Grafana",
+        port: 3030,
+        endpoint: ":3030",
+        description: "monitoring UI",
+      },
+      {
+        id: "prometheus",
+        name: "Prometheus",
+        port: 9090,
+        endpoint: ":9090",
+        description: "metrics store",
+      },
+      {
+        id: "searxng",
+        name: "SearXNG",
+        port: 8081,
+        endpoint: ":8081",
+        description: "private search",
+      },
+      {
+        id: "infisical",
+        name: "Infisical",
+        port: 8082,
+        endpoint: ":8082",
+        description: "secrets UI",
+      },
+    ];
 
-  const checks = await Promise.all(portServices.map((service) => checkPort(service.port)));
-  const services: DashboardService[] = portServices.map((service, index) => ({
-    id: service.id,
-    name: service.name,
-    endpoint: service.endpoint,
-    description: service.description,
-    status: checks[index] ? "running" : "stopped",
-  }));
+    const checks = yield* Effect.all(
+      portServices.map((service) => checkPort(service.port)),
+      { concurrency: "unbounded" },
+    );
+    const services: DashboardService[] = portServices.map((service, index) => ({
+      id: service.id,
+      name: service.name,
+      endpoint: service.endpoint,
+      description: service.description,
+      status: checks[index] ? "running" : "stopped",
+    }));
 
-  services.push({
-    id: "lact",
-    name: "LACT",
-    endpoint: "socket",
-    description: "GPU control daemon",
-    status: checkSystemdService("lactd.service") ? "running" : "stopped",
+    services.push({
+      id: "lact",
+      name: "LACT",
+      endpoint: "socket",
+      description: "GPU control daemon",
+      status: checkSystemdService("lactd.service") ? "running" : "stopped",
+    });
+
+    return services;
   });
 
-  return services;
-};
-
 const collectContainers = (): { containers: DashboardContainer[]; docker_error: string | null } => {
-  const result = runCommand("docker", ["ps", "--format", "{{json .}}"], 2_000);
+  const result = runDashboardCommand("docker", ["ps", "--format", "{{json .}}"], 2_000);
   if (result.status !== 0) {
     return {
       containers: [],
@@ -592,20 +619,18 @@ type SlowSnapshot = {
 };
 
 let slowSnapshotCache: { value: SlowSnapshot; collectedAt: number } | null = null;
-let slowSnapshotInFlight: Promise<SlowSnapshot> | null = null;
 
-const collectSlowSnapshot = async (context: AppContext): Promise<SlowSnapshot> => {
-  const now = Date.now();
-  if (slowSnapshotCache && now - slowSnapshotCache.collectedAt < SLOW_SNAPSHOT_TTL_MS) {
-    return slowSnapshotCache.value;
-  }
-  if (slowSnapshotInFlight) return slowSnapshotInFlight;
+const collectSlowSnapshot = (context: AppContext): Effect.Effect<SlowSnapshot> =>
+  Effect.gen(function* () {
+    const now = Date.now();
+    if (slowSnapshotCache && now - slowSnapshotCache.collectedAt < SLOW_SNAPSHOT_TTL_MS) {
+      return slowSnapshotCache.value;
+    }
 
-  slowSnapshotInFlight = (async (): Promise<SlowSnapshot> => {
-    const [services, disks] = await Promise.all([
-      collectServices(context.config.inference_port),
-      Promise.resolve(collectDisks()),
-    ]);
+    const [services, disks] = yield* Effect.all(
+      [collectServices(context.config.inference_port), Effect.sync(collectDisks)],
+      { concurrency: "unbounded" },
+    );
     const { fans, thermals } = readHwmon();
     const { containers, docker_error } = collectContainers();
     const value = {
@@ -618,12 +643,7 @@ const collectSlowSnapshot = async (context: AppContext): Promise<SlowSnapshot> =
     };
     slowSnapshotCache = { value, collectedAt: Date.now() };
     return value;
-  })().finally(() => {
-    slowSnapshotInFlight = null;
   });
-
-  return slowSnapshotInFlight;
-};
 
 const buildAlerts = (snapshot: Omit<LinuxDashboardSnapshot, "alerts">): DashboardAlert[] => {
   const alerts: DashboardAlert[] = [];
@@ -635,7 +655,7 @@ const buildAlerts = (snapshot: Omit<LinuxDashboardSnapshot, "alerts">): Dashboar
     push(
       "info",
       "host",
-      `Dashboard is reading ${snapshot.host.platform}; Linux-only sensors are unavailable`
+      `Dashboard is reading ${snapshot.host.platform}; Linux-only sensors are unavailable`,
     );
   }
 
@@ -675,45 +695,49 @@ const buildAlerts = (snapshot: Omit<LinuxDashboardSnapshot, "alerts">): Dashboar
   return alerts;
 };
 
-export const collectLinuxDashboardSnapshot = async (
-  context: AppContext
-): Promise<LinuxDashboardSnapshot> => {
-  const [cpu, slowSnapshot] = await Promise.all([collectCpu(), collectSlowSnapshot(context)]);
-  const cpuIdentity = collectCpuIdentity();
-  const hostLoad = loadavg();
+export const collectLinuxDashboardSnapshot = (
+  context: AppContext,
+): Effect.Effect<LinuxDashboardSnapshot> =>
+  Effect.gen(function* () {
+    const [cpu, slowSnapshot, gpus] = yield* Effect.all(
+      [collectCpu(), collectSlowSnapshot(context), collectGpus()],
+      { concurrency: "unbounded" },
+    );
+    const cpuIdentity = collectCpuIdentity();
+    const hostLoad = loadavg();
 
-  const snapshotWithoutAlerts = {
-    collected_at: new Date().toISOString(),
-    host: {
-      hostname: hostname(),
-      platform: platform(),
-      kernel: release(),
-      arch: arch(),
-      uptime_seconds: Math.floor(uptime()),
-      load_average: [
-        roundOne(hostLoad[0] ?? 0),
-        roundOne(hostLoad[1] ?? 0),
-        roundOne(hostLoad[2] ?? 0),
-      ] as [number, number, number],
-      cpu_cores: cpu.cores,
-      cpu_model: cpuIdentity.model,
-      cpu_physical_cores: cpuIdentity.physicalCores,
-      cpu_threads: cpuIdentity.threads,
-      target: "controller-host" as const,
-    },
-    cpu,
-    memory: parseMemInfo(),
-    gpus: collectGpus(),
-    disks: slowSnapshot.disks,
-    fans: slowSnapshot.fans,
-    thermals: slowSnapshot.thermals,
-    services: slowSnapshot.services,
-    containers: slowSnapshot.containers,
-    docker_error: slowSnapshot.docker_error,
-  };
+    const snapshotWithoutAlerts = {
+      collected_at: new Date().toISOString(),
+      host: {
+        hostname: hostname(),
+        platform: platform(),
+        kernel: release(),
+        arch: arch(),
+        uptime_seconds: Math.floor(uptime()),
+        load_average: [
+          roundOne(hostLoad[0] ?? 0),
+          roundOne(hostLoad[1] ?? 0),
+          roundOne(hostLoad[2] ?? 0),
+        ] as [number, number, number],
+        cpu_cores: cpu.cores,
+        cpu_model: cpuIdentity.model,
+        cpu_physical_cores: cpuIdentity.physicalCores,
+        cpu_threads: cpuIdentity.threads,
+        target: "controller-host" as const,
+      },
+      cpu,
+      memory: parseMemInfo(),
+      gpus,
+      disks: slowSnapshot.disks,
+      fans: slowSnapshot.fans,
+      thermals: slowSnapshot.thermals,
+      services: slowSnapshot.services,
+      containers: slowSnapshot.containers,
+      docker_error: slowSnapshot.docker_error,
+    };
 
-  return {
-    ...snapshotWithoutAlerts,
-    alerts: buildAlerts(snapshotWithoutAlerts),
-  };
-};
+    return {
+      ...snapshotWithoutAlerts,
+      alerts: buildAlerts(snapshotWithoutAlerts),
+    };
+  });

@@ -8,14 +8,16 @@ import {
   type MouseEvent,
   type PointerEvent,
 } from "react";
-import { Check, ChevronDown } from "@/ui/icon-registry";
+import { Check, ChevronDown, Pin } from "@/ui/icon-registry";
 import type { AgentModel } from "@/features/agent/workspace/types";
 import { cx } from "@/ui/utils";
 
 type AgentModelPickerProps = {
   models: AgentModel[];
   selectedModel: string;
+  defaultModel?: string;
   onSelect: (id: string) => void;
+  onSetDefault?: (id: string) => void;
   loading: boolean;
 };
 
@@ -24,7 +26,9 @@ type ModelGroup = { key: string; name: string; models: AgentModel[] };
 export function AgentModelPicker({
   models,
   selectedModel,
+  defaultModel,
   onSelect,
+  onSetDefault,
   loading,
 }: AgentModelPickerProps) {
   const [open, setOpen] = useState(false);
@@ -92,7 +96,9 @@ export function AgentModelPicker({
             <ModelOptions
               models={groups[0]?.models ?? []}
               selectedModel={selectedModel}
+              defaultModel={defaultModel}
               onSelect={select}
+              onSetDefault={onSetDefault}
             />
           )}
           {groups.length > 1 && activeGroup ? (
@@ -105,7 +111,9 @@ export function AgentModelPicker({
               <ModelOptions
                 models={activeGroup.models}
                 selectedModel={selectedModel}
+                defaultModel={defaultModel}
                 onSelect={select}
+                onSetDefault={onSetDefault}
               />
             </div>
           ) : null}
@@ -138,7 +146,9 @@ function ModelPickerTrigger({
       onClick={onToggle}
       disabled={disabled}
       className={cx(
-        "group/model inline-flex !h-7 !min-h-7 !min-w-0 items-center justify-between gap-1 rounded-lg bg-transparent pl-2 pr-1.5 text-[length:var(--fs-md)] whitespace-nowrap text-(--hl2) transition-colors hover:bg-(--hover) hover:text-(--fg) active:translate-y-px disabled:opacity-60",
+        // Codex: the model control sits at the shared chat size (16px) with
+        // primary-strength text; only the chevron reads dim.
+        "group/model inline-flex !h-[30px] !min-h-[30px] !min-w-0 items-center justify-between gap-1 rounded-lg bg-transparent pl-2 pr-1.5 text-[length:var(--codex-chat-font-size)] whitespace-nowrap text-(--fg)/85 transition-colors hover:bg-(--hover) hover:text-(--fg) active:translate-y-px disabled:opacity-60",
         open && "bg-(--hover) text-(--fg)",
       )}
       title={notRunning ? `${title} is not running — launch it or pick a running model` : title}
@@ -146,7 +156,7 @@ function ModelPickerTrigger({
       aria-expanded={open}
       aria-haspopup="menu"
     >
-      <span className="max-w-[148px] truncate text-left">{label}</span>
+      <span className="max-w-[180px] truncate text-left">{label}</span>
       {notRunning ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-(--warn)" /> : null}
       <ChevronDown className="pointer-events-none h-3.5 w-3.5 shrink-0 text-(--dim)" />
     </button>
@@ -188,18 +198,24 @@ function ModelGroupOption({
 function ModelOptions({
   models,
   selectedModel,
+  defaultModel,
   onSelect,
+  onSetDefault,
 }: {
   models: AgentModel[];
   selectedModel: string;
+  defaultModel?: string;
   onSelect: (modelId: string) => void;
+  onSetDefault?: (modelId: string) => void;
 }) {
   return models.map((model) => (
     <ModelOption
       key={model.id}
       model={model}
       selected={model.id === selectedModel}
+      isDefault={model.id === defaultModel}
       onSelect={onSelect}
+      onSetDefault={onSetDefault}
     />
   ));
 }
@@ -207,29 +223,51 @@ function ModelOptions({
 function ModelOption({
   model,
   selected,
+  isDefault,
   onSelect,
+  onSetDefault,
 }: {
   model: AgentModel;
   selected: boolean;
+  isDefault: boolean;
   onSelect: (modelId: string) => void;
+  onSetDefault?: (modelId: string) => void;
 }) {
   const label = model.rawId || model.name;
   return (
-    <button
-      type="button"
-      role="menuitemradio"
-      aria-checked={selected}
-      onClick={() => onSelect(model.id)}
+    <div
       className={cx(
-        "flex min-h-8 w-full min-w-0 items-center gap-2 rounded-[10px] pl-2.5 pr-2.5 text-left text-[length:var(--fs-base)] text-(--fg) transition-colors hover:bg-(--hover) focus-visible:bg-(--hover) focus-visible:outline-none active:translate-y-px",
+        "flex min-h-8 w-full min-w-0 items-center rounded-[10px] text-[length:var(--fs-base)] text-(--fg) transition-colors hover:bg-(--hover)",
         selected && "bg-(--color-input)",
       )}
     >
-      <span className="min-w-0 flex-1 truncate" title={label}>
-        {label}
-      </span>
-      {selected ? <Check className="h-3.5 w-3.5 shrink-0 text-(--fg)" /> : null}
-    </button>
+      <button
+        type="button"
+        role="menuitemradio"
+        aria-checked={selected}
+        onClick={() => onSelect(model.id)}
+        className="flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-[10px] pl-2.5 text-left focus-visible:outline-none active:translate-y-px"
+      >
+        <span className="min-w-0 flex-1 truncate" title={label}>
+          {label}
+        </span>
+        {selected ? <Check className="h-3.5 w-3.5 shrink-0 text-(--fg)" /> : null}
+      </button>
+      {onSetDefault ? (
+        <button
+          type="button"
+          onClick={() => onSetDefault(model.id)}
+          aria-label={isDefault ? `${label} is the default model` : `Set ${label} as default model`}
+          title={isDefault ? "Default model" : "Set as default"}
+          className={cx(
+            "mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-(--dim) transition-colors hover:bg-(--active) hover:text-(--fg) focus-visible:outline-none",
+            isDefault && "text-(--fg)",
+          )}
+        >
+          <Pin className={cx("h-3.5 w-3.5", isDefault && "fill-current")} strokeWidth={1.5} />
+        </button>
+      ) : null}
+    </div>
   );
 }
 

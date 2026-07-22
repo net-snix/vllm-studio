@@ -1,18 +1,19 @@
-import { createWriteStream } from "node:fs";
+import { createWriteStream, readFileSync, readlinkSync } from "node:fs";
 import type { WriteStream } from "node:fs";
-import { createInterface } from "node:readline";
-import { Effect } from "effect";
+import { createHash } from "node:crypto";
+import { createInterface, type Interface } from "node:readline";
+import { Cause, Effect, Exit, Fiber, Queue } from "effect";
 import type { Config } from "../../../config/env";
-import { delay, delayEffect } from "../../../core/async";
 import {
   cleanupLogFiles,
   getLogCleanupDefaultsFromEnvironment,
   primaryLogPathFor,
 } from "../../../core/log-files";
 import type { Logger } from "../../../core/logger";
-import { realProcessRunner, type ProcessRunner } from "../../../core/command";
+import { realProcessRunner, type ProcessRunner, type SpawnedProcess } from "../../../core/command";
 import type { LaunchResult, ProcessInfo, Recipe } from "../../models/types";
 import type { EventManager } from "../../system/event-manager";
+import { getEngineSpec } from "../engine-spec";
 import { buildBackendCommand } from "./backend-builder";
 import { listProcessInventory, type ProcessInventoryEntry } from "./process-inventory";
 import {
@@ -26,15 +27,35 @@ import {
 } from "./process-utilities";
 
 export interface ProcessManager {
-  findInferenceProcess: (port: number) => Promise<ProcessInfo | null>;
-  confirmInferenceStopped: (port: number) => Promise<boolean>;
-  launchModel: (recipe: Recipe, options?: LaunchModelOptions) => Promise<LaunchResult>;
-  killProcess: (pid: number, force: boolean) => Promise<boolean>;
+  findInferenceProcess: (port: number) => Effect.Effect<ProcessInfo | null>;
+  confirmInferenceStopped: (port: number) => Effect.Effect<boolean>;
+  launchModel: (recipe: Recipe, options?: LaunchModelOptions) => Effect.Effect<LaunchResult>;
+  killProcess: (pid: number, force: boolean) => Effect.Effect<boolean>;
+  killOwnedProcess: (pid: number, force: boolean) => Effect.Effect<boolean>;
+  confirmOwnedProcessStopped: (pid: number) => Effect.Effect<boolean>;
+  shutdown: () => Effect.Effect<boolean>;
 }
 
 export interface LaunchModelOptions {
   readonly gpuUuids?: readonly string[];
 }
+
+interface LaunchResources {
+  readonly child: SpawnedProcess;
+  readonly pid: number | null;
+  readonly ownedPids: Set<number>;
+  readonly containerName: string | null;
+  readonly queue: Queue.Queue<string | null>;
+  readonly readers: Interface[];
+  readonly logStream: WriteStream | null;
+  readonly onChildError: (error: Error) => void;
+  readonly onChildExit: () => void;
+  readonly onLogError: ((error: Error) => void) | null;
+  logFiber: Fiber.Fiber<void, never> | null;
+  released: boolean;
+}
+
+const ownershipEnvironmentKey = "LOCAL_STUDIO_ENGINE_OWNER";
 
 const recipeForLaunch = (recipe: Recipe, port: number, options: LaunchModelOptions): Recipe => {
   const updated = { ...recipe, port };
@@ -47,147 +68,368 @@ const recipeForLaunch = (recipe: Recipe, port: number, options: LaunchModelOptio
   };
 };
 
-export const createProcessManager = (
+const dockerContainerNameForCommand = (command: string[]): string | null => {
+  const dockerIndex = command.findIndex(
+    (argument) => argument === "docker" || argument.endsWith("/docker"),
+  );
+  if (dockerIndex < 0 || command[dockerIndex + 1] !== "run") return null;
+  return extractFlag(command.slice(dockerIndex + 2), "--name") ?? null;
+};
+
+const ownershipMarkerFor = (config: Config): string =>
+  createHash("sha256")
+    .update(`${config.data_dir}\0${config.inference_port}`)
+    .digest("hex")
+    .slice(0, 32);
+
+const commandWithOwnershipMarker = (command: string[], marker: string): string[] => {
+  const dockerIndex = command.findIndex(
+    (argument) => argument === "docker" || argument.endsWith("/docker"),
+  );
+  if (dockerIndex < 0 || command[dockerIndex + 1] !== "run") return command;
+  const updated = [...command];
+  updated.splice(dockerIndex + 2, 0, "--env", `${ownershipEnvironmentKey}=${marker}`);
+  return updated;
+};
+
+const markedProcessInventory = (runner: ProcessRunner, marker: string): ProcessInventoryEntry[] => {
+  const inventory = listProcessInventory(runner).filter((entry) => !entry.stat.includes("Z"));
+  const expected = `${ownershipEnvironmentKey}=${marker}`;
+  if (process.platform === "linux") {
+    return inventory.filter((entry) => {
+      try {
+        return readFileSync(`/proc/${entry.pid}/environ`, "utf8").split("\0").includes(expected);
+      } catch {
+        return false;
+      }
+    });
+  }
+  const result = runner.runSync("ps", ["eww", "-axo", "pid=,command="]);
+  if (result.status !== 0) return [];
+  const markedPids = new Set(
+    result.stdout
+      .split("\n")
+      .filter((line) => line.includes(expected))
+      .map((line) => Number(line.trim().match(/^(\d+)/)?.[1]))
+      .filter((pid) => Number.isInteger(pid) && pid > 0),
+  );
+  return inventory.filter((entry) => markedPids.has(entry.pid));
+};
+
+const runDockerCommand = (
+  runner: ProcessRunner,
+  args: string[],
+): ReturnType<ProcessRunner["runSync"]> => {
+  const result = runner.runSync("docker", args);
+  return result.status === 0 ? result : runner.runSync("sudo", ["-n", "docker", ...args]);
+};
+
+const markedDockerContainerNames = (runner: ProcessRunner, marker: string): string[] => {
+  const containers = runDockerCommand(runner, ["ps", "--format", "{{.Names}}"]);
+  if (containers.status !== 0) return [];
+  const expected = `${ownershipEnvironmentKey}=${marker}`;
+  return containers.stdout
+    .split("\n")
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .filter((name) => {
+      const inspected = runDockerCommand(runner, [
+        "inspect",
+        "--format",
+        "{{range .Config.Env}}{{println .}}{{end}}",
+        name,
+      ]);
+      return inspected.status === 0 && inspected.stdout.split("\n").includes(expected);
+    });
+};
+
+const processGroupMembers = (runner: ProcessRunner, pgid: number | undefined): number[] =>
+  pgid === undefined
+    ? []
+    : listProcessInventory(runner)
+        .filter((entry) => entry.pgid === pgid)
+        .map((entry) => entry.pid);
+
+const removeStaleDockerContainerForCommand = (command: string[], runner: ProcessRunner): void => {
+  const name = dockerContainerNameForCommand(command);
+  if (!name) return;
+  const result = runner.runSync("docker", ["rm", "-f", name]);
+  if (result.status !== 0) runner.runSync("sudo", ["-n", "docker", "rm", "-f", name]);
+};
+
+const dockerContainerNameForPid = (pid: number, runner: ProcessRunner): string | null => {
+  if (process.platform !== "linux") return null;
+  let cgroup = "";
+  try {
+    cgroup = readFileSync(`/proc/${pid}/cgroup`, "utf8");
+  } catch {
+    return null;
+  }
+  const containerId = cgroup.match(/(?:docker[\/-]|cri-containerd-)([0-9a-f]{12,64})/i)?.[1];
+  if (!containerId) return null;
+  let result = runner.runSync("docker", ["ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"]);
+  if (result.status !== 0) {
+    result = runner.runSync("sudo", [
+      "-n",
+      "docker",
+      "ps",
+      "--no-trunc",
+      "--format",
+      "{{.ID}} {{.Names}}",
+    ]);
+  }
+  if (result.status !== 0) return null;
+  for (const line of result.stdout.split("\n")) {
+    const [id, name] = line.trim().split(/\s+/, 2);
+    if (id && (id.startsWith(containerId) || containerId.startsWith(id))) return name ?? null;
+  }
+  return null;
+};
+
+const processExecutablePath = (pid: number): string | null => {
+  if (process.platform !== "linux") return null;
+  try {
+    return readlinkSync(`/proc/${pid}/exe`);
+  } catch {
+    return null;
+  }
+};
+
+const processRuntimeEnvironment = (pid: number): Record<string, string> | null => {
+  if (process.platform !== "linux") return null;
+  try {
+    const environment: Record<string, string> = {};
+    for (const entry of readFileSync(`/proc/${pid}/environ`, "utf8").split("\0")) {
+      const separator = entry.indexOf("=");
+      if (separator <= 0) continue;
+      const key = entry.slice(0, separator);
+      if (key !== "CUDA_VISIBLE_DEVICES" && !key.startsWith("DS4_")) continue;
+      environment[key] = entry.slice(separator + 1);
+    }
+    return environment;
+  } catch {
+    return null;
+  }
+};
+
+const buildProcessManager = (
   config: Config,
   logger: Logger,
   eventManager?: EventManager,
   runner: ProcessRunner = realProcessRunner,
 ): ProcessManager => {
-  const findInferenceProcess = async (port: number): Promise<ProcessInfo | null> => {
-    const processes = listProcesses();
-    for (const proc of processes) {
-      const backend = detectBackend(proc.args);
-      if (!backend) {
-        continue;
-      }
-      const flagPort = extractFlag(proc.args, "--port");
-      if (flagPort && Number(flagPort) !== port) {
-        continue;
-      } else if (!flagPort && !(backend === "vllm" && port === 8000)) {
-        continue;
-      }
-      let modelPath = extractFlag(proc.args, "--model") || extractFlag(proc.args, "--model-path");
-      if (!modelPath && (backend === "llamacpp" || backend === "exllamav3" || backend === "ds4")) {
-        modelPath = extractFlag(proc.args, "-m");
-      }
-      if (!modelPath && backend === "sglang") {
-        const launchServerIndex = proc.args.findIndex(
-          (argument) => argument === "sglang.launch_server"
-        );
-        const candidate = launchServerIndex >= 0 ? proc.args[launchServerIndex + 1] : undefined;
-        if (candidate && !candidate.startsWith("-")) {
-          modelPath = candidate;
-        }
-      }
-      const servedModelName =
-        extractFlag(proc.args, "--served-model-name") ||
-        extractFlag(proc.args, "--alias") ||
-        extractFlag(proc.args, "-a");
+  const ownershipMarker = ownershipMarkerFor(config);
+  const activeResources = new Set<LaunchResources>();
+  const ownedProcessGroups = new Map<number, number>();
+  const ownedContainerNames = new Map<number, string>();
 
-      if (!modelPath) {
-        const serveIndex = proc.args.indexOf("serve");
-        if (serveIndex >= 0 && serveIndex + 1 < proc.args.length) {
-          const candidate = proc.args[serveIndex + 1];
-          if (candidate && !candidate.startsWith("-")) {
-            modelPath = candidate;
-          }
-        }
-      }
-
-      return {
-        pid: proc.pid,
-        backend,
-        model_path: modelPath ?? null,
-        port,
-        served_model_name: servedModelName ?? null,
+  const closeLogStream = (stream: WriteStream | null): Effect.Effect<void> => {
+    if (!stream || stream.closed || stream.destroyed) return Effect.void;
+    return Effect.callback<void>((resume) => {
+      let completed = false;
+      const cleanup = (): void => {
+        stream.removeListener("close", onClose);
+        stream.removeListener("error", onError);
       };
-    }
-    return null;
+      const finish = (): void => {
+        if (completed) return;
+        completed = true;
+        cleanup();
+        resume(Effect.void);
+      };
+      const onClose = (): void => finish();
+      const onError = (): void => finish();
+      stream.once("close", onClose);
+      stream.once("error", onError);
+      try {
+        stream.end();
+      } catch {
+        finish();
+      }
+      return Effect.sync(cleanup);
+    });
   };
 
-  const killProcessEffect = (pid: number, force: boolean): Effect.Effect<boolean> =>
+  const releaseResources = (resources: LaunchResources): Effect.Effect<void> => {
+    if (resources.released) return Effect.void;
+    resources.released = true;
+    return Effect.gen(function* () {
+      yield* Effect.sync(() => {
+        for (const reader of resources.readers) reader.close();
+        if (resources.logStream && resources.onLogError) {
+          resources.logStream.removeListener("error", resources.onLogError);
+        }
+        const child = resources.child as unknown as {
+          removeListener?: (event: string, listener: unknown) => void;
+        };
+        child.removeListener?.("error", resources.onChildError);
+        child.removeListener?.("exit", resources.onChildExit);
+      });
+      yield* Queue.shutdown(resources.queue);
+      yield* closeLogStream(resources.logStream);
+      activeResources.delete(resources);
+    });
+  };
+
+  const stopResourcesForPid = (pid: number): Effect.Effect<void> =>
+    Effect.forEach(
+      [...activeResources].filter((resources) => resources.pid === pid),
+      (resources) => {
+        Queue.offerUnsafe(resources.queue, null);
+        return resources.logFiber
+          ? Fiber.interrupt(resources.logFiber).pipe(Effect.asVoid)
+          : releaseResources(resources);
+      },
+      { discard: true },
+    );
+
+  const findInferenceProcess = (port: number): Effect.Effect<ProcessInfo | null> =>
+    Effect.sync(() => {
+      const processes = listProcesses();
+      for (const proc of processes) {
+        const backend = detectBackend(proc.args);
+        if (!backend) {
+          continue;
+        }
+        const flagPort = extractFlag(proc.args, "--port");
+        if (flagPort && Number(flagPort) !== port) {
+          continue;
+        } else if (!flagPort && !(backend === "vllm" && port === 8000)) {
+          continue;
+        }
+        const isForkRuntime = backend === "ds4" || backend === "exllamav3";
+        const modelPath = isForkRuntime
+          ? (extractFlag(proc.args, "--model") ??
+            extractFlag(proc.args, "--model-path") ??
+            extractFlag(proc.args, "-m"))
+          : getEngineSpec(backend).extractModelPath(proc.args);
+        const servedModelName = isForkRuntime
+          ? (extractFlag(proc.args, "--served-model-name") ??
+            extractFlag(proc.args, "--alias") ??
+            extractFlag(proc.args, "-a"))
+          : getEngineSpec(backend).extractServedModelName(proc.args);
+
+        return {
+          pid: proc.pid,
+          backend,
+          model_path: modelPath ?? null,
+          port,
+          served_model_name: servedModelName ?? null,
+          executable_path: processExecutablePath(proc.pid),
+          runtime_env: processRuntimeEnvironment(proc.pid),
+        };
+      }
+      return null;
+    });
+
+  const killProcessEffect = (
+    pid: number,
+    force: boolean,
+    ownership: "observed" | "owned" = "observed",
+  ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
-      if (!pidExists(pid)) {
+      const resolvedOwnership =
+        ownership === "owned" || ownedProcessGroups.has(pid) ? "owned" : "observed";
+      const ownedResources =
+        resolvedOwnership === "owned"
+          ? [...activeResources].filter(
+              (resources) => resources.pid === pid || resources.ownedPids.has(pid),
+            )
+          : [];
+      const targetPgid =
+        resolvedOwnership === "owned"
+          ? ownedProcessGroups.get(pid)
+          : listProcessInventory(runner).find((entry) => entry.pid === pid && entry.pgid === pid)
+              ?.pgid;
+      const groupMembers = (): number[] => processGroupMembers(runner, targetPgid);
+      const knownOwnedPids = new Set([
+        ...ownedResources.flatMap((resources) => [...resources.ownedPids]),
+        ...groupMembers(),
+      ]);
+      if (!pidExists(pid) && [...knownOwnedPids].every((candidate) => !pidExists(candidate))) {
+        ownedProcessGroups.delete(pid);
+        ownedContainerNames.delete(pid);
+        yield* stopResourcesForPid(pid);
         return true;
       }
       const tree = buildProcessTree();
       const children = new Set<number>();
-      collectChildren(tree, pid, children);
-      const allPids = [...children, pid];
+      const roots = knownOwnedPids.size > 0 ? knownOwnedPids : new Set([pid]);
+      for (const root of roots) collectChildren(tree, root, children);
+      const allPids = [...new Set([...children, ...roots])];
+      for (const resources of ownedResources) {
+        for (const candidate of allPids) resources.ownedPids.add(candidate);
+      }
 
-      // Docker-backed recipes often leave the actual server inside a container whose
-      // host process tree does not reliably die when the docker CLI process is
-      // signalled. Stop/kill the named container first, then signal the process tree.
-      stopDockerContainersForProcesses(allPids, force);
+      stopDockerContainersForProcesses(allPids, force, resolvedOwnership);
 
       const signal = force ? "SIGKILL" : "SIGTERM";
       for (const childPid of allPids) {
         sendSignal(childPid, signal);
       }
 
+      const currentPids = (): number[] => [...new Set([...allPids, ...groupMembers()])];
+      const allStopped = (): boolean => currentPids().every((candidate) => !pidExists(candidate));
       const deadline = Date.now() + (force ? 15_000 : 10_000);
       while (Date.now() < deadline) {
-        if (!pidExists(pid)) {
+        if (allStopped()) {
           break;
         }
-        yield* delayEffect(250);
+        yield* Effect.sleep(250);
       }
 
-      if (pidExists(pid)) {
-        stopDockerContainersForProcesses(allPids, true);
-        if (!sendSignal(pid, "SIGKILL")) {
-          return false;
+      if (!allStopped()) {
+        stopDockerContainersForProcesses(allPids, true, resolvedOwnership);
+        for (const candidate of currentPids()) {
+          if (pidExists(candidate)) sendSignal(candidate, "SIGKILL");
         }
         const finalDeadline = Date.now() + 5_000;
         while (Date.now() < finalDeadline) {
-          if (!pidExists(pid)) {
+          if (allStopped()) {
             break;
           }
-          yield* delayEffect(250);
+          yield* Effect.sleep(250);
         }
       }
 
-      yield* delayEffect(force ? 500 : 1000);
-      return !pidExists(pid);
+      yield* Effect.sleep(force ? 500 : 1000);
+      const stopped = allStopped();
+      if (stopped) {
+        ownedProcessGroups.delete(pid);
+        ownedContainerNames.delete(pid);
+        yield* stopResourcesForPid(pid);
+      }
+      return stopped;
     });
 
-  const killProcess = (pid: number, force: boolean): Promise<boolean> =>
-    Effect.runPromise(killProcessEffect(pid, force));
-
-  const stopDockerContainersForProcesses = (pids: number[], force: boolean): void => {
+  const stopDockerContainersForProcesses = (
+    pids: number[],
+    force: boolean,
+    ownership: "observed" | "owned",
+  ): void => {
     const pidSet = new Set(pids);
     const names = new Set<string>();
-    const inferencePorts = new Set<number>();
     const processes = listProcesses();
+
+    if (ownership === "owned") {
+      for (const pid of pidSet) {
+        const name = ownedContainerNames.get(pid);
+        if (name) names.add(name);
+      }
+    }
 
     for (const proc of processes) {
       if (!pidSet.has(proc.pid)) continue;
-      const port = Number(extractFlag(proc.args, "--port"));
-      if (Number.isFinite(port) && port > 0) inferencePorts.add(port);
-
+      if (ownership === "observed") {
+        const cgroupName = dockerContainerNameForPid(proc.pid, runner);
+        if (cgroupName) names.add(cgroupName);
+      }
       const dockerIndex = proc.args.findIndex(
         (argument) => argument === "docker" || argument.endsWith("/docker"),
       );
       if (dockerIndex < 0 || proc.args[dockerIndex + 1] !== "run") continue;
       const name = extractFlag(proc.args.slice(dockerIndex + 2), "--name");
       if (name) names.add(name);
-    }
-
-    // With Docker + host process visibility, the Python server process is often
-    // parented under containerd-shim rather than the `docker run` CLI process. If
-    // `findInferenceProcess()` found the in-container Python PID, match the
-    // sibling docker-run command by inference port so the container is stopped too.
-    if (inferencePorts.size > 0) {
-      for (const proc of processes) {
-        const dockerIndex = proc.args.findIndex(
-          (argument) => argument === "docker" || argument.endsWith("/docker"),
-        );
-        if (dockerIndex < 0 || proc.args[dockerIndex + 1] !== "run") continue;
-        const dockerPort = Number(extractFlag(proc.args, "--port"));
-        if (!inferencePorts.has(dockerPort)) continue;
-        const name = extractFlag(proc.args.slice(dockerIndex + 2), "--name");
-        if (name) names.add(name);
-      }
     }
 
     for (const name of names) {
@@ -203,19 +445,6 @@ export const createProcessManager = (
     }
   };
 
-  const removeStaleDockerContainerForCommand = (command: string[]): void => {
-    const dockerIndex = command.findIndex(
-      (argument) => argument === "docker" || argument.endsWith("/docker"),
-    );
-    if (dockerIndex < 0 || command[dockerIndex + 1] !== "run") return;
-    const name = extractFlag(command.slice(dockerIndex + 2), "--name");
-    if (!name) return;
-    const result = runner.runSync("docker", ["rm", "-f", name]);
-    if (result.status !== 0) {
-      runner.runSync("sudo", ["-n", "docker", "rm", "-f", name]);
-    }
-  };
-
   const sendSignal = (pid: number, signal: NodeJS.Signals): boolean => {
     try {
       process.kill(pid, signal);
@@ -226,214 +455,294 @@ export const createProcessManager = (
     }
   };
 
-  const isOrphanedInferenceWorker = (entry: ProcessInventoryEntry): boolean => {
-    if (entry.ppid !== 1 || entry.stat.includes("Z")) {
-      return false;
-    }
-    return entry.command.includes("VLLM::Worker");
-  };
+  const confirmInferenceStopped = (port: number): Effect.Effect<boolean> =>
+    findInferenceProcess(port).pipe(Effect.map((running) => running === null));
 
-  const cleanupOrphanedInferenceWorkersEffect = (reason: string): Effect.Effect<number> =>
+  const cleanupMarkedOwnedProcesses = (): Effect.Effect<boolean> =>
     Effect.gen(function* () {
-      const workers = listProcessInventory(runner).filter(isOrphanedInferenceWorker);
-      if (workers.length === 0) {
-        return 0;
+      const marked = markedProcessInventory(runner, ownershipMarker);
+      for (const entry of marked) {
+        const root = entry.pgid > 0 ? entry.pgid : entry.pid;
+        ownedProcessGroups.set(root, root);
+        const containerName = dockerContainerNameForPid(entry.pid, runner);
+        if (containerName) ownedContainerNames.set(root, containerName);
       }
-
-      for (const worker of workers) {
-        logger.warn("Killing orphaned inference worker", {
-          pid: worker.pid,
-          reason,
-          command: worker.command,
-        });
-        sendSignal(worker.pid, "SIGTERM");
-      }
-
-      const deadline = Date.now() + 2_000;
-      while (Date.now() < deadline && workers.some((worker) => pidExists(worker.pid))) {
-        yield* delayEffect(200);
-      }
-
-      for (const worker of workers) {
-        if (pidExists(worker.pid)) {
-          logger.warn("Force killing orphaned inference worker", {
-            pid: worker.pid,
-            reason,
-            command: worker.command,
-          });
-          sendSignal(worker.pid, "SIGKILL");
-        }
-      }
-
-      return workers.length;
+      const containers = markedDockerContainerNames(runner, ownershipMarker);
+      const containersStopped = containers.map(
+        (name) => runDockerCommand(runner, ["kill", name]).status === 0,
+      );
+      const processesStopped = yield* Effect.forEach([...ownedProcessGroups.keys()], (pid) =>
+        killProcessEffect(pid, true, "owned"),
+      );
+      if (![...containersStopped, ...processesStopped].every(Boolean)) return false;
+      return (
+        markedProcessInventory(runner, ownershipMarker).length === 0 &&
+        markedDockerContainerNames(runner, ownershipMarker).length === 0
+      );
     });
 
-  const cleanupOrphanedInferenceWorkers = (reason: string): Promise<number> =>
-    Effect.runPromise(cleanupOrphanedInferenceWorkersEffect(reason));
-
-  const confirmInferenceStopped = async (port: number): Promise<boolean> => {
-    await cleanupOrphanedInferenceWorkers("confirm-stopped");
-    const process = await findInferenceProcess(port);
-    return process === null && !listProcessInventory(runner).some(isOrphanedInferenceWorker);
-  };
-
-  const launchModel = async (
+  const launchModel = (
     recipe: Recipe,
     options: LaunchModelOptions = {},
-  ): Promise<LaunchResult> => {
-    const updatedRecipe = recipeForLaunch(recipe, config.inference_port, options);
-    let command: string[] | null = null;
-    try {
-      command = buildBackendCommand(updatedRecipe, config, options.gpuUuids !== undefined);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        success: false,
-        pid: null,
-        message,
-        log_file: primaryLogPathFor(config.data_dir, updatedRecipe.id),
-      };
-    }
-    if (!command) {
-      return {
-        success: false,
-        pid: null,
-        message: "Invalid launch command",
-        log_file: primaryLogPathFor(config.data_dir, updatedRecipe.id),
-      };
-    }
-
-    await cleanupOrphanedInferenceWorkers("before-launch");
-    removeStaleDockerContainerForCommand(command);
-
-    const logFile = primaryLogPathFor(config.data_dir, updatedRecipe.id);
-    // Best-effort retention to prevent unbounded growth over long-running installs.
-    cleanupLogFiles(config.data_dir, {
-      ...getLogCleanupDefaultsFromEnvironment(),
-      excludePaths: new Set([logFile]),
-    });
-    const env = buildEnvironment(updatedRecipe, config);
-
-    try {
-      const entry = command[0];
-      if (!entry) {
-        return {
-          success: false,
-          pid: null,
-          message: "Invalid launch command",
-          log_file: logFile,
-        };
-      }
-      let spawnError: string | null = null;
-
-      const child = runner.spawnDetached(entry, command.slice(1), { env, stdio: "pipe" });
-
-      child.on("error", (error) => {
-        spawnError = String(error);
-      });
-
-      let logStream: WriteStream | null = null;
+  ): Effect.Effect<LaunchResult> => {
+    let spawnedPid: number | null = null;
+    let spawnedResources: LaunchResources | null = null;
+    return Effect.gen(function* () {
+      const updatedRecipe = recipeForLaunch(recipe, config.inference_port, options);
+      let command: string[] | null = null;
       try {
-        logStream = createWriteStream(logFile, { flags: "a" });
-      } catch (logError) {
-        logger.warn("Failed to open log file", {
-          error: String(logError),
-        });
-      }
-
-      // Keep a rolling tail of the process output. Launch logs stream live to
-      // subscribers of `logs:<recipeId>`, but a fast-failing launch (e.g. an
-      // argparse "invalid choice" error) exits before the UI subscribes to that
-      // channel, so the live stream drops them — only the log file keeps them.
-      // We replay this tail in the failure result so the UI shows WHY a launch
-      // died instead of a bare "Process exited early".
-      const recentOutput: string[] = [];
-      const captureLine = (line: string): void => {
-        recentOutput.push(line);
-        if (recentOutput.length > 60) recentOutput.shift();
-        if (logStream) {
-          logStream.write(line + "\n");
-        }
-        if (eventManager) {
-          eventManager.publishLogLine(updatedRecipe.id, line).catch(() => {});
-        }
-      };
-
-      if (child.stdout) {
-        createInterface({ input: child.stdout, crlfDelay: Infinity }).on("line", captureLine);
-      }
-
-      if (child.stderr) {
-        createInterface({ input: child.stderr, crlfDelay: Infinity }).on("line", captureLine);
-      }
-
-      child.on("exit", () => {
-        if (logStream) {
-          logStream.end();
-        }
-      });
-
-      child.unref();
-
-      await delay(3000);
-      if (spawnError) {
-        if (logStream) {
-          logStream.end();
-        }
-        return {
-          success: false,
-          pid: null,
-          message: spawnError,
-          log_file: logFile,
-        };
-      }
-      if (child.exitCode !== null) {
-        if (logStream) {
-          logStream.end();
-        }
-        // Surface the tail of the process output so the failure is diagnosable
-        // from the UI (e.g. an invalid CLI flag, a missing kernel/import) rather
-        // than a bare "exited early".
-        const tail = recentOutput
-          .slice(-20)
-          .filter((line) => line.trim().length > 0)
-          .join("\n");
-        const message = tail
-          ? `Process exited early (code ${child.exitCode}):\n${tail}`
-          : `Process exited early (code ${child.exitCode})`;
-        if (eventManager) {
-          void eventManager
-            .publishLaunchProgress(updatedRecipe.id, "error", message)
-            .catch(() => {});
-        }
+        command = buildBackendCommand(updatedRecipe, config, options.gpuUuids !== undefined);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         return {
           success: false,
           pid: null,
           message,
+          log_file: primaryLogPathFor(config.data_dir, updatedRecipe.id),
+        };
+      }
+      if (!command) {
+        return {
+          success: false,
+          pid: null,
+          message: "Invalid launch command",
+          log_file: primaryLogPathFor(config.data_dir, updatedRecipe.id),
+        };
+      }
+
+      if (!(yield* cleanupMarkedOwnedProcesses())) {
+        return {
+          success: false,
+          pid: null,
+          message: "Owned inference workers are still stopping",
+          log_file: primaryLogPathFor(config.data_dir, updatedRecipe.id),
+        };
+      }
+      command = commandWithOwnershipMarker(command, ownershipMarker);
+      removeStaleDockerContainerForCommand(command, runner);
+
+      const logFile = primaryLogPathFor(config.data_dir, updatedRecipe.id);
+      cleanupLogFiles(config.data_dir, {
+        ...getLogCleanupDefaultsFromEnvironment(),
+        excludePaths: new Set([logFile]),
+      });
+      const env = buildEnvironment(updatedRecipe, config);
+      env[ownershipEnvironmentKey] = ownershipMarker;
+
+      try {
+        const entry = command[0];
+        if (!entry) {
+          return {
+            success: false,
+            pid: null,
+            message: "Invalid launch command",
+            log_file: logFile,
+          };
+        }
+        let spawnError: string | null = null;
+
+        const child = runner.spawnDetached(entry, command.slice(1), { env, stdio: "pipe" });
+        spawnedPid = child.pid ?? null;
+        if (spawnedPid) ownedProcessGroups.set(spawnedPid, spawnedPid);
+
+        let logStream: WriteStream | null = null;
+        try {
+          logStream = createWriteStream(logFile, { flags: "a" });
+        } catch (logError) {
+          logger.warn("Failed to open log file", {
+            error: String(logError),
+          });
+        }
+
+        const recentOutput: string[] = [];
+        const logQueue = yield* Queue.sliding<string | null>(256);
+        const readers: Interface[] = [];
+        const onChildError = (error: Error): void => {
+          spawnError = String(error);
+        };
+        const onChildExit = (): void => {
+          Queue.offerUnsafe(logQueue, null);
+        };
+        const onLogError = logStream
+          ? (error: Error): void =>
+              logger.warn("Inference log stream failed", { error: String(error) })
+          : null;
+        if (logStream && onLogError) logStream.on("error", onLogError);
+        const resources: LaunchResources = {
+          child,
+          pid: spawnedPid,
+          ownedPids: new Set(spawnedPid ? [spawnedPid] : []),
+          containerName: dockerContainerNameForCommand(command),
+          queue: logQueue,
+          readers,
+          logStream,
+          onChildError,
+          onChildExit,
+          onLogError,
+          logFiber: null,
+          released: false,
+        };
+        spawnedResources = resources;
+        if (spawnedPid && resources.containerName) {
+          ownedContainerNames.set(spawnedPid, resources.containerName);
+        }
+        activeResources.add(resources);
+        resources.logFiber = yield* Effect.gen(function* () {
+          while (true) {
+            const line = yield* Queue.take(logQueue);
+            if (line === null) return;
+            if (eventManager) yield* eventManager.publishLogLine(updatedRecipe.id, line);
+          }
+        }).pipe(
+          Effect.ensuring(releaseResources(resources)),
+          Effect.forkDetach({ startImmediately: true }),
+        );
+        const captureLine = (line: string): void => {
+          recentOutput.push(line);
+          if (recentOutput.length > 60) recentOutput.shift();
+          if (logStream) {
+            try {
+              logStream.write(line + "\n");
+            } catch (error) {
+              logger.warn("Inference log write failed", { error: String(error) });
+            }
+          }
+          Queue.offerUnsafe(logQueue, line);
+        };
+
+        if (child.stdout) {
+          const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+          reader.on("line", captureLine);
+          readers.push(reader);
+        }
+
+        if (child.stderr) {
+          const reader = createInterface({ input: child.stderr, crlfDelay: Infinity });
+          reader.on("line", captureLine);
+          readers.push(reader);
+        }
+
+        child.on("error", onChildError);
+        child.on("exit", onChildExit);
+
+        child.unref();
+
+        yield* Effect.sleep(3000);
+        if (spawnError) {
+          if (spawnedPid) yield* killProcessEffect(spawnedPid, true, "owned");
+          else if (resources.logFiber) yield* Fiber.interrupt(resources.logFiber);
+          return {
+            success: false,
+            pid: null,
+            message: spawnError,
+            log_file: logFile,
+          };
+        }
+        if (child.exitCode !== null) {
+          Queue.offerUnsafe(logQueue, null);
+          if (resources.logFiber) yield* Fiber.join(resources.logFiber);
+          const tail = recentOutput
+            .slice(-20)
+            .filter((line) => line.trim().length > 0)
+            .join("\n");
+          const message = tail
+            ? `Process exited early (code ${child.exitCode}):\n${tail}`
+            : `Process exited early (code ${child.exitCode})`;
+          if (eventManager) {
+            yield* eventManager.publishLaunchProgress(updatedRecipe.id, "error", message);
+          }
+          if (spawnedPid) yield* killProcessEffect(spawnedPid, true, "owned");
+          return {
+            success: false,
+            pid: null,
+            message,
+            log_file: logFile,
+          };
+        }
+        return {
+          success: true,
+          pid: spawnedPid,
+          message: "Process started",
+          log_file: logFile,
+        };
+      } catch (error) {
+        if (spawnedPid) yield* killProcessEffect(spawnedPid, true, "owned");
+        logger.error("Launch failed", { error: String(error) });
+        return {
+          success: false,
+          pid: null,
+          message: String(error),
           log_file: logFile,
         };
       }
-      return {
-        success: true,
-        pid: child.pid ?? null,
-        message: "Process started",
-        log_file: logFile,
-      };
-    } catch (error) {
-      logger.error("Launch failed", { error: String(error) });
-      return {
-        success: false,
-        pid: null,
-        message: String(error),
-        log_file: logFile,
-      };
-    }
+    }).pipe(
+      Effect.onExit((exit) => {
+        if (!Exit.isFailure(exit) || !Cause.hasInterrupts(exit.cause)) return Effect.void;
+        if (spawnedPid) return killProcessEffect(spawnedPid, true, "owned").pipe(Effect.asVoid);
+        if (!spawnedResources) return Effect.void;
+        Queue.offerUnsafe(spawnedResources.queue, null);
+        return spawnedResources.logFiber
+          ? Fiber.interrupt(spawnedResources.logFiber).pipe(Effect.asVoid)
+          : releaseResources(spawnedResources);
+      }),
+    );
   };
+
+  const shutdown = (): Effect.Effect<boolean> =>
+    Effect.gen(function* () {
+      const pids = [
+        ...new Set([
+          ...ownedProcessGroups.keys(),
+          ...[...activeResources]
+            .map((resources) => resources.pid)
+            .filter((pid): pid is number => pid !== null),
+        ]),
+      ];
+      const stopped = yield* Effect.forEach(pids, (pid) => killProcessEffect(pid, true, "owned"));
+      yield* Effect.forEach(
+        [...activeResources],
+        (resources) =>
+          resources.logFiber
+            ? Fiber.interrupt(resources.logFiber).pipe(Effect.asVoid)
+            : releaseResources(resources),
+        { discard: true },
+      );
+      return stopped.every(Boolean);
+    });
+
+  const confirmOwnedProcessStopped = (pid: number): Effect.Effect<boolean> =>
+    Effect.gen(function* () {
+      const resources = [...activeResources].filter((entry) => entry.pid === pid);
+      const pgid = ownedProcessGroups.get(pid);
+      const pids = new Set([
+        ...resources.flatMap((entry) => [...entry.ownedPids]),
+        ...processGroupMembers(runner, pgid),
+      ]);
+      if (pids.size === 0) pids.add(pid);
+      const stopped = [...pids].every((candidate) => !pidExists(candidate));
+      if (stopped) {
+        ownedProcessGroups.delete(pid);
+        ownedContainerNames.delete(pid);
+        yield* stopResourcesForPid(pid);
+      }
+      return stopped;
+    });
 
   return {
     findInferenceProcess,
     confirmInferenceStopped,
     launchModel,
-    killProcess,
+    killProcess: killProcessEffect,
+    killOwnedProcess: (pid, force) => killProcessEffect(pid, force, "owned"),
+    confirmOwnedProcessStopped,
+    shutdown,
   };
 };
+
+export const makeProcessManager = (
+  config: Config,
+  logger: Logger,
+  eventManager?: EventManager,
+  runner: ProcessRunner = realProcessRunner,
+): Effect.Effect<ProcessManager> =>
+  Effect.sync(() => buildProcessManager(config, logger, eventManager, runner));

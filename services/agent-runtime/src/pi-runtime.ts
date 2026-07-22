@@ -18,6 +18,8 @@ import {
   type RuntimeStartOptions,
 } from "./pi-runtime-helpers";
 import { refreshPiModels, resolvePiModelSelection } from "./pi-runtime-models";
+import { getProviderHub } from "./provider-hub";
+import { attachGoalDriver } from "./goal-driver";
 import { findRuntimeSessionForLookup, piStatusFromEvents } from "./pi-runtime-state";
 import { findSessionFile } from "./sessions-store";
 import { getGlobalSingleton } from "./instances";
@@ -47,7 +49,9 @@ function runtimeFingerprint(
 }
 
 export function shouldRestartAfterPromptError(error: unknown): boolean {
-  return error instanceof Error && /Cannot continue from message role: assistant/i.test(error.message);
+  return (
+    error instanceof Error && /Cannot continue from message role: assistant/i.test(error.message)
+  );
 }
 
 type PiResourceDiagnostic = {
@@ -127,6 +131,14 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
         const providerId = selectedModel.providerId ?? resolvedSelection.providerId;
         const backendModelId = selectedModel.rawId ?? resolvedSelection.modelId;
 
+        // One shared ModelRuntime across sessions and the provider hub: a
+        // sign-in completed in settings is live for the next turn, and
+        // hub-registered providers (including the e2e seam) resolve here.
+        const sharedModelRuntime = yield* Effect.tryPromise({
+          try: () => getProviderHub(),
+          catch: (error) => error,
+        });
+
         const sessionOptions = buildAgentSessionOptionsSync({ options });
         applyRuntimeEnvInjections(sessionOptions.envInjections);
         const sessionManager = SessionManager.create(resolvedCwd);
@@ -144,6 +156,7 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
                         createAgentSessionServices({
                           cwd,
                           agentDir,
+                          modelRuntime: sharedModelRuntime,
                           resourceLoaderOptions: {
                             noExtensions: true,
                             additionalSkillPaths: sessionOptions.skills,
@@ -153,7 +166,7 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
                         }),
                       catch: (error) => error,
                     });
-                    const model = services.modelRegistry.find(providerId, backendModelId);
+                    const model = services.modelRuntime.getModel(providerId, backendModelId);
                     if (!model) {
                       return yield* Effect.fail(
                         new Error(
@@ -435,6 +448,7 @@ class PiRuntimeManager {
     if (existing) return existing;
 
     const created = new PiSdkSession();
+    attachGoalDriver(created);
     this.sessions.set(sessionId, created);
     return created;
   }
@@ -443,12 +457,15 @@ class PiRuntimeManager {
     sessionId = DEFAULT_SESSION_ID,
     piSessionId?: string | null,
   ): { sessionId: string; session: PiAgentSession } {
-    return (
-      this.findSessionForLookup(sessionId, piSessionId) ?? {
-        sessionId,
-        session: this.getSession(sessionId),
-      }
-    );
+    const resolved = this.findSessionForLookup(sessionId, piSessionId);
+    if (resolved) return resolved;
+    const target = piSessionId?.trim();
+    const exactPiSessionId = this.sessions.get(sessionId)?.status.piSessionId;
+    const runtimeSessionId =
+      target && exactPiSessionId && exactPiSessionId !== target
+        ? `${sessionId}:${target}`
+        : sessionId;
+    return { sessionId: runtimeSessionId, session: this.getSession(runtimeSessionId) };
   }
 
   findSessionForLookup(

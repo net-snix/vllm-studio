@@ -5,6 +5,8 @@ import type { AssistantBlock, ChatMessage } from "@/features/agent/messages";
 import { SessionPaneBlockRouter } from "@/features/agent/ui/timeline/session-pane-block-router";
 import { ChevronDownIcon } from "@/ui/icons";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
+import { effectTimeout, type EffectTimer } from "@/lib/effect-timers";
+import { patchSessionView, readSessionView } from "@/features/agent/workspace/session-view-state";
 
 // Mirrors `groupAssistantBlocks`: a message renders something only if it has a
 // non-empty text block or any tool/thinking/event block. Assistant messages
@@ -27,6 +29,8 @@ type TimelineProps = {
   emptyPrompt?: boolean;
   stickToBottom?: boolean;
   onStickToBottomChange?: (value: boolean) => void;
+  viewKey: string | null;
+  viewAlias: string | null;
   /** Older history remains unread beyond the loaded tail (shows "Load earlier"). */
   hasEarlier?: boolean;
   onLoadEarlier?: () => Promise<void> | void;
@@ -62,15 +66,18 @@ export function Timeline({
   emptyPrompt = false,
   stickToBottom = true,
   onStickToBottomChange,
+  viewKey,
+  viewAlias,
   hasEarlier = false,
   onLoadEarlier,
 }: TimelineProps) {
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   const [bottom, setBottom] = useState<HTMLDivElement | null>(null);
 
+  const [mergeCache] = useState(() => new Map<string, MergedRun>());
   const visibleMessages = useMemo(
-    () => mergeConsecutiveAssistantMessages(messages.filter(messageRenders)),
-    [messages],
+    () => mergeConsecutiveAssistantMessages(messages.filter(messageRenders), mergeCache),
+    [messages, mergeCache],
   );
 
   useTimelineScrollEffects({
@@ -78,6 +85,8 @@ export function Timeline({
     bottom,
     stickToBottom,
     onStickToBottomChange,
+    viewKey,
+    viewAlias,
   });
 
   if (emptyPrompt) {
@@ -307,28 +316,72 @@ function formatPromptTime(timestamp?: string): string {
   );
 }
 
-function mergeConsecutiveAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
+type MergedRun = { segments: ChatMessage[]; merged: ChatMessage };
+const MERGE_CACHE_MAX_ENTRIES = 512;
+
+// Streaming commits a fresh `messages` array every animation frame, so this
+// merge runs per frame. The per-run cache keeps a merged turn's object
+// identity stable while its segments are unchanged — otherwise every settled
+// multi-segment turn would get a new identity each frame and its MemoMessage
+// would re-render for the whole stream.
+function mergeConsecutiveAssistantMessages(
+  messages: ChatMessage[],
+  cache: Map<string, MergedRun>,
+): ChatMessage[] {
   const merged: ChatMessage[] = [];
+  let run: ChatMessage[] = [];
+  const flushRun = () => {
+    if (run.length === 0) return;
+    if (run.length === 1) {
+      merged.push(run[0]);
+    } else {
+      merged.push(mergeRun(run, cache));
+    }
+    run = [];
+  };
   for (const message of messages) {
-    const previous = merged[merged.length - 1];
-    if (message.role !== "assistant" || previous?.role !== "assistant") {
-      merged.push(message);
+    if (message.role === "assistant") {
+      run.push(message);
       continue;
     }
-    merged[merged.length - 1] = {
-      ...previous,
-      // Anchor the merged id on the first segment (already unique). Concatenating
-      // each new segment's id grew the id — and thus the React key — on every
-      // tool boundary within a turn, remounting the whole assistant <article>
-      // mid-stream and collapsing expanded reasoning/tool disclosures.
-      id: previous.id,
-      text: [previous.text, message.text].filter(Boolean).join("\n"),
-      blocks: [...(previous.blocks ?? []), ...(message.blocks ?? [])],
-      streamCalls: [...(previous.streamCalls ?? []), ...(message.streamCalls ?? [])],
-      timestamp: message.timestamp ?? previous.timestamp,
-    };
+    flushRun();
+    merged.push(message);
   }
+  flushRun();
   return merged;
+}
+
+function mergeRun(run: ChatMessage[], cache: Map<string, MergedRun>): ChatMessage {
+  const first = run[0];
+  const cached = cache.get(first.id);
+  if (
+    cached &&
+    cached.segments.length === run.length &&
+    cached.segments.every((segment, index) => segment === run[index])
+  ) {
+    return cached.merged;
+  }
+  const combined: ChatMessage = {
+    ...first,
+    // Anchor the merged id on the first segment (already unique). Concatenating
+    // each new segment's id grew the id — and thus the React key — on every
+    // tool boundary within a turn, remounting the whole assistant <article>
+    // mid-stream and collapsing expanded reasoning/tool disclosures.
+    id: first.id,
+    text: run
+      .map((segment) => segment.text)
+      .filter(Boolean)
+      .join("\n"),
+    blocks: run.flatMap((segment) => segment.blocks ?? []),
+    streamCalls: run.flatMap((segment) => segment.streamCalls ?? []),
+    timestamp: run.reduce<string | undefined>(
+      (timestamp, segment) => segment.timestamp ?? timestamp,
+      undefined,
+    ),
+  };
+  if (cache.size >= MERGE_CACHE_MAX_ENTRIES) cache.clear();
+  cache.set(first.id, { segments: run, merged: combined });
+  return combined;
 }
 
 const AT_BOTTOM_THRESHOLD_PX = 80;
@@ -360,11 +413,15 @@ function useTimelineScrollEffects({
   bottom,
   stickToBottom,
   onStickToBottomChange,
+  viewKey,
+  viewAlias,
 }: {
   scroller: HTMLDivElement | null;
   bottom: HTMLDivElement | null;
   stickToBottom: boolean;
   onStickToBottomChange?: (value: boolean) => void;
+  viewKey: string | null;
+  viewAlias: string | null;
 }) {
   // Synchronous source of truth the handlers read. The parent's `stickToBottom`
   // prop is the eventually-consistent mirror (drives chrome and lets submit /
@@ -386,12 +443,33 @@ function useTimelineScrollEffects({
   useMountSubscription(() => {
     const el = scroller;
     if (!el) return;
+    const viewIdentity = viewKey ? { key: viewKey, aliases: viewAlias ? [viewAlias] : [] } : null;
+    const restored = viewIdentity ? readSessionView(window.localStorage, viewIdentity) : null;
+    let pendingRestoreTop = restored && !restored.stickToBottom ? restored.scrollTop : null;
+    let persistTimer: EffectTimer | null = null;
 
     const distanceFromBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight;
     const atBottom = () => distanceFromBottom() <= AT_BOTTOM_THRESHOLD_PX;
 
     const pinToBottom = () => {
+      pendingRestoreTop = null;
       el.scrollTop = el.scrollHeight;
+    };
+    const restoreScrollTop = () => {
+      if (pendingRestoreTop === null) return;
+      const maximum = Math.max(0, el.scrollHeight - el.clientHeight);
+      el.scrollTop = Math.min(pendingRestoreTop, maximum);
+      if (maximum >= pendingRestoreTop) pendingRestoreTop = null;
+    };
+    const persist = () => {
+      if (!viewIdentity) return;
+      persistTimer?.cancel();
+      persistTimer = effectTimeout(() => {
+        patchSessionView(window.localStorage, viewIdentity, {
+          scrollTop: el.scrollTop,
+          stickToBottom: stickRef.current,
+        });
+      }, 120);
     };
     let pinFrame: number | null = null;
     const schedulePinToBottom = () => {
@@ -405,24 +483,33 @@ function useTimelineScrollEffects({
       if (stickRef.current === next) return;
       stickRef.current = next;
       onChangeRef.current?.(next);
+      persist();
     };
 
     const onScroll = () => {
+      if (pendingRestoreTop !== null) {
+        restoreScrollTop();
+        if (pendingRestoreTop !== null) return;
+      }
       if (atBottom()) {
         // Briefly respect a deliberate scroll-up near the bottom instead of
         // immediately re-locking and fighting the user.
         if (Date.now() < userHoldUntilRef.current) return;
         setStick(true);
+        persist();
         return;
       }
       setStick(false);
+      persist();
     };
 
     const holdAndDetach = () => {
+      pendingRestoreTop = null;
       userHoldUntilRef.current = Date.now() + USER_HOLD_MS;
       setStick(false);
     };
     const releaseHold = () => {
+      pendingRestoreTop = null;
       userHoldUntilRef.current = 0;
     };
 
@@ -462,7 +549,8 @@ function useTimelineScrollEffects({
       typeof ResizeObserver === "undefined"
         ? null
         : new ResizeObserver(() => {
-            schedulePinToBottom();
+            if (pendingRestoreTop !== null) restoreScrollTop();
+            else schedulePinToBottom();
           });
     resizeObserver?.observe(el);
     if (listEl !== el) resizeObserver?.observe(listEl);
@@ -474,13 +562,19 @@ function useTimelineScrollEffects({
       typeof MutationObserver === "undefined"
         ? null
         : new MutationObserver(() => {
-            schedulePinToBottom();
+            if (pendingRestoreTop !== null) restoreScrollTop();
+            else schedulePinToBottom();
           });
     mutationObserver?.observe(listEl, { childList: true, subtree: true });
 
     // Initial alignment (also covers async-loaded history once it renders, via
     // the ResizeObserver above).
+    if (restored) {
+      stickRef.current = restored.stickToBottom;
+      onChangeRef.current?.(restored.stickToBottom);
+    }
     if (stickRef.current) pinToBottom();
+    else restoreScrollTop();
 
     return () => {
       el.removeEventListener("scroll", onScroll);
@@ -491,8 +585,15 @@ function useTimelineScrollEffects({
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
       if (pinFrame !== null) window.cancelAnimationFrame(pinFrame);
+      persistTimer?.cancel();
+      if (viewIdentity) {
+        patchSessionView(window.localStorage, viewIdentity, {
+          scrollTop: el.scrollTop,
+          stickToBottom: stickRef.current,
+        });
+      }
     };
-  }, [bottom, scroller]);
+  }, [bottom, scroller, viewKey, viewAlias]);
 
   // When the parent forces stick=true (submit, tab change, session load), snap
   // back to the bottom and clear any lingering hold.

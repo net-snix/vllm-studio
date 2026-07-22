@@ -2,16 +2,7 @@
 
 import Link from "next/link";
 import { type ComponentType } from "react";
-import {
-  Gauge,
-  Microchip,
-  HardDrive,
-  Globe,
-  Wrench,
-  MessageSquare,
-  Plug,
-  LayoutDashboard,
-} from "@/ui/icon-registry";
+import { Gauge, Microchip, Wrench, MessageSquare, LayoutDashboard } from "@/ui/icon-registry";
 
 export type IconComponent = ComponentType<{ className?: string; strokeWidth?: number }>;
 
@@ -19,11 +10,8 @@ export const tabs = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/", label: "Status", icon: Gauge },
   { href: "/agent", label: "Workbench", icon: MessageSquare },
-  { href: "/recipes", label: "Models", icon: HardDrive },
   { href: "/configure", label: "Configure", icon: Wrench },
   { href: "/usage", label: "Usage", icon: Microchip },
-  { href: "/integrations", label: "Integrations", icon: Plug },
-  { href: "/server", label: "Server", icon: Globe },
 ];
 
 export function mobilePageTitle(pathname: string): string {
@@ -45,14 +33,7 @@ export function isRouteActive(pathname: string, href: string): boolean {
 }
 
 export function routeHidesAppSidebar(pathname: string): boolean {
-  return (
-    pathname.startsWith("/setup") ||
-    pathname.startsWith("/download") ||
-    pathname.startsWith("/agents") ||
-    pathname.startsWith("/quick") ||
-    pathname.startsWith("/landing") ||
-    pathname.startsWith("/docs")
-  );
+  return pathname.startsWith("/setup") || pathname.startsWith("/quick");
 }
 
 export function ProjectsNavPlaceholder() {
@@ -107,7 +88,7 @@ export function NavItemDesktop({
       href={href}
       prefetch={false}
       title={label}
-      className={`group flex h-8 items-center gap-2.5 rounded-lg px-2 transition-colors shrink-0 ${
+      className={`group flex h-[var(--sidebar-row-height)] shrink-0 items-center gap-2.5 rounded-[var(--sidebar-row-radius)] px-2 transition-colors ${
         active ? "bg-(--active) text-(--fg)" : "text-(--fg) hover:bg-(--hover)"
       }`}
     >

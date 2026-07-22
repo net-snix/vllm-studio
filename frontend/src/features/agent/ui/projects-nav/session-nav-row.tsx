@@ -27,12 +27,15 @@ type SessionNavRowProps = {
   rowClass: string;
   renameRowClass?: string;
   href?: string;
-  onOpen?: () => void;
+  onOpen?: (href: string) => void;
   onPatchPref: (patch: SessionPref) => void;
   onArchive?: () => void;
   onRenameCommit?: (title: string) => void;
   onRememberTitle?: () => void;
   onDragStart: (event: DragEvent) => void;
+  onDragEnd?: () => void;
+  onDragOver?: (event: DragEvent) => void;
+  onDrop?: (event: DragEvent) => void;
   onContextMenu?: boolean;
   isRunning?: boolean;
   unseen?: boolean;
@@ -55,6 +58,9 @@ export function SessionNavRow({
   onRenameCommit,
   onRememberTitle,
   onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
   onContextMenu = false,
   isRunning = false,
   unseen = false,
@@ -105,6 +111,9 @@ export function SessionNavRow({
     <div
       className={`${rowClass} ${menuOpen ? "z-[900]" : "z-0"}`}
       onContextMenu={handleContextMenu}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
     >
       <SessionOpenTarget
         age={age}
@@ -118,7 +127,31 @@ export function SessionNavRow({
         onRememberTitle={onRememberTitle}
         onStartRename={startRename}
       />
-      <div ref={menuRef} className="absolute right-1 top-1/2 z-20 -translate-y-1/2 shrink-0">
+      <div
+        ref={menuRef}
+        className="absolute right-1 top-1/2 z-20 flex -translate-y-1/2 shrink-0 items-center gap-0.5"
+      >
+        <button
+          type="button"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onPatchPref({ pinned: !pref.pinned });
+          }}
+          className={`inline-flex h-6 w-6 items-center justify-center rounded-md text-(--dim) transition-[opacity,color,background-color] hover:bg-(--hover) hover:text-(--fg) ${
+            menuOpen
+              ? "pointer-events-auto opacity-100"
+              : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
+          }`}
+          aria-label={pref.pinned ? "Unpin session" : "Pin session"}
+          title={pref.pinned ? "Unpin" : "Pin"}
+        >
+          {pref.pinned ? (
+            <PinOff className="pointer-events-none h-3.5 w-3.5" />
+          ) : (
+            <Pin className="pointer-events-none h-3.5 w-3.5" />
+          )}
+        </button>
         <button
           type="button"
           onClick={(event) => {
@@ -208,7 +241,7 @@ function SessionOpenTarget({
   unseen: boolean;
   label: string;
   onDragStart: (event: DragEvent) => void;
-  onOpen?: () => void;
+  onOpen?: (href: string) => void;
   onRememberTitle?: () => void;
   onStartRename: () => void;
 }) {
@@ -235,11 +268,12 @@ function SessionOpenTarget({
           onRememberTitle?.();
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          onOpen?.();
-          navigateToSessionHref(router, hrefWithOpenNonce(href));
+          const targetHref = hrefWithOpenNonce(href);
+          onOpen?.(targetHref);
+          navigateToSessionHref(router, targetHref);
         }}
         onDragStart={onDragStart}
-        className="flex min-w-0 flex-1 items-center gap-1"
+        className="flex min-w-0 flex-1 items-center gap-1 pr-14"
         {...openProps}
       >
         {content}
@@ -254,10 +288,10 @@ function SessionOpenTarget({
       onDragStart={onDragStart}
       onClick={() => {
         onRememberTitle?.();
-        onOpen?.();
+        onOpen?.("");
       }}
       aria-label={label}
-      className="flex min-w-0 flex-1 items-center gap-1 text-left"
+      className="flex min-w-0 flex-1 items-center gap-1 pr-14 text-left"
       {...openProps}
     >
       {content}
@@ -278,22 +312,20 @@ function SessionRowContent({
 }) {
   return (
     <>
-      {isRunning ? (
-        <Spinner size="xs" className="shrink-0 text-(--link)" />
-      ) : unseen ? (
-        <span
-          className="h-1.5 w-1.5 shrink-0 rounded-full bg-(--link)"
-          aria-label="Unseen activity"
-          title="Unseen activity"
-        />
-      ) : null}
       <span className="min-w-0 flex-1 truncate text-[length:var(--fs-md)] font-normal leading-5">
         {label}
       </span>
-      {age ? (
-        <span className="shrink-0 pl-1.5 pr-1 text-[length:var(--fs-sm)] text-(--hl2) transition-opacity group-hover:opacity-0">
-          {age}
-        </span>
+      {isRunning ? (
+        <Spinner
+          size="xs"
+          className="mr-1 shrink-0 text-(--link) transition-opacity group-hover:opacity-0"
+        />
+      ) : unseen ? (
+        <span
+          className="mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-(--link) transition-opacity group-hover:opacity-0"
+          aria-label="Unseen activity"
+          title="Unseen activity"
+        />
       ) : null}
     </>
   );
@@ -324,11 +356,11 @@ function SessionOptionsMenu({
 
   return (
     <div className={SESSION_MENU_CLASS} role="menu">
-      <SessionMenuItem Icon={SquarePen} onClick={run(onRename)}>
-        Rename
-      </SessionMenuItem>
       <SessionMenuItem Icon={pref.pinned ? PinOff : Pin} onClick={run(onPin)}>
         {pref.pinned ? "Unpin" : "Pin"}
+      </SessionMenuItem>
+      <SessionMenuItem Icon={SquarePen} onClick={run(onRename)}>
+        Rename
       </SessionMenuItem>
       {onArchive ? (
         <SessionMenuItem Icon={Archive} onClick={run(onArchive)}>

@@ -8,7 +8,6 @@ import { isRecord } from "@/lib/guards";
 type TranscriptStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export const TRANSCRIPT_CACHE_PREFIX = "local-studio.agent.transcript.v2.";
-const LEGACY_TRANSCRIPT_CACHE_KEY = "local-studio.agent.transcripts.v1";
 
 const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_CHARS_PER_SESSION = 512 * 1024;
@@ -74,11 +73,18 @@ function sanitizeMessage(message: ChatMessage): ChatMessage {
 }
 
 export function boundMessagesForCache(messages: ChatMessage[]): ChatMessage[] {
-  let kept = messages.slice(-MAX_MESSAGES_PER_SESSION).map(sanitizeMessage);
-  while (kept.length > 1 && JSON.stringify(kept).length > MAX_CHARS_PER_SESSION) {
-    kept = kept.slice(1);
+  const kept = messages.slice(-MAX_MESSAGES_PER_SESSION).map(sanitizeMessage);
+  // Size each message once instead of re-stringifying the whole array per trim
+  // iteration — near the cap that loop stringified ~0.5 MB repeatedly on every
+  // settled turn, on the main thread.
+  const sizes = kept.map((message) => JSON.stringify(message).length + 1);
+  let total = sizes.reduce((sum, size) => sum + size, 2);
+  let start = 0;
+  while (kept.length - start > 1 && total > MAX_CHARS_PER_SESSION) {
+    total -= sizes[start];
+    start += 1;
   }
-  return kept;
+  return start > 0 ? kept.slice(start) : kept;
 }
 
 function parseCachedTranscript(raw: string | null): CachedTranscript | null {
@@ -115,16 +121,6 @@ function evictStaleSessions(storage: TranscriptStorage, keepKey: string): void {
     .sort((a, b) => a.updatedAt - b.updatedAt);
   for (const { key } of dated.slice(0, keys.length - MAX_SESSIONS)) {
     storage.removeItem(key);
-  }
-}
-
-export function purgeLegacyTranscriptCache(
-  storage: TranscriptStorage | null = defaultStorage(),
-): void {
-  try {
-    storage?.removeItem(LEGACY_TRANSCRIPT_CACHE_KEY);
-  } catch {
-    return;
   }
 }
 

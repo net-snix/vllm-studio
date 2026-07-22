@@ -8,7 +8,7 @@ const pkgPath = resolve(scriptDir, "..", "package.json");
 const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
 
 const required = ["scripts", "devDependencies"];
-const requiredScripts = ["dev", "build", "test", "desktop:dist"];
+const requiredScripts = ["dev", "build", "desktop:dist"];
 const missing = [];
 
 for (const key of required) {

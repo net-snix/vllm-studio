@@ -1,10 +1,65 @@
 "use client";
 import dynamic from "next/dynamic";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { useCallback, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import { AgentChatPaneHeader } from "@/features/agent/ui/agent-chat-pane-header";
 import { AgentComposerFrame } from "@/features/agent/ui/agent-composer-frame";
-import { type FileMentionRow } from "@/features/agent/ui/agent-composer-context";
+import { type FileMentionRow, type MentionRow } from "@/features/agent/ui/agent-composer-context";
+import { builtinCommandProvider } from "@/features/agent/composer/builtin-commands";
+import { SessionGoalBar } from "@/features/agent/ui/session-goal-bar";
+import { SubagentChips } from "@/features/agent/ui/subagent-chips";
+import {
+  promptTemplateCommandProvider,
+  skillCommandProvider,
+} from "@/features/agent/composer/catalogue-commands";
+import {
+  createComposerCommandRegistry,
+  parseSlashInvocation,
+  type SlashInvocation,
+} from "@/features/agent/composer/command-registry";
+import { deriveComposerVisual } from "@/features/agent/composer/composer-visual-state";
+import { ADD_PROJECT_EVENT } from "@/lib/workspace-events";
+
+function diffStatPill(gitSummary: GitSummary | null | undefined, onOpenStatus: () => void) {
+  if (!gitSummary?.isRepo || gitSummary.statusCount <= 0) return null;
+  return (
+    <div className="mx-auto mb-1.5 flex w-full max-w-[var(--composer-w)] justify-center">
+      <button
+        type="button"
+        onClick={onOpenStatus}
+        className="flex items-center gap-1.5 rounded-full bg-(--fg)/[0.05] px-3 py-1 text-[length:var(--fs-sm)] tabular-nums text-(--fg)/60 transition-colors hover:bg-(--fg)/[0.08] hover:text-(--fg)/85"
+        title="Open status"
+      >
+        {gitSummary.statusCount} file{gitSummary.statusCount === 1 ? "" : "s"} changed
+        <span className="text-(--ok,#40c977)">+{gitSummary.additions}</span>
+        <span className="text-(--err)">−{gitSummary.deletions}</span>
+      </button>
+    </div>
+  );
+}
+
+function goalBarFor(piSessionId: string | null | undefined, revision: number) {
+  if (!piSessionId) return null;
+  return <SessionGoalBar piSessionId={piSessionId} revision={revision} />;
+}
+
+function piSessionIdOf(tab: { piSessionId?: string | null } | null | undefined): string | null {
+  return tab?.piSessionId ?? null;
+}
+
+function subagentChipsFor(piSessionId: string | null | undefined) {
+  if (!piSessionId) return null;
+  return <SubagentChips piSessionId={piSessionId} />;
+}
+
+function composerProjectRow(show: boolean, projectName: string | null) {
+  if (!show) return null;
+  return {
+    label: projectName ?? "Choose project",
+    onPick: () => window.dispatchEvent(new Event(ADD_PROJECT_EVENT)),
+  };
+}
 import {
   useComposerLoadedContext,
   useComposerMentionRows,
@@ -13,19 +68,27 @@ import {
   type UpdateTab,
 } from "@/features/agent/ui/chat-pane-composer";
 import { useComposerAttachments } from "@/features/agent/ui/chat-pane-composer-attachments";
-import { useComposerMentionSelection } from "@/features/agent/ui/chat-pane-composer-mention-selection";
-import { type ComposerMention } from "@/features/agent/composer-context";
+import {
+  applyContextRow,
+  useComposerMentionSelection,
+} from "@/features/agent/ui/chat-pane-composer-mention-selection";
+import {
+  consumeComposerMention,
+  type ComposerMention,
+  type ComposerPromptTemplateRef,
+  type ComposerSkillRef,
+} from "@/features/agent/composer-context";
 import {
   useChatPaneContextAttachEffect,
   useChatPaneDerivedState,
   useChatPaneMentionEffects,
   useChatPaneRuntimeHandle,
-  useChatPaneStickToBottomEffect,
 } from "@/features/agent/ui/chat-pane-hooks";
 import { useChatPaneSessionTitle } from "@/features/agent/ui/chat-pane-session-title";
 import { useChatPaneSendFlow } from "@/features/agent/ui/chat-pane-send-flow";
 import { ChatPaneHandle, SessionTab } from "@/features/agent/messages";
 import { useSessionEngine } from "@/features/agent/runtime/engine";
+import type { UpdateSession } from "@/features/agent/runtime/types";
 import { useTools } from "@/features/agent/tools/context";
 import type { GitSummary } from "@/features/agent/projects/types";
 import type { BrowserBackend } from "@/features/agent/tools/types";
@@ -44,6 +107,7 @@ import {
   usePersistentTerminalOwners,
 } from "@/features/agent/ui/use-persistent-terminal-owners";
 import { PersistentTerminals } from "@/features/agent/ui/persistent-terminals";
+import { cx } from "@/ui/utils";
 export type { ChatPaneHandle, SessionTab };
 
 const Timeline = dynamic(
@@ -83,6 +147,61 @@ function TimelineFallback() {
   return <div className="flex min-h-0 flex-1 bg-(--agent-bg)" />;
 }
 
+function chatPaneClassName(composerOnly: boolean): string {
+  return cx(
+    "relative flex min-h-0 min-w-0 flex-1 flex-col",
+    composerOnly
+      ? "bg-transparent"
+      : "bg-(--agent-bg) shadow-[inset_1px_0_rgba(255,255,255,0.015)]",
+  );
+}
+
+function ChatTranscript({
+  composerOnly,
+  terminalView,
+  showEmptyPrompt,
+  activeTab,
+  stickToBottom,
+  setStickToBottom,
+  running,
+  onForkSession,
+  loadEarlierHistory,
+}: {
+  composerOnly: boolean;
+  terminalView: boolean;
+  showEmptyPrompt: boolean;
+  activeTab: SessionTab | undefined;
+  stickToBottom: boolean;
+  setStickToBottom: (value: boolean) => void;
+  running: boolean;
+  onForkSession?: () => void;
+  loadEarlierHistory: () => Promise<void>;
+}) {
+  const viewKey = activeTab?.piSessionId ?? activeTab?.id ?? null;
+  const viewAlias = activeTab?.piSessionId ? activeTab.id : null;
+  if (composerOnly) return null;
+  return (
+    <div className={terminalView ? "hidden" : "flex min-h-0 min-w-0 flex-1"}>
+      {showEmptyPrompt ? (
+        <EmptyPromptTimeline />
+      ) : (
+        <Timeline
+          key={activeTab?.id ?? "empty"}
+          stickToBottom={stickToBottom}
+          onStickToBottomChange={setStickToBottom}
+          messages={activeTab?.messages ?? []}
+          running={running}
+          viewKey={viewKey}
+          viewAlias={viewAlias}
+          onForkSession={onForkSession}
+          hasEarlier={activeTab?.historyCursor != null}
+          onLoadEarlier={loadEarlierHistory}
+        />
+      )}
+    </div>
+  );
+}
+
 type Props = {
   paneId: string;
   modelId: string;
@@ -107,7 +226,7 @@ type Props = {
   onPiSessionIdChange?: (sessionId: string) => void;
   tabs: SessionTab[];
   activeTabId: string;
-  onTabsChange: (tabs: SessionTab[] | ((tabs: SessionTab[]) => SessionTab[])) => void;
+  onUpdateSession: UpdateSession;
   onRenameSession: (tabId: string, title: string) => void;
   onClose?: () => void;
   onForkSession?: () => void;
@@ -117,6 +236,7 @@ type Props = {
   onToggleRightPanel: () => void;
   onRegisterHandle?: (handle: ChatPaneHandle | null) => void;
   showHeader?: boolean;
+  composerOnly?: boolean;
 };
 export function ChatPane({
   paneId,
@@ -142,7 +262,7 @@ export function ChatPane({
   onPiSessionIdChange,
   tabs,
   activeTabId,
-  onTabsChange,
+  onUpdateSession,
   onRenameSession,
   onClose,
   onForkSession,
@@ -152,7 +272,9 @@ export function ChatPane({
   onToggleRightPanel,
   onRegisterHandle,
   showHeader = true,
+  composerOnly = false,
 }: Props) {
+  const router = useRouter();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastAppliedComposerHeightRef = useRef(0);
@@ -171,9 +293,6 @@ export function ChatPane({
     showEmptyPrompt,
     visibleQueueItems,
   } = useChatPaneDerivedState({ activeTabId, contextWindow, tabs });
-  // In-pane terminal: replaces the transcript+composer with a persistent PTY
-  // for this session/project. Terminals stay mounted (hidden) after toggling
-  // back so the shell keeps running; the header button flips the view.
   const [terminalView, setTerminalView] = useState(false);
   const terminalSnapshot = usePersistentTerminalOwners(
     terminalView,
@@ -197,14 +316,7 @@ export function ChatPane({
     window.addEventListener(OPEN_TERMINAL_EVENT, onOpenTerminalEvent);
     return () => window.removeEventListener(OPEN_TERMINAL_EVENT, onOpenTerminalEvent);
   }, [isFocused]);
-  const updateTab = useCallback(
-    (tabId: string, patch: (tab: SessionTab) => SessionTab) => {
-      onTabsChange((currentTabs) =>
-        currentTabs.map((tab) => (tab.id === tabId ? patch(tab) : tab)),
-      );
-    },
-    [onTabsChange],
-  );
+  const updateTab = onUpdateSession;
   const {
     attachments,
     setAttachments,
@@ -222,20 +334,10 @@ export function ChatPane({
     updateTab,
     fileInputRef,
   });
-  useChatPaneStickToBottomEffect({
-    activeTabId: activeTab?.id,
-    setStickToBottom,
-  });
   useChatPaneContextAttachEffect({
     contextAttachRequest: tools.contextAttachRequest,
     isFocused,
     setAttachments,
-  });
-  const mentionRows = useComposerMentionRows({
-    fileMentionRows,
-    mention,
-    promptTemplateRows: tools.promptTemplateCatalogue,
-    skillRows: tools.skillCatalogue,
   });
   useChatPaneMentionEffects({
     cwd,
@@ -294,6 +396,151 @@ export function ChatPane({
     updateSession: updateTab,
     selectionFor: tools.selectionFor,
   });
+  const { compacting, compactSession } = useChatPaneRuntimeHandle({
+    activeTab,
+    activeTabId,
+    engine,
+    modelId,
+    isFocused,
+    onRegisterHandle,
+    running: Boolean(running),
+  });
+  const openComputerStatus = useCallback(() => {
+    tools.setComputerTab("status");
+    tools.setComputerOpen(true);
+  }, [tools]);
+  const exportSession = useCallback(() => {
+    if (!activeTab) return;
+    const markdown = sessionToMarkdown(activeTab.messages, displayedSessionTitle);
+    downloadTextFile(exportFilenameFromTitle(displayedSessionTitle), markdown);
+  }, [activeTab, displayedSessionTitle]);
+  const canExport = Boolean(
+    activeTab?.messages.some((message) => message.role !== "system" && message.text.trim()),
+  );
+  const openTerminalAction = terminalOwner ? toggleTerminalView : onOpenTerminal;
+  const applyTemplate = useCallback(
+    (row: ComposerPromptTemplateRef) =>
+      activeTab ? applyContextRow(activeTab.id, "promptTemplate", row, tools) : Promise.resolve(),
+    [activeTab, tools],
+  );
+  const applySkill = useCallback(
+    (row: ComposerSkillRef) =>
+      activeTab ? applyContextRow(activeTab.id, "skill", row, tools) : Promise.resolve(),
+    [activeTab, tools],
+  );
+  const [goalRevision, setGoalRevision] = useState(0);
+  const activePiSessionId = piSessionIdOf(activeTab);
+  const goalAction = useCallback(
+    async (args: string): Promise<string | null> => {
+      const piSessionId = activePiSessionId;
+      if (!piSessionId) return "Send a first message, then set a goal for this session.";
+      if (!args) return "Usage: /goal <objective> — or /goal pause · resume · clear";
+      const url = `/api/agent/goal?piSessionId=${encodeURIComponent(piSessionId)}`;
+      const verb = args.split(/\s+/)[0]?.toLowerCase() ?? "";
+      try {
+        if (verb === "clear") {
+          await fetch(url, { method: "DELETE" });
+        } else if (verb === "pause" || verb === "resume") {
+          await fetch(url, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: verb === "pause" ? "paused" : "active" }),
+          });
+        } else {
+          await fetch(url, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ objective: args, status: "active", resetTurns: true }),
+          });
+        }
+        setGoalRevision((value) => value + 1);
+        return null;
+      } catch {
+        return "Failed to update the goal.";
+      }
+    },
+    [activePiSessionId],
+  );
+  const commandRegistry = useMemo(
+    () =>
+      createComposerCommandRegistry([
+        builtinCommandProvider({
+          compact: () => void compactSession(),
+          openStatus: openComputerStatus,
+          toggleBrowserTool: onToggleBrowserTool,
+          toggleCanvas: onToggleCanvas,
+          openPlugins: () => router.push("/integrations"),
+          ...(openTerminalAction ? { openTerminal: openTerminalAction } : {}),
+          ...(onForkSession ? { forkSession: onForkSession } : {}),
+          ...(canExport ? { exportSession } : {}),
+          goal: goalAction,
+        }),
+        promptTemplateCommandProvider({
+          templates: tools.promptTemplateCatalogue,
+          applyTemplate,
+        }),
+        skillCommandProvider({ skills: tools.skillCatalogue, applySkill }),
+      ]),
+    [
+      applySkill,
+      applyTemplate,
+      canExport,
+      compactSession,
+      goalAction,
+      exportSession,
+      onForkSession,
+      onToggleBrowserTool,
+      onToggleCanvas,
+      openComputerStatus,
+      openTerminalAction,
+      router,
+      tools.promptTemplateCatalogue,
+      tools.skillCatalogue,
+    ],
+  );
+  const commandContext = useMemo(
+    () => ({ running: Boolean(running), compacting }),
+    [running, compacting],
+  );
+  const commandMatches = useMemo(
+    () => (mention?.kind === "command" ? commandRegistry.match(mention.query, commandContext) : []),
+    [commandContext, commandRegistry, mention],
+  );
+  const mentionRows = useComposerMentionRows({
+    commandRows: commandMatches,
+    fileMentionRows,
+    mention,
+    skillRows: tools.skillCatalogue,
+  });
+  const runCommandInvocation = useCallback(
+    async (invocation: SlashInvocation) => {
+      if (!activeTab) return;
+      const execution = commandRegistry.execute(invocation, commandContext);
+      if (!execution) return;
+      const tabId = activeTab.id;
+      const outcome = await execution;
+      if (outcome.kind === "error") {
+        updateTab(tabId, (tab) => ({ ...tab, error: outcome.message }));
+      } else {
+        const nextInput = outcome.kind === "set-input" ? outcome.input : "";
+        updateTab(tabId, (tab) => ({ ...tab, input: nextInput, error: "" }));
+        if (!nextInput) resetComposerHeight();
+      }
+      setMention(null);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
+    [activeTab, commandContext, commandRegistry, resetComposerHeight, updateTab],
+  );
+  const handleSelectMention = useCallback(
+    (entry: MentionRow): Promise<void> => {
+      if (entry.kind === "command" && activeTab && mention) {
+        const args = consumeComposerMention(activeTab.input, mention).trim();
+        return runCommandInvocation({ name: entry.row.name, args });
+      }
+      return selectMentionRow(entry);
+    },
+    [activeTab, mention, runCommandInvocation, selectMentionRow],
+  );
   const { sendMessage, queueMessage, removeQueued, editQueued, steerQueued, abortTurn } =
     useChatPaneSendFlow({
       activeTab,
@@ -326,40 +573,51 @@ export function ChatPane({
       updateTab,
       setMention,
       setMentionIndex,
-      selectMentionRow,
+      selectMentionRow: handleSelectMention,
       queueMessage,
       abortTurn,
       attachFiles,
     });
-  const openComputerStatus = useCallback(() => {
-    tools.setComputerTab("status");
-    tools.setComputerOpen(true);
-  }, [tools]);
-  useChatPaneRuntimeHandle({
-    activeTab,
-    activeTabId,
-    engine,
-    modelId,
-    onRegisterHandle,
-    running: Boolean(running),
-  });
-  const exportSession = useCallback(() => {
-    if (!activeTab) return;
-    const markdown = sessionToMarkdown(activeTab.messages, displayedSessionTitle);
-    downloadTextFile(exportFilenameFromTitle(displayedSessionTitle), markdown);
-  }, [activeTab, displayedSessionTitle]);
-  const canExport = Boolean(
-    activeTab?.messages.some((message) => message.role !== "system" && message.text.trim()),
+  const handleComposerSubmit = useCallback(
+    (event: FormEvent) => {
+      const invocation = parseSlashInvocation(activeTab?.input ?? "");
+      if (invocation && commandRegistry.find(invocation.name, commandContext)) {
+        event.preventDefault();
+        void runCommandInvocation(invocation);
+        return;
+      }
+      void sendMessage(event);
+    },
+    [activeTab, commandContext, commandRegistry, runCommandInvocation, sendMessage],
+  );
+  const handleTranscript = useCallback(
+    (transcript: string) => {
+      if (!activeTab) return;
+      const current = activeTab.input.trimEnd();
+      const next = current ? `${current} ${transcript}` : transcript;
+      updateTab(activeTab.id, (tab) => ({ ...tab, input: next }));
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        textarea.focus();
+        textarea.setSelectionRange(next.length, next.length);
+      });
+    },
+    [activeTab, updateTab],
   );
   const loadEarlierHistory = useCallback(
     () => (activeTabId ? engine.loadEarlier(activeTabId) : Promise.resolve()),
     [activeTabId, engine],
   );
+  const composerVisual = deriveComposerVisual({
+    compacting,
+    hasMessages: (activeTab?.messages.length ?? 0) > 0,
+  });
   return (
     <section
       onMouseDownCapture={onFocus}
       data-pane-id={paneId}
-      className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--agent-bg) shadow-[inset_1px_0_rgba(255,255,255,0.015)]"
+      className={chatPaneClassName(composerOnly)}
     >
       {showHeader ? (
         <AgentChatPaneHeader
@@ -386,25 +644,24 @@ export function ChatPane({
           terminals={terminalSnapshot.owners}
         />
       </div>
-      <div className={terminalView ? "hidden" : "flex min-h-0 min-w-0 flex-1"}>
-        {showEmptyPrompt ? (
-          <EmptyPromptTimeline />
-        ) : (
-          <Timeline
-            key={activeTab?.id ?? "empty"}
-            stickToBottom={stickToBottom}
-            onStickToBottomChange={setStickToBottom}
-            messages={activeTab?.messages ?? []}
-            running={Boolean(running)}
-            onForkSession={onForkSession}
-            hasEarlier={activeTab?.historyCursor != null}
-            onLoadEarlier={loadEarlierHistory}
-          />
-        )}
-      </div>
+      <ChatTranscript
+        composerOnly={composerOnly}
+        terminalView={terminalView}
+        showEmptyPrompt={showEmptyPrompt}
+        activeTab={activeTab}
+        stickToBottom={stickToBottom}
+        setStickToBottom={setStickToBottom}
+        running={Boolean(running)}
+        onForkSession={onForkSession}
+        loadEarlierHistory={loadEarlierHistory}
+      />
       <div className={terminalView ? "hidden" : "contents"}>
+        {diffStatPill(gitSummary, openComputerStatus)}
+        {subagentChipsFor(activePiSessionId)}
+        {goalBarFor(activePiSessionId, goalRevision)}
         <AgentComposerFrame
           attachments={attachments}
+          banner={composerVisual.banner}
           browserToolEnabled={browserToolEnabled}
           browserBackend={browserBackend}
           canvasEnabled={canvasEnabled}
@@ -436,12 +693,15 @@ export function ChatPane({
           onRemoveAttachment={removeAttachment}
           onRemoveLoadedContext={removeLoadedContext}
           onRemoveQueued={removeQueued}
-          onSelectMention={(entry) => void selectMentionRow(entry)}
+          onSelectMention={(entry) => void handleSelectMention(entry)}
           onSteerQueued={(queueId) => void steerQueued(queueId)}
-          onSubmit={sendMessage}
+          onSubmit={handleComposerSubmit}
+          onTranscript={handleTranscript}
           onToggleBrowserBackend={onToggleBrowserBackend}
           onToggleBrowserTool={onToggleBrowserTool}
           onToggleCanvas={onToggleCanvas}
+          placeholder={composerVisual.placeholder}
+          projectRow={composerProjectRow(composerVisual.showProjectRow, projectName)}
           promptTemplates={selectedPromptTemplates}
           queueExpanded={queueExpanded}
           queueItems={visibleQueueItems}
@@ -450,6 +710,8 @@ export function ChatPane({
           selectedSkills={selectedSkills}
           status={activeTab?.status}
           textareaRef={textareaRef}
+          floating={composerOnly}
+          dense={!showHeader && !composerOnly}
         />
       </div>
     </section>

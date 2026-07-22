@@ -6,6 +6,7 @@ import {
 import type { AgentModel, WorkspaceAction, WorkspaceState } from "@/features/agent/workspace/types";
 import {
   applyUrlNavigation,
+  claimCanonicalSession,
   closePane,
   focusPane,
   focusPaneSession,
@@ -17,6 +18,7 @@ import {
   splitTabIntoNewPane,
   renameTab,
 } from "@/features/agent/workspace/pane-controller";
+import { updateSessionDrafts } from "@/features/agent/workspace/session-drafts";
 
 function chooseModelId(
   models: AgentModel[],
@@ -137,15 +139,13 @@ function reduceSessionEditAction(
     case "removeDetachedSession":
       return { ...state, sessions: removeSession(state.sessions, action.sessionId) };
     case "patchSession":
-      return {
-        ...state,
-        sessions: patchSessionInMap(state.sessions, action.sessionId, action.patch),
-      };
+      return patchWorkspaceSession(state, action.sessionId, action.patch);
     case "patchActiveTab":
       return patchActiveTab(state, { paneId: action.paneId, patch: action.patch });
     case "urlNavRequested": {
       const next = applyUrlNavigation(state, {
         key: action.key,
+        intent: action.intent,
         project: action.project,
         sessionId: action.sessionId,
         sessionTitle: action.sessionTitle,
@@ -162,6 +162,26 @@ function reduceSessionEditAction(
     default:
       return null;
   }
+}
+
+function patchWorkspaceSession(
+  state: WorkspaceState,
+  sessionId: string,
+  patch: Extract<WorkspaceAction, { type: "patchSession" }>["patch"],
+): WorkspaceState {
+  const before = state.sessions.get(sessionId);
+  if (!before) return state;
+  const sessions = patchSessionInMap(state.sessions, sessionId, patch);
+  const after = sessions.get(sessionId);
+  if (!after || after === before) return state;
+  return claimCanonicalSession(
+    {
+      ...state,
+      sessions,
+      sessionDrafts: updateSessionDrafts(state.sessionDrafts, before, after),
+    },
+    after,
+  );
 }
 
 export function reducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {

@@ -3,7 +3,9 @@
 Local Studio is a local-first workstation for running, managing, and using
 self-hosted LLM backends. One machine can launch models, watch GPU/runtime
 state, chat with OpenAI-compatible endpoints, and run agent sessions against
-local or remote controllers.
+local or remote controllers. Version 2.0 unifies day-to-day operation around
+Status, Workbench, Configure, and Usage instead of separate model, integration,
+and server surfaces.
 
 It is built from two modules that share one controller API:
 
@@ -21,8 +23,8 @@ It is built from two modules that share one controller API:
   OpenAI-compatible proxy (chat, models, tokenization, audio), system state
   (GPU metrics, logs, usage, settings, SSE), and controller integrations.
 - [`frontend/`](frontend/README.md) — Next.js 16 + React 19 UI and the macOS
-  Electron desktop shell. Hosts `/agent` (Pi coding agent runtime), settings,
-  usage, recipes, logs, and the browser-facing API routes.
+  Electron desktop shell. Hosts the Workbench (`/agent`), consolidated
+  Configure surface, settings, usage, logs, and browser-facing API routes.
 
 ## What is a controller?
 
@@ -52,9 +54,9 @@ flowchart LR
 flowchart TB
     subgraph Frontend["frontend/"]
         AgentPage["/agent"]
-        Settings["/settings and controller config"]
+        Configure["/configure"]
+        Settings["/settings"]
         Usage["/usage"]
-        Recipes["/recipes"]
         ProxyRoutes["/api/* proxy and agent routes"]
         DesktopMain["desktop/ Electron shell"]
     end
@@ -82,7 +84,7 @@ flowchart TB
 
 ## Quick start
 
-Prerequisites: Bun 1.x (controller), Node.js 20+ and npm (frontend),
+Prerequisites: Bun 1.x (controller), Node.js 22.19+ and npm (frontend),
 Python 3.10+ on `PATH` (`uv` strongly recommended; engine installs fall back to
 pip), Git. vLLM/SGLang serving on Linux needs NVIDIA driver + CUDA; Apple
 Silicon uses the MLX backend.
@@ -130,8 +132,8 @@ Recipes launch through the controller runtime layer. Wired backend families:
 - `llamacpp` — llama.cpp `llama-server` recipes for GGUF models.
 - `mlx` — MLX `mlx_lm.server` recipes for Apple Silicon.
 
-Runtime target discovery is surfaced in Settings; selections persist in the
-controller data directory.
+Runtime target discovery, models, integrations, and server controls are
+surfaced in Configure; selections persist in the controller data directory.
 
 ## Production
 
@@ -171,13 +173,13 @@ REMOTE_PATH=/home/user/project
 ./scripts/deploy-remote.sh status       # inspect remote processes
 ```
 
-Local daemon helper: `./scripts/daemon.sh {start|stop|status}`.
+Local daemon helper: `./scripts/daemon.sh {start|stop|status}`. The controller installer registers a persistent user service automatically (`launchd` on macOS and `systemd --user` on Linux), so installed controllers return after login without a manual daemon command.
 
 ## Validation
 
 ```bash
-npm run check        # contracts + structure + frontend quality + controller typecheck
-npm run test:integration   # controller integration + frontend regression suites
+npm run check
+npm run test:integration
 ```
 
 The configured pre-push hook (`.githooks/pre-push`) checks conventional commits
@@ -186,11 +188,28 @@ before pushing.
 
 ## Releases
 
-Releases are automated. Pushing conventional commits to `main` triggers the
-`release.yml` workflow, which runs semantic-release (`release.config.cjs`): it
-analyzes commits since the last tag, cuts the next tag (`feat` → minor, others
-→ patch, breaking → major), and publishes a GitHub Release with generated notes.
-There is no npm publish (private monorepo, protected `main`). Do not tag by hand.
+Pushing conventional commits to `main` triggers `release.yml`. Semantic Release
+analyzes commits since the last tag, cuts the next tag (`feat` → minor, other
+release types → patch, breaking → major), and publishes generated notes. There
+is no npm publish and tags are never created by hand.
+
+The public macOS build is produced on a Developer ID-equipped Mac. Stage the
+signed DMG, updater ZIP, blockmaps, metadata, and stable website alias after the
+build completes:
+
+```bash
+npm --prefix frontend run desktop:dist
+npm run release:stage-desktop
+gh release upload "v$(node -p 'require("./frontend/package.json").version')" release-staging/*
+```
+
+Run `APPLE_KEYCHAIN_PROFILE=vllm-studio-notarize npm --prefix frontend run
+desktop:dist:notarized` when the Apple developer team has an active distribution
+agreement. Electron Builder then submits and staples the notarization ticket
+before creating the archives.
+
+Remove `frontend/dist-desktop/` and `release-staging/` after installation and
+upload; neither directory belongs in git.
 
 ## Contributing
 

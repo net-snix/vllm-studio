@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { Effect } from "effect";
 import { listLogFiles, resolveExistingLogPath, tailFileLines } from "../../core/log-files";
 import type { AppContext } from "../../app-context";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
@@ -79,55 +80,65 @@ export const parseDs4ThroughputFromLines = (lines: string[]): RuntimeThroughputS
 
 export const findRunningRecipeForProcess = (
   context: Pick<AppContext, "stores">,
-  current: ProcessInfo
-): Recipe | null => {
-  const recipes = context.stores.recipeStore.list();
-  return (
-    recipes.find((recipe) =>
-      isRecipeRunning(recipe, current, {
-        allowCurrentContainsRecipePath: true,
-      })
-    ) ?? null
+  current: ProcessInfo,
+): Effect.Effect<Recipe | null, unknown> =>
+  context.stores.recipeStore.list().pipe(
+    Effect.map(
+      (recipes) =>
+        recipes.find((recipe) =>
+          isRecipeRunning(recipe, current, {
+            allowCurrentContainsRecipePath: true,
+          }),
+        ) ?? null,
+    ),
   );
-};
 
 const resolveRuntimeLogPath = (
   context: Pick<AppContext, "config" | "stores">,
-  current: ProcessInfo
-): string | null => {
-  const recipe = findRunningRecipeForProcess(context, current);
-  const recipeLogPath = recipe ? resolveExistingLogPath(context.config.data_dir, recipe.id) : null;
-  if (recipeLogPath) return recipeLogPath;
+  current: ProcessInfo,
+): Effect.Effect<string | null, unknown> =>
+  Effect.gen(function* () {
+    const recipe = yield* findRunningRecipeForProcess(context, current);
+    const recipeLogPath = yield* Effect.sync(() =>
+      recipe ? resolveExistingLogPath(context.config.data_dir, recipe.id) : null,
+    );
+    if (recipeLogPath) return recipeLogPath;
 
-  const servedName = (current.served_model_name ?? "").toLowerCase();
-  const modelBaseName = current.model_path ? basename(current.model_path).toLowerCase() : "";
-  const entries = listLogFiles(context.config.data_dir).filter(
-    (entry) => entry.sessionId !== "controller"
-  );
-  const byName =
-    servedName.length > 0
-      ? entries.find((entry) => entry.sessionId.toLowerCase().includes(servedName))
-      : null;
-  const byModel =
-    modelBaseName.length > 0
-      ? entries.find((entry) => entry.sessionId.toLowerCase().includes(modelBaseName))
-      : null;
+    const servedName = (current.served_model_name ?? "").toLowerCase();
+    const modelBaseName = current.model_path ? basename(current.model_path).toLowerCase() : "";
+    const entries = (yield* Effect.try({
+      try: () => listLogFiles(context.config.data_dir),
+      catch: (error) => error,
+    })).filter((entry) => entry.sessionId !== "controller");
+    const byName =
+      servedName.length > 0
+        ? entries.find((entry) => entry.sessionId.toLowerCase().includes(servedName))
+        : null;
+    const byModel =
+      modelBaseName.length > 0
+        ? entries.find((entry) => entry.sessionId.toLowerCase().includes(modelBaseName))
+        : null;
 
-  return byName?.path ?? byModel?.path ?? entries[0]?.path ?? null;
-};
+    return byName?.path ?? byModel?.path ?? entries[0]?.path ?? null;
+  });
 
 const scrapeLogThroughput = (
   context: Pick<AppContext, "config" | "stores">,
   current: ProcessInfo,
-  parser: (lines: string[]) => RuntimeThroughputSample | null
-): RuntimeThroughputSample | null => {
-  const logPath = resolveRuntimeLogPath(context, current);
-  if (!logPath) return null;
-  return parser(tailFileLines(logPath, LOG_TAIL_LINES));
-};
+  parser: (lines: string[]) => RuntimeThroughputSample | null,
+): Effect.Effect<RuntimeThroughputSample | null, unknown> =>
+  Effect.gen(function* () {
+    const logPath = yield* resolveRuntimeLogPath(context, current);
+    if (!logPath) return null;
+    const lines = yield* Effect.try({
+      try: () => tailFileLines(logPath, LOG_TAIL_LINES),
+      catch: (error) => error,
+    });
+    return parser(lines);
+  });
 
 export const scrapeDs4Throughput = (
   context: Pick<AppContext, "config" | "stores">,
-  current: ProcessInfo
-): RuntimeThroughputSample | null =>
+  current: ProcessInfo,
+): Effect.Effect<RuntimeThroughputSample | null, unknown> =>
   scrapeLogThroughput(context, current, parseDs4ThroughputFromLines);

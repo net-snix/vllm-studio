@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { runCommand } from "../../../core/command";
+import { realProcessRunner, type CommandResult } from "../../../core/command";
 import type { DashboardDisk, LinuxDashboardHealth } from "./linux-dashboard-types";
 
 const GIB = 1024 ** 3;
@@ -13,6 +13,9 @@ type DiskTarget = {
 
 const DEFAULT_DISKS: DiskTarget[] = [{ path: "/", label: "root" }];
 
+const runDashboardCommand = (command: string, args: string[], timeoutMs: number): CommandResult =>
+  realProcessRunner.runSync(command, args, { timeoutMs });
+
 type DiskIdentity = {
   device: string | null;
   device_model: string | null;
@@ -22,12 +25,16 @@ type DiskIdentity = {
 };
 
 const getFilesystemType = (pathValue: string): string | null => {
-  const result = runCommand("findmnt", ["-T", pathValue, "-no", "FSTYPE"], 1_000);
+  const result = runDashboardCommand("findmnt", ["-T", pathValue, "-no", "FSTYPE"], 1_000);
   return result.status === 0 && result.stdout ? result.stdout.split("\n")[0]?.trim() || null : null;
 };
 
 const getMountIdentity = (pathValue: string): DiskIdentity => {
-  const result = runCommand("findmnt", ["-T", pathValue, "-no", "SOURCE,FSTYPE,TARGET"], 1_000);
+  const result = runDashboardCommand(
+    "findmnt",
+    ["-T", pathValue, "-no", "SOURCE,FSTYPE,TARGET"],
+    1_000,
+  );
   if (result.status !== 0 || !result.stdout) {
     return {
       device: null,
@@ -50,14 +57,14 @@ const getMountIdentity = (pathValue: string): DiskIdentity => {
 };
 
 const getBlockIdentity = (
-  source: string | undefined
+  source: string | undefined,
 ): Pick<DiskIdentity, "device_model" | "device_size"> => {
   if (!source?.startsWith("/dev/")) return { device_model: null, device_size: null };
 
-  const parent = runCommand("lsblk", ["-no", "PKNAME", source], 1_000);
+  const parent = runDashboardCommand("lsblk", ["-no", "PKNAME", source], 1_000);
   const parentName = parent.status === 0 ? parent.stdout.split("\n")[0]?.trim() : "";
   const blockDevice = parentName ? `/dev/${parentName}` : source;
-  const info = runCommand("lsblk", ["-dn", "-o", "MODEL,SIZE", blockDevice], 1_000);
+  const info = runDashboardCommand("lsblk", ["-dn", "-o", "MODEL,SIZE", blockDevice], 1_000);
   if (info.status !== 0 || !info.stdout) return { device_model: null, device_size: null };
 
   const parts = info.stdout.trim().split(/\s+/).filter(Boolean);
@@ -75,7 +82,7 @@ const collectDisk = (pathValue: string, label: string): DashboardDisk => {
     return missingDisk(pathValue, label, "critical");
   }
 
-  const result = runCommand("df", ["-P", "-k", pathValue], 1_500);
+  const result = runDashboardCommand("df", ["-P", "-k", pathValue], 1_500);
   if (result.status !== 0 || !result.stdout) {
     return missingDisk(pathValue, label, "unknown");
   }
@@ -107,7 +114,7 @@ const collectDisk = (pathValue: string, label: string): DashboardDisk => {
 
 export const collectDisks = (): DashboardDisk[] =>
   parseDiskTargets(process.env["VLLM_STUDIO_DASHBOARD_DISKS"]).map(({ path, label }) =>
-    collectDisk(path, label)
+    collectDisk(path, label),
   );
 
 /**
@@ -125,7 +132,10 @@ export function parseDiskTargets(value: string | undefined): DiskTarget[] {
     .map((entry) => {
       const separator = entry.indexOf(":");
       if (separator === -1) {
-        return { path: entry, label: entry === "/" ? "root" : entry.split("/").filter(Boolean).at(-1) ?? entry };
+        return {
+          path: entry,
+          label: entry === "/" ? "root" : (entry.split("/").filter(Boolean).at(-1) ?? entry),
+        };
       }
 
       const label = entry.slice(0, separator).trim();
@@ -148,7 +158,7 @@ export function parseDiskTargets(value: string | undefined): DiskTarget[] {
 function missingDisk(
   pathValue: string,
   label: string,
-  status: LinuxDashboardHealth
+  status: LinuxDashboardHealth,
 ): DashboardDisk {
   return {
     path: pathValue,

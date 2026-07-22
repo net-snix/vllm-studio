@@ -42,18 +42,17 @@ export type { RefreshButtonProps } from "./refresh-button";
 export { Table, THead, TBody, TRow, TH, TCell } from "./table";
 export type { TableProps, THeadProps, TBodyProps, TRowProps, THProps, TCellProps } from "./table";
 
-export { AppPage, PageContainer, PageHeader, SectionNav, RefreshIconButton } from "./page";
+export {
+  AppPage,
+  PageContainer,
+  PageHeader,
+  SectionNav,
+  RefreshIconButton,
+  TabbedPage,
+} from "./page";
 export type { SectionNavItem, PageWidth } from "./page";
 
-export {
-  ListGroup,
-  ListRow,
-  RowDetailLine,
-  RowFacts,
-  RowValue,
-  EmptySafeNotice,
-  KeyValueRow,
-} from "./list";
+export { ListRow, RowDetailLine, RowFacts, RowValue, EmptySafeNotice, KeyValueRow } from "./list";
 export type { RowFact } from "./list";
 
 export { Slider } from "./slider";

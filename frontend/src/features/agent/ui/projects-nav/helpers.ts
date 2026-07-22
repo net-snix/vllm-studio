@@ -2,7 +2,7 @@ import type { DragEvent } from "react";
 import { safeJson } from "@/features/agent/safe-json";
 import { cleanSessionTitle } from "@/features/agent/messages/helpers";
 import {
-  patchSessionPref,
+  patchCanonicalSessionPref,
   type SessionPref,
   type SessionPrefs,
 } from "@/features/agent/messages/prefs";
@@ -11,6 +11,15 @@ import type { Project as ProjectEntry } from "@/features/agent/projects/types";
 import type { ActiveAgentSession } from "./types";
 
 const SESSION_NAV_TITLE_PREFIX = "local-studio.agent.sessionNavTitle:";
+let lastNavigationTimestamp = 0;
+let navigationSequence = 0;
+
+function nextNavigationIntent(): string {
+  const timestamp = Date.now();
+  navigationSequence = timestamp === lastNavigationTimestamp ? navigationSequence + 1 : 0;
+  lastNavigationTimestamp = timestamp;
+  return `${timestamp.toString(36)}.${navigationSequence.toString(36)}`;
+}
 
 export function setAgentSessionDragData(
   event: DragEvent,
@@ -31,7 +40,11 @@ export function setAgentSessionDragData(
 }
 
 function activeSessionPrefKeys(session: Pick<ActiveAgentSession, "threadId" | "id">): string[] {
-  return [session.threadId, session.id].filter((value): value is string => Boolean(value));
+  return [session.id, session.threadId].filter((value): value is string => Boolean(value));
+}
+
+function activeSessionPrimaryPrefKey(session: ActiveAgentSession): string {
+  return session.threadId ?? `tab:${session.paneId}:${session.id}`;
 }
 
 export function mergeActiveSessionPref(
@@ -50,7 +63,9 @@ export function mergeActiveSessionPref(
 }
 
 export function patchActiveSessionPref(session: ActiveAgentSession, patch: SessionPref) {
-  for (const key of activeSessionPrefKeys(session)) patchSessionPref(key, patch);
+  const primary = activeSessionPrimaryPrefKey(session);
+  const aliases = [...activeSessionPrefKeys(session), `tab:${session.paneId}:${session.id}`];
+  patchCanonicalSessionPref(primary, aliases, patch);
 }
 
 export function relativeAge(value?: string | null): string {
@@ -74,7 +89,7 @@ export function triggerAddProjectFlow() {
 
 export function hrefWithOpenNonce(href: string): string {
   const separator = href.includes("?") ? "&" : "?";
-  return `${href}${separator}open=${Date.now().toString(36)}`;
+  return `${href}${separator}open=${nextNavigationIntent()}`;
 }
 
 export function navigateToSessionHref(

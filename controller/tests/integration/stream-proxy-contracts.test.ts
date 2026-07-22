@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import type { AppContext } from "../../src/app-context";
 
-import { collectSseJson, createTestHarness, registerControllerTestLifecycle } from "./fixtures";
-
-registerControllerTestLifecycle();
+import { collectSseJson } from "./fixtures";
 
 describe("controller route contracts", () => {
   test("stream proxy keeps heartbeats alive after the first upstream chunk", async () => {
@@ -29,7 +28,6 @@ describe("controller route contracts", () => {
     globalThis.fetch = async () =>
       new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } });
     try {
-      const { context } = await createTestHarness();
       const response = buildChatCompletionsStreamResponse({
         upstreamUrl: "http://upstream.test/v1/chat/completions",
         headers: {},
@@ -43,7 +41,10 @@ describe("controller route contracts", () => {
         requestStart: performance.now(),
         requestProvider: "local",
         providerRouting: null,
-        context,
+        context: {
+          logger: { error: () => undefined, warn: () => undefined },
+          stores: {},
+        } as unknown as Pick<AppContext, "logger" | "stores">,
         keepaliveIntervalMs: 20,
       });
       const output = await response.text();
@@ -54,9 +55,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy keeps content with null tool_calls as answer text", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -101,7 +100,7 @@ describe("controller route contracts", () => {
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const firstEvent = events[0] as {
       choices?: Array<{ delta?: Record<string, unknown> }>;
     };
@@ -118,9 +117,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy keeps same-delta content visible when tool_calls are present", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -151,7 +148,7 @@ describe("controller route contracts", () => {
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const firstEvent = events[0] as {
       choices?: Array<{ delta?: Record<string, unknown> }>;
     };
@@ -163,9 +160,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy splits implicit thinking close tags without duplicating answer text", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -188,7 +183,7 @@ describe("controller route contracts", () => {
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const firstEvent = events[0] as {
       choices?: Array<{ delta?: Record<string, unknown> }>;
     };
@@ -201,9 +196,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy buffers split implicit thinking until the close tag arrives", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -231,7 +224,7 @@ describe("controller route contracts", () => {
     });
 
     const events = await collectSseJson(
-      createToolCallStream(upstream.getReader(), undefined, undefined, {
+      createToolCallStream(upstream, undefined, undefined, {
         bufferImplicitReasoningContent: true,
       }),
     );
@@ -248,9 +241,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy normalizes openai-compatible reasoning aliases", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -273,7 +264,7 @@ describe("controller route contracts", () => {
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const firstEvent = events[0] as {
       choices?: Array<{ delta?: Record<string, unknown> }>;
     };
@@ -301,9 +292,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy still extracts XML tool calls after stripping visible content", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -327,7 +316,7 @@ describe("controller route contracts", () => {
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const toolEvent = events.find((event) => {
       const choices = event["choices"];
       if (!Array.isArray(choices)) return false;
@@ -347,9 +336,7 @@ describe("controller route contracts", () => {
   });
 
   test("stream proxy extracts bare JSON tool lines without showing them as content", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -383,7 +370,7 @@ describe("controller route contracts", () => {
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const visibleContent = events
       .flatMap((event) =>
         Array.isArray(event["choices"])
@@ -426,9 +413,7 @@ describe("controller route contracts", () => {
   });
 
   test("tool XML parser repairs malformed JSON arguments through pi-ai", async () => {
-    const { parseToolCallsFromContent } = await import(
-      "../../src/modules/proxy/tool-call-parser"
-    );
+    const { parseToolCallsFromContent } = await import("../../src/modules/proxy/tool-call-parser");
 
     const [call] = parseToolCallsFromContent(
       `<tool_call><function=write_file><arguments>{"content":"hello
@@ -458,8 +443,9 @@ world"}</arguments></tool_call>`,
   });
 
   test("tool XML parser extracts shorthand bash blocks", async () => {
-    const { parseToolCallsFromContent, stripToolCallsFromContent } =
-      await import("../../../controller/src/modules/proxy/tool-call-parser");
+    const { parseToolCallsFromContent, stripToolCallsFromContent } = await import(
+      "../../src/modules/proxy/tool-call-parser"
+    );
 
     const content = "Let me check.\n<bash>curl -s http://localhost:8888</bash>";
     const [call] = parseToolCallsFromContent(content);
@@ -472,9 +458,7 @@ world"}</arguments></tool_call>`,
   });
 
   test("strips orphan tool-call tags that leak from split/partial tool calls", async () => {
-    const { stripToolCallsFromContent } = await import(
-      "../../src/modules/proxy/tool-call-parser"
-    );
+    const { stripToolCallsFromContent } = await import("../../src/modules/proxy/tool-call-parser");
     // A lone closing fragment (the screenshot bug): reasoning showed "</arg_value>".
     expect(stripToolCallsFromContent("</arg_value>").trim()).toBe("");
     // A tool call split across stream deltas leaves a partial, unmatched block.
@@ -490,9 +474,7 @@ world"}</arguments></tool_call>`,
   });
 
   test("stream proxy extracts invoke XML tool calls without visible content", async () => {
-    const { createToolCallStream } = await import(
-      "../../src/modules/proxy/tool-call-stream"
-    );
+    const { createToolCallStream } = await import("../../src/modules/proxy/tool-call-stream");
     const encoder = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -516,7 +498,7 @@ world"}</arguments></tool_call>`,
       },
     });
 
-    const events = await collectSseJson(createToolCallStream(upstream.getReader()));
+    const events = await collectSseJson(createToolCallStream(upstream));
     const visibleContent = events
       .flatMap((event) =>
         Array.isArray(event["choices"])

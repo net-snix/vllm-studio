@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { ProfileFooter } from "@/features/shell/profile-footer";
 import { type MouseEvent as ReactMouseEvent } from "react";
 import {
   ChevronLeft,
@@ -112,11 +113,11 @@ export function DesktopSidebar({
                 </button>
               </div>
 
-              <nav className="flex-1 min-h-0 flex flex-col px-2.5 py-0.5 overflow-y-auto overflow-x-hidden">
+              <nav className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto px-[var(--sidebar-padding-x)] py-0.5 [contain:layout_paint]">
                 <button
                   type="button"
                   onClick={onOpenSearch}
-                  className="mb-0.5 flex h-8 shrink-0 items-center gap-2.5 rounded-lg px-2 text-(--fg) transition-colors hover:bg-(--hover)"
+                  className="mb-0.5 flex h-[var(--sidebar-row-height)] shrink-0 items-center gap-2.5 rounded-[var(--sidebar-row-radius)] px-2 text-(--fg) transition-colors hover:bg-(--hover)"
                   title="Search sessions (⌘K)"
                 >
                   <SearchIcon className="h-3.5 w-3.5 shrink-0 opacity-70" strokeWidth={1.75} />
@@ -146,27 +147,8 @@ export function DesktopSidebar({
                 ) : null}
               </nav>
 
-              <div className="shrink-0 px-2.5 py-2">
-                <Link
-                  href="/settings"
-                  prefetch={false}
-                  title="Settings"
-                  className={`group flex h-8 shrink-0 items-center gap-2.5 rounded-lg px-2 transition-colors ${
-                    isRouteActive(pathname, "/settings")
-                      ? "bg-(--active) text-(--fg)"
-                      : "text-(--fg) hover:bg-(--hover)"
-                  }`}
-                >
-                  <Settings
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      isRouteActive(pathname, "/settings") ? "opacity-90" : "opacity-70"
-                    }`}
-                    strokeWidth={1.75}
-                  />
-                  <span className="whitespace-nowrap text-[length:var(--fs-md)] font-normal">
-                    Settings
-                  </span>
-                </Link>
+              <div className="shrink-0 border-t border-(--separator) bg-(--sidebar-bg) px-[var(--sidebar-padding-x)] py-2">
+                <ProfileFooter settingsActive={isRouteActive(pathname, "/settings")} />
               </div>
             </>
           ) : null}

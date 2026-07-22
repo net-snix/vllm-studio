@@ -21,7 +21,9 @@ import {
   type WorkspaceStorage,
 } from "@/features/agent/workspace/store";
 import { writePaneState } from "@/features/agent/workspace/persistence";
+import { writeSessionDrafts } from "@/features/agent/workspace/session-drafts";
 import { writeTranscriptSnapshot } from "@/features/agent/workspace/transcript-cache";
+import { readDefaultAgentModel } from "@/features/agent/workspace/model-preference";
 import { SESSIONS_CHANGED_EVENT } from "@/lib/workspace-events";
 
 const EMPTY_SELECTION: ToolSelection = {
@@ -127,7 +129,11 @@ function runInitialApiEffects(state: WorkspaceState, deps: WorkspaceEffectDeps):
           const normalized = normalizeModelsPayload(payload);
           if (normalized.error) return yield* Effect.fail(new Error(normalized.error));
           deps.dispatch?.({ type: "setError", error: "" });
-          deps.dispatch?.({ type: "setModels", models: normalized.models });
+          deps.dispatch?.({
+            type: "setModels",
+            models: normalized.models,
+            preferredModelId: readDefaultAgentModel(deps.storage),
+          });
           if (normalized.models.length > 0) {
             deps.dispatch?.({ type: "setSetupWarning", warning: "" });
           } else {
@@ -310,6 +316,9 @@ function persistActionEffects(
   nextState: WorkspaceState,
   deps: WorkspaceEffectDeps,
 ): void {
+  if (prevState.sessionDrafts !== nextState.sessionDrafts) {
+    writeSessionDrafts(deps.storage, nextState.sessionDrafts);
+  }
   if (PANE_STATE_ACTIONS.has(action.type)) {
     writePaneState(deps.storage, nextState, deps.selectionFor);
     return;
@@ -379,6 +388,42 @@ function persistSettledTranscripts(
   }
 }
 
+function persistTurnStartTranscripts(
+  prevState: WorkspaceState,
+  nextState: WorkspaceState,
+  deps: WorkspaceEffectDeps,
+): void {
+  for (const [id, session] of nextState.sessions) {
+    if (!session.piSessionId || session.messages.length === 0) continue;
+    if (session.status !== "running" && session.status !== "starting") continue;
+    const before = prevState.sessions.get(id);
+    if (!before || before.status === session.status) continue;
+    writeTranscriptSnapshot(
+      session.piSessionId,
+      session.messages,
+      cleanSessionTitle(session.title),
+      deps.storage,
+    );
+  }
+}
+
+function persistExitedTranscripts(
+  prevState: WorkspaceState,
+  nextState: WorkspaceState,
+  deps: WorkspaceEffectDeps,
+): void {
+  for (const [id, session] of prevState.sessions) {
+    if (!session.piSessionId || session.messages.length === 0) continue;
+    if (nextState.sessions.has(id)) continue;
+    writeTranscriptSnapshot(
+      session.piSessionId,
+      session.messages,
+      cleanSessionTitle(session.title),
+      deps.storage,
+    );
+  }
+}
+
 export function runWorkspaceEffect(
   action: WorkspaceAction,
   prevState: WorkspaceState,
@@ -395,6 +440,8 @@ export function runWorkspaceEffect(
   publishWorkspaceSessions(prevState, nextState, deps);
   if (SESSIONS_CHANGED_ACTIONS.has(action.type)) {
     persistSettledTranscripts(prevState, nextState, deps);
+    persistTurnStartTranscripts(prevState, nextState, deps);
+    persistExitedTranscripts(prevState, nextState, deps);
   }
   if (
     SESSIONS_CHANGED_ACTIONS.has(action.type) &&

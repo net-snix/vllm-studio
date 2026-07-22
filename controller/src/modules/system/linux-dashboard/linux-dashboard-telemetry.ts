@@ -1,4 +1,5 @@
-import { AsyncQueue, delay } from "../../../core/async";
+import { Effect, Fiber, PubSub, Semaphore, Stream } from "effect";
+import type { Scope } from "effect";
 import type { LinuxDashboardSnapshot } from "./linux-dashboard-types";
 
 const DEFAULT_INTERVAL_MS = 1_000;
@@ -12,21 +13,41 @@ export type LinuxDashboardTelemetryOptions = {
   intervalMs?: number;
 };
 
-type SnapshotCollector = () => Promise<LinuxDashboardSnapshot>;
+type SnapshotCollector = () => Effect.Effect<LinuxDashboardSnapshot, unknown>;
+
+type TelemetrySubscription = {
+  subscription: PubSub.Subscription<LinuxDashboardTelemetryEvent>;
+  latest: LinuxDashboardSnapshot | null;
+  pubsub: PubSub.PubSub<LinuxDashboardTelemetryEvent>;
+};
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const abortEffect = (signal?: AbortSignal): Effect.Effect<void> =>
+  signal
+    ? Effect.callback<void>((resume) => {
+        if (signal.aborted) {
+          resume(Effect.void);
+          return;
+        }
+        const abort = (): void => resume(Effect.void);
+        signal.addEventListener("abort", abort, { once: true });
+        return Effect.sync(() => signal.removeEventListener("abort", abort));
+      })
+    : Effect.never;
 
 /** Long-lived dashboard telemetry publisher shared by all dashboard clients. */
 export class LinuxDashboardTelemetry {
   private readonly collectSnapshot: SnapshotCollector;
   private readonly intervalMs: number;
-  private readonly subscribers = new Set<
-    AsyncQueue<LinuxDashboardTelemetryEvent>
-  >();
+  private readonly stateLock = Semaphore.makeUnsafe(1);
+  private readonly collectionLock = Semaphore.makeUnsafe(1);
+  private events: PubSub.PubSub<LinuxDashboardTelemetryEvent> | null = null;
   private latest: LinuxDashboardSnapshot | null = null;
-  private inFlight: Promise<LinuxDashboardSnapshot> | null = null;
-  private running = false;
+  private lastCollectedAtMs = 0;
+  private subscribers = 0;
+  private loopFiber: Fiber.Fiber<void, never> | null = null;
 
   /**
    * Create a dashboard telemetry publisher.
@@ -50,14 +71,19 @@ export class LinuxDashboardTelemetry {
    * Return a fresh-enough snapshot for one-shot HTTP clients.
    * @returns Latest cached snapshot or a newly collected snapshot.
    */
-  public async getSnapshot(): Promise<LinuxDashboardSnapshot> {
-    if (this.latest) {
-      const ageMs = Date.now() - Date.parse(this.latest.collected_at);
-      if (Number.isFinite(ageMs) && ageMs < this.intervalMs * 2) {
-        return this.latest;
-      }
-    }
-    return this.collectOnce();
+  public getSnapshot(): Effect.Effect<LinuxDashboardSnapshot, unknown> {
+    const telemetry = this;
+    return this.collectionLock.withPermit(
+      Effect.gen(function* () {
+        if (
+          telemetry.latest &&
+          Date.now() - telemetry.lastCollectedAtMs < telemetry.intervalMs * 2
+        ) {
+          return telemetry.latest;
+        }
+        return yield* telemetry.collectOnce();
+      }),
+    );
   }
 
   /**
@@ -65,91 +91,107 @@ export class LinuxDashboardTelemetry {
    * @param signal Optional cancellation signal from the HTTP request.
    * @returns Async dashboard telemetry event stream.
    */
-  public async *subscribe(
-    signal?: AbortSignal,
-  ): AsyncGenerator<LinuxDashboardTelemetryEvent> {
-    const queue = new AsyncQueue<LinuxDashboardTelemetryEvent>(
-      SUBSCRIBER_QUEUE_SIZE,
+  public subscribe(signal?: AbortSignal): Stream.Stream<LinuxDashboardTelemetryEvent> {
+    const stream = Stream.unwrap(
+      Effect.acquireRelease(this.acquire(), (state) => this.release(state.pubsub)).pipe(
+        Effect.map(({ subscription, latest }) => {
+          const events = Stream.fromEffectRepeat(PubSub.take(subscription));
+          return latest
+            ? Stream.concat(
+                Stream.succeed<LinuxDashboardTelemetryEvent>({
+                  type: "snapshot",
+                  snapshot: latest,
+                }),
+                events,
+              )
+            : events;
+        }),
+      ),
     );
-    this.subscribers.add(queue);
-
-    if (this.latest) {
-      queue.push({ type: "snapshot", snapshot: this.latest });
-    }
-    this.start();
-
-    try {
-      while (!signal?.aborted) {
-        let event: LinuxDashboardTelemetryEvent;
-        try {
-          event = await queue.shift(signal);
-        } catch {
-          break;
-        }
-        yield event;
-      }
-    } finally {
-      queue.close();
-      this.subscribers.delete(queue);
-      if (this.subscribers.size === 0) {
-        this.running = false;
-      }
-    }
+    return Stream.scoped(stream).pipe(Stream.interruptWhen(abortEffect(signal)));
   }
 
-  /** Start the shared collection loop when it is not already running. */
-  private start(): void {
-    if (this.running) return;
-    this.running = true;
-    void this.runLoop();
+  /** Acquire one subscription and start the shared loop after the queue exists. */
+  private acquire(): Effect.Effect<TelemetrySubscription, never, Scope.Scope> {
+    const telemetry = this;
+    return this.stateLock.withPermit(
+      Effect.gen(function* () {
+        const pubsub =
+          telemetry.events ??
+          (yield* PubSub.sliding<LinuxDashboardTelemetryEvent>(SUBSCRIBER_QUEUE_SIZE));
+        telemetry.events = pubsub;
+        const subscription = yield* PubSub.subscribe(pubsub);
+        telemetry.subscribers += 1;
+        if (!telemetry.loopFiber) {
+          telemetry.loopFiber = yield* Effect.forkDetach(telemetry.runLoop());
+        }
+        return { subscription, latest: telemetry.latest, pubsub };
+      }),
+    );
+  }
+
+  /** Release one subscription and stop the loop after the last subscriber leaves. */
+  private release(pubsub: PubSub.PubSub<LinuxDashboardTelemetryEvent>): Effect.Effect<void> {
+    const telemetry = this;
+    return this.stateLock.withPermit(
+      Effect.gen(function* () {
+        if (telemetry.events !== pubsub) return;
+        telemetry.subscribers = Math.max(0, telemetry.subscribers - 1);
+        if (telemetry.subscribers > 0) return;
+        const fiber = telemetry.loopFiber;
+        telemetry.loopFiber = null;
+        telemetry.events = null;
+        if (fiber) yield* Fiber.interrupt(fiber);
+        yield* PubSub.shutdown(pubsub);
+      }),
+    );
   }
 
   /** Run one serialized collection loop for all active subscribers. */
-  private async runLoop(): Promise<void> {
-    while (this.running) {
-      const startedAt = Date.now();
-      try {
-        await this.collectOnce();
-      } catch {
-        // collectOnce already published the error to active subscribers.
+  private runLoop(): Effect.Effect<void> {
+    const telemetry = this;
+    return Effect.gen(function* () {
+      if (telemetry.lastCollectedAtMs > 0) {
+        const remainingMs = telemetry.intervalMs - (Date.now() - telemetry.lastCollectedAtMs);
+        if (remainingMs > 0) yield* Effect.sleep(remainingMs);
       }
-      const elapsedMs = Date.now() - startedAt;
-      await delay(Math.max(100, this.intervalMs - elapsedMs));
-    }
+      while (true) {
+        const startedAt = Date.now();
+        yield* telemetry.collectionLock
+          .withPermit(telemetry.collectOnce())
+          .pipe(Effect.catch(() => Effect.void));
+        const elapsedMs = Date.now() - startedAt;
+        yield* Effect.sleep(Math.max(100, telemetry.intervalMs - elapsedMs));
+      }
+    });
   }
 
   /** Collect one snapshot, coalescing concurrent callers. */
-  private async collectOnce(): Promise<LinuxDashboardSnapshot> {
-    if (this.inFlight) return this.inFlight;
-
-    this.inFlight = this.collectSnapshot()
-      .then((snapshot) => {
-        this.latest = snapshot;
-        this.publish({ type: "snapshot", snapshot });
-        return snapshot;
-      })
-      .catch((error: unknown) => {
-        this.publish({
+  private collectOnce(): Effect.Effect<LinuxDashboardSnapshot, unknown> {
+    const telemetry = this;
+    return this.collectSnapshot().pipe(
+      Effect.tap((snapshot) =>
+        Effect.gen(function* () {
+          telemetry.latest = snapshot;
+          telemetry.lastCollectedAtMs = Date.now();
+          yield* telemetry.publish({ type: "snapshot", snapshot });
+        }),
+      ),
+      Effect.tapError((error) =>
+        telemetry.publish({
           type: "error",
           message: errorMessage(error),
           timestamp: new Date().toISOString(),
-        });
-        throw error;
-      })
-      .finally(() => {
-        this.inFlight = null;
-      });
-
-    return this.inFlight;
+        }),
+      ),
+    );
   }
 
   /**
    * Publish a telemetry event to active subscribers.
    * @param event Telemetry event to enqueue.
    */
-  private publish(event: LinuxDashboardTelemetryEvent): void {
-    for (const subscriber of this.subscribers) {
-      subscriber.push(event);
-    }
+  private publish(event: LinuxDashboardTelemetryEvent): Effect.Effect<void> {
+    return this.events ? PubSub.publish(this.events, event).pipe(Effect.asVoid) : Effect.void;
   }
 }

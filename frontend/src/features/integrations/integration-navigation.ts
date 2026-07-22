@@ -1,4 +1,4 @@
-export const INTEGRATION_SECTION_IDS = ["plugins", "connectors", "skills"] as const;
+export const INTEGRATION_SECTION_IDS = ["plugins", "connectors", "models", "skills"] as const;
 
 export type IntegrationSectionId = (typeof INTEGRATION_SECTION_IDS)[number];
 
@@ -10,5 +10,5 @@ export function integrationSectionFromHash(hash: string): IntegrationSectionId {
 export function legacyIntegrationHref(hash: string): string | null {
   const section = hash.replace(/^#/, "");
   if (section !== "connectors" && section !== "skills") return null;
-  return `/integrations#${section}`;
+  return `/configure?integration=${section}#integrations`;
 }

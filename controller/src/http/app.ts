@@ -1,7 +1,10 @@
 import { Hono } from "hono";
 import { swaggerUI } from "@hono/swagger-ui";
 import { cors } from "hono/cors";
+import { openAPIRouteHandler } from "hono-openapi";
+import { Effect } from "effect";
 import type { AppContext } from "../app-context";
+import type { ControllerRuntime } from "../core/effect-runtime";
 import { isHttpStatus } from "../core/errors";
 import { registerEngineRoutes } from "../modules/engines/routes";
 import { registerSystemRoutes } from "../modules/system/routes";
@@ -11,7 +14,7 @@ import { registerAllProxyRoutes } from "../modules/proxy/routes";
 import { registerStudioRoutes } from "../modules/studio/routes";
 import { registerAudioRoutes } from "../modules/audio/routes";
 import { registerSpeechRoutes } from "../modules/speech/routes";
-import { createOpenApiSpec } from "./openapi-spec";
+import { documentRoute, mergeRoutes, type ControllerRouteApp } from "./route-registrar";
 import {
   createMutatingAuthMiddleware,
   createMutatingRateLimitMiddleware,
@@ -21,10 +24,29 @@ import {
   createControllerRequestObservabilityMiddleware,
   TELEMETRY_SKIP_PATHS,
 } from "./observability-middleware";
+import {
+  controllerRuntimeMiddleware,
+  effectHandler,
+  effectMiddleware,
+  type ControllerEnvironment,
+} from "./effect-handler";
 
-export const createApp = (context: AppContext): Hono => {
-  const app = new Hono();
+type ControllerApplication = ReturnType<typeof registerSystemRoutes> &
+  ReturnType<typeof registerEngineRoutes> &
+  ReturnType<typeof registerModelsRoutes> &
+  ReturnType<typeof registerStudioRoutes> &
+  ReturnType<typeof registerSpeechRoutes> &
+  ReturnType<typeof registerAudioRoutes> &
+  ReturnType<typeof registerAllProxyRoutes>;
+
+export const createApp = (
+  context: AppContext,
+  runtime: ControllerRuntime,
+): ControllerApplication => {
+  const app = new Hono<ControllerEnvironment>();
   const allowedCorsOrigins = context.config.cors_origins ?? [];
+
+  app.use("*", controllerRuntimeMiddleware(runtime));
 
   app.use(
     "*",
@@ -42,47 +64,75 @@ export const createApp = (context: AppContext): Hono => {
     }),
   );
 
-  app.use("*", async (ctx, next) => {
-    if (!TELEMETRY_SKIP_PATHS.has(ctx.req.path)) {
-      context.logger.debug(`${ctx.req.method} ${ctx.req.path}`);
-    }
-    await next();
-  });
+  app.use(
+    "*",
+    effectMiddleware((ctx, next) =>
+      Effect.sync(() => {
+        if (!TELEMETRY_SKIP_PATHS.has(ctx.req.path)) {
+          context.logger.debug(`${ctx.req.method} ${ctx.req.path}`);
+        }
+      }).pipe(
+        Effect.andThen(
+          Effect.tryPromise({
+            try: () => next(),
+            catch: (error) => error,
+          }),
+        ),
+      ),
+    ),
+  );
 
   app.use("*", createControllerRequestObservabilityMiddleware(context));
   app.use("*", createMutatingRateLimitMiddleware(context));
   app.use("*", createReadRateLimitMiddleware(context));
   app.use("*", createMutatingAuthMiddleware(context));
 
-  app.get("/health", (ctx) => ctx.json({ ok: true }));
+  const routes = mergeRoutes(
+    registerSystemRoutes(app, context),
+    registerEngineRoutes(app, context),
+    registerModelsRoutes(app, context),
+    registerStudioRoutes(app, context),
+    registerSpeechRoutes(app, context),
+    registerAudioRoutes(app, context),
+    registerAllProxyRoutes(app, context),
+    app.get(
+      "/health",
+      documentRoute,
+      effectHandler((ctx) => Effect.succeed(ctx.json({ status: "ok" }))),
+    ),
+  );
 
-  registerSystemRoutes(app, context);
-  registerEngineRoutes(app, context);
-  registerModelsRoutes(app, context);
-  registerStudioRoutes(app, context);
-  registerSpeechRoutes(app, context);
-  registerAudioRoutes(app, context);
-  registerAllProxyRoutes(app, context);
+  const documentedRoutes = mergeRoutes(
+    routes,
+    app.get(
+      "/api/spec",
+      openAPIRouteHandler(routes as ControllerRouteApp, {
+        includeEmptyPaths: true,
+        exclude: ["/*", "/api/spec", "/api/docs"],
+        documentation: {
+          info: {
+            title: "Local Studio API",
+            version: "2.0.0",
+            description: "Model lifecycle management for local and remote inference runtimes",
+          },
+          servers: [
+            {
+              url: `http://localhost:${context.config.port}`,
+              description: "Local Studio controller",
+            },
+          ],
+        },
+      }),
+    ),
+    app.get("/api/docs", swaggerUI({ url: "/api/spec" })),
+  );
 
-  app.get("/health", (ctx) => ctx.json({ status: "ok" }));
+  documentedRoutes.notFound((ctx) => ctx.json({ detail: "Not Found" }, { status: 404 }));
 
-  // OpenAPI documentation endpoints
-  app.get("/api/spec", (ctx) => ctx.json(createOpenApiSpec(context)));
-
-  app.get("/api/docs", swaggerUI({ url: "/api/spec" }));
-
-  app.notFound((ctx) => ctx.json({ detail: "Not Found" }, { status: 404 }));
-
-  app.onError((error, ctx) => {
+  documentedRoutes.onError((error, ctx) => {
     if (isHttpStatus(error)) {
-      return ctx.json({ detail: error.detail }, { status: error.status });
+      return Response.json({ detail: error.detail }, { status: error.status });
     }
-    // Client-initiated disconnects (stream cancel, page close, Droid
-    // cancelling an in-flight request to start a new turn) are not our
-    // bug. They must NEVER surface as 500 "Internal Server Error" or log
-    // as "Unhandled error". The client's socket is already closed so the
-    // response body will never reach them anyway; emit a terminal 499
-    // (client closed request) and move on.
     const name = (error as { name?: string })?.name ?? "";
     const message = String(error);
     if (
@@ -99,11 +149,11 @@ export const createApp = (context: AppContext): Hono => {
         method: ctx.req.method,
         path: ctx.req.path,
       });
-      return ctx.body(null, { status: 499 });
+      return new Response(null, { status: 499 });
     }
     context.logger.error("Unhandled error", { error: message });
     return ctx.json({ detail: "Internal Server Error" }, { status: 500 });
   });
 
-  return app;
+  return documentedRoutes as ControllerApplication;
 };

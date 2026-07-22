@@ -1,4 +1,4 @@
-import { resolveBinary, runCommand } from "../../../core/command";
+import { realProcessRunner, resolveBinary, type CommandResult } from "../../../core/command";
 
 export type LactMemoryTemperature = {
   value: number | null;
@@ -19,9 +19,15 @@ const LACT_TIMEOUT_MS = 2_000;
 const LACT_CACHE_TTL_MS = 5_000;
 let lactCache: { value: LactMemoryTemperatureLookup; collectedAt: number } | null = null;
 
+const runDashboardCommand = (command: string, args: string[], timeoutMs: number): CommandResult =>
+  realProcessRunner.runSync(command, args, { timeoutMs });
+
 export const normalizePciBusId = (pciBusId: string | null | undefined): string | null => {
   if (!pciBusId) return null;
-  const match = pciBusId.trim().toLowerCase().match(/([0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])$/);
+  const match = pciBusId
+    .trim()
+    .toLowerCase()
+    .match(/([0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])$/);
   return match?.[1] ?? null;
 };
 
@@ -30,7 +36,7 @@ export const parseLactGpuList = (stdout: string): LactGpuEntry[] =>
     .split("\n")
     .map((line) => {
       const match = line.match(
-        /^(\d+):\s+.*-([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])\s+\(/
+        /^(\d+):\s+.*-([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])\s+\(/,
       );
       const pciBusId = normalizePciBusId(match?.[2]);
       if (!match || !pciBusId) return null;
@@ -62,10 +68,14 @@ const collectLactMemoryTemperaturesUncached = (): LactMemoryTemperatureLookup =>
     };
   }
 
-  const listResult = runCommand(lact, ["cli", "list"], LACT_TIMEOUT_MS);
+  const listResult = runDashboardCommand(lact, ["cli", "list"], LACT_TIMEOUT_MS);
   if (listResult.status !== 0) {
     return {
-      unavailableReason: commandFailureReason("LACT GPU list failed", listResult.stderr, listResult.stdout),
+      unavailableReason: commandFailureReason(
+        "LACT GPU list failed",
+        listResult.stderr,
+        listResult.stdout,
+      ),
       byPciBus: new Map(),
     };
   }
@@ -74,11 +84,19 @@ const collectLactMemoryTemperaturesUncached = (): LactMemoryTemperatureLookup =>
   const byPciBus = new Map<string, LactMemoryTemperature>();
 
   for (const entry of entries) {
-    const statsResult = runCommand(lact, ["cli", "-g", String(entry.lactIndex), "stats"], LACT_TIMEOUT_MS);
+    const statsResult = runDashboardCommand(
+      lact,
+      ["cli", "-g", String(entry.lactIndex), "stats"],
+      LACT_TIMEOUT_MS,
+    );
     if (statsResult.status !== 0) {
       byPciBus.set(entry.pciBusId, {
         value: null,
-        unavailableReason: commandFailureReason("LACT GPU stats failed", statsResult.stderr, statsResult.stdout),
+        unavailableReason: commandFailureReason(
+          "LACT GPU stats failed",
+          statsResult.stderr,
+          statsResult.stdout,
+        ),
       });
       continue;
     }
@@ -86,7 +104,8 @@ const collectLactMemoryTemperaturesUncached = (): LactMemoryTemperatureLookup =>
     const value = parseLactVramTemperature(statsResult.stdout);
     byPciBus.set(entry.pciBusId, {
       value,
-      unavailableReason: value === null ? "LACT did not report VRAM temperature for this GPU." : null,
+      unavailableReason:
+        value === null ? "LACT did not report VRAM temperature for this GPU." : null,
     });
   }
 
