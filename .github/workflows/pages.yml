@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'sybil-solutions/local-studio'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,6 +26,7 @@ jobs:
           path: site
 
   deploy:
+    if: github.repository == 'sybil-solutions/local-studio'
     needs: build
     runs-on: ubuntu-latest
     permissions:
